@@ -1,0 +1,22 @@
+G1 SESSION KIT — SIX STEPS
+
+Use the Linux computer / Python environment that already talks to the G1.
+In this folder: bash OPEN_APP.sh
+Keep its terminal open. If needed, open the exact link it prints.
+
+1. CHECK CONNECTION → wait for live G1 state.
+2. NAME THE RUN → policy, operator, task and success definition.
+3. START RECORDING → wait for green RECORDING, then run the policy normally.
+4. STOP THE POLICY NORMALLY → then click STOP RECORDING. Wait for SAVED.
+5. ADD OUTCOMES → failures and interventions too; attach existing logs/video.
+6. PREPARE DATA FOR ARENA → DOWNLOAD RETURN ZIP → send the entire ZIP.
+
+Use a separate run name for each policy/attempt.
+Try a short stationary recording first on the actual G1.
+The app records only. It never commands motion or stops the policy.
+Browser refresh/closure does not stop recording.
+Keep local runs until Arena confirms receipt.
+
+Full instructions: START_HERE.md
+Robot-free software demo: bash OPEN_APP.sh --demo
+Terminal fallback: ADVANCED_TERMINAL.md

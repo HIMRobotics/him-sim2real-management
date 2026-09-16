@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>G1 Session Kit</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body>
+<header><div class="brand"><span class="mark">G1</span><div><strong>Session Kit</strong><span class="muted">Local robot recorder</span></div></div><span class="badge" id="mode">LOCAL · READ ONLY</span></header>
+<main>
+<div class="intro"><div><p class="eyebrow">TONIGHT’S SESSION</p><h1>Run the policy.<br>Keep the evidence.</h1><p>Record alongside either policy. One named run, one file to send back.</p></div><aside><strong>The robot stays under your control.</strong><p>This app records only. Launch and stop the policy in its usual terminal. It does not open a camera or move the G1.</p></aside></div>
+<div id="demo" class="notice hidden">DEMO MODE · Synthetic data only. No robot is connected. To record the real G1, reopen the app without <code>--demo</code>.</div>
+<div id="error" role="alert" class="notice error hidden"></div>
+<div id="toast" role="status" class="notice hidden"></div>
+<div class="workspace">
+<section class="panel setup">
+<div class="step"><span>1</span><h2>Check connection</h2></div>
+<p class="fine"><a class="text-link" href="/connect" target="_blank" rel="noopener">How to connect to the G1 ↗</a></p>
+<p id="connection" role="status">Connecting to the local app…</p>
+<details id="settings"><summary>Connection settings</summary>
+<label>Robot network interface<select id="interface"><option value="auto">Automatic</option></select></label>
+<div class="pair"><label>DDS domain<input id="domain" type="number" min="0" max="232" value="0"></label><label>Robot name<input id="robot" placeholder="G1 lab"></label></div>
+<label>Robot Python <span class="muted">optional full path</span><input id="python" placeholder="Use the app’s Python"></label>
+<p class="fine">Use the computer/environment that already has Unitree SDK2. Nothing is installed automatically.</p>
+</details>
+<button id="check" class="secondary" disabled>Check connection</button>
+<details id="check-details" class="hidden"><summary>Connection details</summary><pre id="check-log"></pre></details>
+<div class="divider"></div>
+<div class="step"><span>2</span><h2>Name your run</h2></div>
+<form id="run-form">
+<label>Run name<input id="name" required maxlength="100" placeholder="policy-a-standing-01"></label>
+<div class="pair"><label>Policy / Arena ID<input id="policy" maxlength="200" placeholder="Submission name or ID"></label><label>Operator<input id="operator" required maxlength="100" placeholder="Your name"></label></div>
+<label>Task &amp; success definition<textarea id="notes" rows="2" maxlength="4000" placeholder="What are you testing? What counts as success?"></textarea></label>
+<button id="start" type="submit" disabled>Start recording</button>
+<p class="fine" id="start-help">Check the connection first. Start the policy only after “Recording” appears.</p>
+</form>
+</section>
+<section class="panel current">
+<div class="section-title"><div class="step"><span>3</span><h2>Your recording</h2></div><span class="badge" id="phase">NO RUN SELECTED</span></div>
+<div id="empty" class="empty"><div class="empty-mark">↗</div><h3>Ready when you are.</h3><p>Start a new recording or choose a saved run below.</p></div>
+<div id="run-view" class="hidden">
+<h3 id="run-title"></h3><p class="muted" id="run-policy"></p>
+<div class="metrics"><div><strong id="state-count">0</strong><span>state samples</span></div><div><strong id="command-count">0</strong><span>command samples</span></div><div><strong id="freshness">—</strong><span id="freshness-label">last state received</span></div></div>
+<p id="run-guidance" class="guidance"></p>
+<button id="stop" class="danger hidden">Stop recording</button>
+<div id="quality" class="notice hidden"></div>
+<details id="label-details"><summary>Add an outcome <span class="muted">recommended</span></summary>
+<form id="label-form"><div class="pair"><label>Trial number<input id="trial" required value="001" maxlength="100"></label><label>Outcome<select id="outcome"><option value="unknown">Unknown / not reviewed</option><option value="success">Success</option><option value="partial">Partial success</option><option value="failure">Failure</option><option value="aborted">Stopped / intervention</option><option value="invalid">Invalid attempt</option></select></label></div>
+<label>What happened?<textarea id="trial-notes" rows="2" maxlength="4000" placeholder="Include failures, interventions, or a video timestamp."></textarea></label><button class="secondary" id="save-label">Save outcome</button><p class="fine">Outcomes are your observations, not automatic scores. Reusing a trial number records a correction.</p></form>
+<div id="labels" class="chips"></div></details>
+<div id="finished" class="hidden"><div class="divider"></div><label class="upload-label">Add logs, video or configuration <span class="muted">optional</span><input id="files" type="file" multiple></label><p class="fine" id="upload-status">Choose completed files only. Files stay on the recorder computer and are included in the return ZIP.</p><div id="attachments" class="chips"></div>
+<button id="export">Prepare data for Arena</button>
+<a id="download" class="button hidden" download>Download return ZIP</a><p class="fine">Send the entire ZIP. It includes raw data, a report, labels, attachments and an integrity checksum.</p><a id="report" target="_blank" rel="noopener" class="text-link hidden">Open run report ↗</a></div>
+<div id="recovery" class="hidden"><p>Recording was not finalized. First make sure its recorder and other file writers have stopped.</p><button id="recover" class="secondary">Recover incomplete run</button></div>
+<details><summary>Run details</summary><p id="run-path" class="fine path"></p><button id="show-log" class="small secondary">Show recorder log</button><pre id="run-log"></pre></details>
+</div>
+</section></div>
+<section class="saved"><div class="section-title"><h2>Saved &amp; current runs</h2><span id="disk" class="muted"></span></div><p class="fine">Keep separate runs for the two policies. Failed attempts are useful data too.</p><div id="runs"><p class="muted">No runs yet.</p></div></section>
+<footer><span>Runs are saved on this computer. Refreshing or closing this page does not stop recording.</span><span id="version"></span></footer>
+</main></body></html>

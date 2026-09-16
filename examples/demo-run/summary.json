@@ -1,0 +1,718 @@
+{
+  "schema": "g1-session-report.v1",
+  "name": "DEMO-example-policy-a",
+  "source": "synthetic_demo",
+  "policy_label": "SYNTHETIC EXAMPLE \u2014 not a real Arena policy",
+  "status": "closed",
+  "warnings": [],
+  "state_samples": 127,
+  "sampled_duration_s": 3.020542375,
+  "effective_saved_state_hz": 41.71436263992158,
+  "saved_state_gap_p95_ms": 25.489916999999807,
+  "saved_state_gap_max_ms": 31.330499999999983,
+  "saved_state_gaps_over_200ms": 0,
+  "tick_decreases_or_wraps": 0,
+  "collector_queue_drops": 0,
+  "decode_errors": 0,
+  "command_samples_by_topic": {
+    "rt/arm_sdk": 127
+  },
+  "max_abs_imu_roll_rad": 0,
+  "max_abs_imu_pitch_rad": 0.01,
+  "motors_first_29": [
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    },
+    {
+      "q": {
+        "min": 0.0019998666693333083,
+        "max": 0.09999576464987402,
+        "max_abs": 0.09999576464987402
+      },
+      "dq": {
+        "min": 0.1,
+        "max": 0.1,
+        "max_abs": 0.1
+      },
+      "tau_est": {
+        "min": 0.2,
+        "max": 0.2,
+        "max_abs": 0.2
+      },
+      "temperature": {
+        "min": 32,
+        "max": 33,
+        "max_abs": 33
+      }
+    }
+  ],
+  "policy_hook_rows": 0,
+  "operator_labeled_outcomes": {
+    "success": 1,
+    "failure": 1,
+    "unknown": 1
+  },
+  "annotated_trials": 3,
+  "operator_success_fraction_among_resolved_valid_attempts": 0.5,
+  "operator_success_denominator": 2,
+  "task_score_limit": "Manual exploratory labels. Denominator includes success, partial, failure, aborted; invalid and unknown excluded and shown. Unmarked attempts are not detectable.",
+  "unavailable": [
+    "automatic task/contact/landing scoring",
+    "camera/video unless separately attached",
+    "sensor-to-action latency",
+    "true applied motor commands",
+    "calibrated ground truth",
+    "automatic Arena download or publication"
+  ],
+  "clock_limit": "All sample timestamps are collector host receipt times. Saved gaps are not end-to-end latency.",
+  "evidence": [],
+  "trials": [
+    {
+      "schema": "g1-session-event.v1",
+      "kind": "label",
+      "trial": "001",
+      "outcome": "success",
+      "notes": "Synthetic label demonstrating the format.",
+      "operator": "demo operator",
+      "utc": "2026-09-16T20:18:34.111953+00:00",
+      "host_monotonic_s": 0.04709125,
+      "host": "synthetic-demo-host"
+    },
+    {
+      "schema": "g1-session-event.v1",
+      "kind": "label",
+      "trial": "002",
+      "outcome": "failure",
+      "notes": "Synthetic failure label: preserve unsuccessful attempts too.",
+      "operator": "demo operator",
+      "utc": "2026-09-16T20:18:34.175739+00:00",
+      "host_monotonic_s": 0.040858833,
+      "host": "synthetic-demo-host"
+    },
+    {
+      "schema": "g1-session-event.v1",
+      "kind": "label",
+      "trial": "003",
+      "outcome": "unknown",
+      "notes": "Synthetic unresolved example; excluded from resolved denominator.",
+      "operator": "demo operator",
+      "utc": "2026-09-16T20:18:34.226368+00:00",
+      "host_monotonic_s": 0.036235583,
+      "host": "synthetic-demo-host"
+    }
+  ],
+  "notes": []
+}
