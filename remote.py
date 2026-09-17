@@ -218,7 +218,8 @@ class Remote:
             if self.session and self.session.poll() is None:
                 raise ValueError('Finish the run and close the recorder connection before copying a new recorder version')
         # Explicit code/docs allowlist; never copy local runs, exports, SSH credentials or app state.
-        paths=[ROOT/name for name in ('app.py','remote.py','g1_session.py','policy_hook.py','OPEN_APP.sh','kit.sh','START_HERE.md','CONNECTION_GUIDE.md','REMOTE_SETUP.md','TROUBLESHOOTING.md')]
+        paths=[ROOT/name for name in ('app.py','remote.py','g1_session.py','policy_hook.py','OPEN_APP.sh','kit.sh','start.sh','label.sh')]
+        paths+=sorted(ROOT.glob('*.md'))
         paths+=sorted((ROOT/'web').glob('*'))
         with tempfile.TemporaryDirectory(dir=self.private,prefix='kit-') as temp:
             archive=Path(temp)/'recorder.zip'

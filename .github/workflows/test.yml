@@ -14,5 +14,5 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
-      - run: python -m py_compile app.py g1_session.py policy_hook.py
+      - run: python -m py_compile app.py remote.py g1_session.py policy_hook.py
       - run: bash -n OPEN_APP.sh kit.sh start.sh label.sh

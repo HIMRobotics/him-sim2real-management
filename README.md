@@ -2,6 +2,30 @@
 
 **Operators: start with [START_HERE.md](START_HERE.md). Run `bash OPEN_APP.sh` to open the local control panel.**
 
+## Get started for the session
+
+**Mac/Linux laptop; Python 3.9+ required.** Download and unzip `G1_SESSION_KIT_v1.2.0.zip` from the [release page](https://github.com/HIMRobotics/him-sim2real-management/releases/latest), open a terminal in its `G1_SESSION_KIT` folder, and run:
+
+```bash
+bash OPEN_APP.sh
+```
+
+Or clone the repository:
+
+```bash
+git clone https://github.com/HIMRobotics/him-sim2real-management.git
+cd him-sim2real-management
+bash OPEN_APP.sh
+```
+
+This repository is private: operators need GitHub access to download it, or the owner can send them the release ZIP directly. Git is optional when using the ZIP. No web dependency installation or build is needed.
+
+In the app: **Set up the G1 over SSH → Check SSH access → Copy recorder → Transfer policy (optional) → Open robot recorder**. Existing trusted SSH/key access and a remote Linux Python environment with Unitree SDK2 are required. The app shows the exact remote policy path; operators use their normal policy launch procedure.
+
+Before running a policy, complete the [short stationary recording and export check](CONNECTION_GUIDE.md#two-minute-acceptance-check-before-testing-policies). A green software test does not establish compatibility with their physical robot. For each policy, create a named run, record, label the outcome, then **Prepare data for Arena → Download return ZIP**.
+
+Need to try the interface without a robot? Run `bash OPEN_APP.sh --demo`; demo data is visibly marked synthetic and SSH operations are disabled.
+
 A portable, read-only recorder for two unknown Arena policies or any G1 policy exposing standard Unitree HG DDS telemetry. It runs alongside the policy and creates named `runs/` folders, portable HTML diagnostics, operator trial labels, and verified return archives in `exports/`.
 
 The app is a small local web page served by Python’s standard library: no Node, build step, internet, account, or extra web packages. It does not take camera ownership, publish robot commands, or change network configuration. Live capture requires an existing working Unitree SDK2 Python environment. Offline/demo/report/export operations use only Python's standard library, version 3.9+.

@@ -92,6 +92,8 @@ class RemoteTests(unittest.TestCase):
             helper.check({'destination':'operator@fake-g1'})
             installed=helper.install()
             self.assertTrue((Path(installed['path'])/'app.py').is_file())
+            self.assertTrue((Path(installed['path'])/'ADVANCED_TERMINAL.md').is_file())
+            self.assertTrue((Path(installed['path'])/'start.sh').is_file())
             self.assertFalse((Path(installed['path'])/'runs').exists())
             self.assertFalse((Path(installed['path'])/'.git').exists())
             f=self.home/'model.bin';f.write_bytes(b'model bytes')
