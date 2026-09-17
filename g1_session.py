@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 
-VERSION = '1.1.1'
+VERSION = '1.2.0'
 ROOT = Path(__file__).resolve().parent
 OUTCOMES = ('success', 'partial', 'failure', 'invalid', 'aborted', 'unknown')
 MOTOR_FIELDS = ('mode', 'q', 'dq', 'ddq', 'tau_est', 'temperature', 'vol', 'sensor', 'motorstate', 'lost')

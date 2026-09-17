@@ -1,6 +1,6 @@
 # Connect to a G1 and manage a recording session
 
-This app manages **recording sessions**: connection checks, recording, labels, attachments and exports. It does not power on, stand up, select a motion mode, load a policy, release a motion service, or stop the robot.
+This app can copy recorder code and policy files through existing SSH access, open a remote recorder, and manage **recording sessions**: connection checks, recording, labels, attachments and exports. It does not power on, stand up, select a motion mode, load a policy, release a motion service, or stop the robot.
 
 The operators keep their existing G1 bring-up, policy launch and robot-stop procedures. Unknown Arena policies are not qualified merely because telemetry is visible.
 
@@ -31,7 +31,13 @@ Native Windows execution is not supported by this release. macOS was used for so
 
 If the laptop does not already have a working G1 SDK/network configuration, use the operators' vendor setup procedure first. The recorder does not configure the Ethernet interface, install native DDS libraries, or discover SSH credentials. See Unitree's [SDK setup instructions](https://github.com/unitreerobotics/unitree_sdk2_python#installation) and [network quick start linked by the SDK](https://support.unitree.com/home/en/developer/Quick_start), using the settings appropriate to the actual G1 revision.
 
-## Path B: recorder on onboard Linux, browser on a laptop
+## Path B: guided remote setup from a Mac/Linux laptop
+
+Run `bash OPEN_APP.sh` locally and choose **Set up the G1 over SSH**. Enter the known SSH destination and SDK Python, then use **Check SSH access → Copy recorder to G1 → Transfer selected policy (optional) → Open robot recorder**. Follow the opened link and complete the live telemetry check. Full instructions and first-time SSH requirements: [REMOTE_SETUP.md](REMOTE_SETUP.md).
+
+This uses existing trusted-host entries and an unlocked key/agent. It runs fixed Python commands over SSH, verifies copied bytes, and manages the loopback tunnel. It does not execute the uploaded policy. Keep the local app terminal open until recording is saved and downloaded. Disconnecting the managed session asks its recorder to finish; it does not stop the policy.
+
+## Manual alternative: recorder on onboard Linux, browser on a laptop
 
 1. Use the operator's known SSH username and G1/onboard address. This kit does not assume a default IP or password.
 2. From the laptop, establish the tunnel:

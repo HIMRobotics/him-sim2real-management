@@ -4,11 +4,28 @@
 <body>
 <header><div class="brand"><span class="mark">G1</span><div><strong>Session Kit</strong><span class="muted">Local robot recorder</span></div></div><span class="badge" id="mode">LOCAL · READ ONLY</span></header>
 <main>
-<div class="intro"><div><p class="eyebrow">TONIGHT’S SESSION</p><h1>Run the policy.<br>Keep the evidence.</h1><p>Record alongside either policy. One named run, one file to send back.</p></div><aside><strong>The robot stays under your control.</strong><p>This app records only. Launch and stop the policy in its usual terminal. It does not open a camera or move the G1.</p></aside></div>
+<div class="intro"><div><p class="eyebrow">TONIGHT’S SESSION</p><h1>Run the policy.<br>Keep the evidence.</h1><p>Record alongside either policy. One named run, one file to send back.</p></div><aside><strong>The robot stays under your control.</strong><p>SSH setup copies files and starts the recorder only. Launch and stop the policy in its usual terminal. It does not open a camera or move the G1.</p></aside></div>
 <div id="demo" class="notice hidden">DEMO MODE · Synthetic data only. No robot is connected. To record the real G1, reopen the app without <code>--demo</code>.</div>
 <div id="error" role="alert" class="notice error hidden"></div>
 <div id="toast" role="status" class="notice hidden"></div>
-<div class="workspace">
+<div id="location-choice" class="mode-switch"><button id="show-local" class="secondary">Record on this computer</button><button id="show-remote" class="secondary">Set up the G1 over SSH</button></div>
+<section id="remote-panel" class="panel hidden">
+<div class="step"><span>1</span><h2>Connect using their existing SSH access</h2></div>
+<p class="fine">Use this on your laptop when the recorder will run on the G1/Linux computer. This panel runs the setup commands for you; it never runs a policy.</p>
+<div class="pair"><label>SSH destination<input id="ssh-destination" placeholder="user@robot-host or existing SSH alias" maxlength="280"></label><label>Python on the G1<input id="ssh-python" value="python3" placeholder="/path/to/sdk/environment/bin/python"></label></div>
+<details><summary>SSH port &amp; first-time access</summary><label>SSH port <span class="muted">leave empty to use SSH configuration</span><input id="ssh-port" type="number" min="1" max="65535" placeholder="Default / SSH config"></label><p class="fine">An unlocked SSH key/agent and a trusted host are required. Password-only login is not automated. If needed, first run this in your normal terminal and verify the host with the robot operator:</p><pre id="ssh-command">ssh YOUR_USER@YOUR_G1_COMPUTER</pre><p class="fine">The app does not store passwords, install SSH keys or bypass host verification.</p></details>
+<button id="ssh-check" class="secondary">Check SSH access</button><p id="ssh-status" role="status" class="guidance">Enter the connection they already use for this G1.</p>
+<div class="divider"></div><div class="step"><span>2</span><h2>Copy the recorder and policy file</h2></div>
+<p class="fine">Files go into new folders under the remote account. Existing policies, software and runs are preserved. Transfers are checksum-verified.</p>
+<button id="ssh-install" class="secondary" disabled>Copy recorder to G1</button><p id="ssh-install-status" class="fine path"></p>
+<label>Policy file or archive <span class="muted">optional</span><input id="ssh-policy-file" type="file"></label><button id="ssh-transfer" class="secondary" disabled>Transfer selected policy</button><p id="ssh-policy-status" class="fine path">Choose a downloaded policy file/archive. Transfer does not install or execute it.</p>
+<div class="divider"></div><div class="step"><span>3</span><h2>Open data collection on the G1</h2></div>
+<button id="ssh-open" disabled>Open robot recorder</button><a id="ssh-link" class="button hidden" target="_blank" rel="noopener">Go to robot recorder ↗</a>
+<p class="fine">This starts only the recorder and creates its SSH tunnel. In the robot tab, check live G1 state, record, and download the ZIP straight to your laptop. Keep this laptop app terminal open.</p>
+<button id="ssh-close" class="small secondary hidden">Close recorder connection</button>
+<details><summary>Connection details</summary><pre id="ssh-details"></pre></details>
+</section>
+<div class="workspace" id="local-workspace">
 <section class="panel setup">
 <div class="step"><span>1</span><h2>Check connection</h2></div>
 <p class="fine"><a class="text-link" href="/connect" target="_blank" rel="noopener">How to connect to the G1 ↗</a></p>
@@ -51,6 +68,6 @@
 <details><summary>Run details</summary><p id="run-path" class="fine path"></p><button id="show-log" class="small secondary">Show recorder log</button><pre id="run-log"></pre></details>
 </div>
 </section></div>
-<section class="saved"><div class="section-title"><h2>Saved &amp; current runs</h2><span id="disk" class="muted"></span></div><p class="fine">Keep separate runs for the two policies. Failed attempts are useful data too.</p><div id="runs"><p class="muted">No runs yet.</p></div></section>
-<footer><span>Runs are saved on this computer. Refreshing or closing this page does not stop recording.</span><span id="version"></span></footer>
+<section class="saved" id="local-saved"><div class="section-title"><h2>Saved &amp; current runs</h2><span id="disk" class="muted"></span></div><p class="fine">Keep separate runs for the two policies. Failed attempts are useful data too.</p><div id="runs"><p class="muted">No runs yet.</p></div></section>
+<footer><span id="storage-help">Runs are saved on this computer. Refreshing or closing this page does not stop recording.</span><span id="version"></span></footer>
 </main></body></html>

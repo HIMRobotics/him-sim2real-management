@@ -1,8 +1,12 @@
 G1 SESSION KIT — SIX STEPS
 
-Use the Linux computer / Python environment that already talks to the G1.
+Use a Mac/Linux laptop for guided SSH setup, or the existing Linux G1 computer.
 In this folder: bash OPEN_APP.sh
 Keep its terminal open. If needed, open the exact link it prints.
+
+From a laptop: SET UP THE G1 OVER SSH → CHECK SSH ACCESS → COPY RECORDER.
+Optional: TRANSFER SELECTED POLICY → keep the verified destination path.
+OPEN ROBOT RECORDER → follow its link. Needs existing SSH key/agent + remote SDK.
 
 1. CHECK CONNECTION → wait for live G1 state.
 2. NAME THE RUN → policy, operator, task and success definition.

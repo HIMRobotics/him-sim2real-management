@@ -82,3 +82,11 @@ chmod +x kit.sh start.sh label.sh
 ```
 
 Or invoke the launcher with `bash kit.sh doctor`. Keep the whole kit together; moving only a shell script separates it from the collector.
+
+## Guided SSH setup or policy transfer fails
+
+- **SSH check fails:** open the first-time login command shown in the app in your normal terminal. Confirm the address, host fingerprint, and login with the operators. The app needs an existing unlocked key/agent; it cannot enter a password, accept a host key, or configure access for you. See [REMOTE_SETUP.md](REMOTE_SETUP.md).
+- **SDK missing:** choose the absolute path to the remote Python that already imports Unitree SDK2. Python 3.9+ is required. An SSH check alone does not prove live telemetry.
+- **Upload fails:** check free disk space on both machines (file size plus 2 GiB), keep the app terminal open, then retry. A successful transfer displays the exact remote path and verified SHA-256. A policy is copied only, never unpacked or launched.
+- **Remote recorder disconnects:** stop the policy normally, restore SSH, check access and reopen the recorder. Saved runs remain in the remote `~/.local/share/arena-g1-kit/data/runs/` folder. Recover an interrupted run through the recorder before exporting. No remote runtime data lives inside the replaceable recorder code folder.
+- **Windows laptop:** native app hosting is not supported. Run the app on the existing Linux computer and use the manual SSH tunnel/browser flow in CONNECTION_GUIDE.md.

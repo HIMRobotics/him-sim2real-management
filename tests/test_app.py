@@ -120,6 +120,18 @@ class AppTests(unittest.TestCase):
         self.app.checked_at-=301
         self.json('/api/start',body,expected=400)
 
+    def test_remote_setup_is_explicit_and_blocked_in_demo(self):
+        self.json('/api/remote',{'action':'check','destination':'operator@robot'},expected=400)
+        status,_,_=self.request('/api/remote-upload?name=policy.bin',b'bytes',raw=True)
+        self.assertEqual(status,400)
+        self.app.demo=False
+        with patch.object(self.app.remote,'check',return_value={'checked':True}) as check:
+            self.json('/api/remote',{'action':'check','destination':'operator@robot'})
+            self.wait(lambda s:s['job']['state']=='done')
+            check.assert_called_once()
+        self.app.onboard=True
+        self.json('/api/remote',{'action':'check','destination':'operator@robot'},expected=400)
+
     def test_auth_origin_host_and_traversal(self):
         self.assertEqual(self.request('/api/state',auth=False)[0],403)
         self.assertEqual(self.request('/api/state',headers={'Host':'evil.test'})[0],403)

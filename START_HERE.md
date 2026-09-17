@@ -1,6 +1,6 @@
 # G1 Session Kit — the simple version
 
-**Use the Linux computer that already receives G1 data through Unitree SDK2.** This app runs locally, needs no internet or account, and never controls the robot. Keep using the policies' normal launch and stop procedures.
+**Open this on a Mac/Linux laptop to connect over SSH, or directly on the Linux computer that already receives G1 data through Unitree SDK2.** This app runs locally, needs no internet or account, and never controls the robot. Keep using the policies' normal launch and stop procedures.
 
 For the laptop/onboard setup options and a real-hardware acceptance check, use [CONNECTION_GUIDE.md](CONNECTION_GUIDE.md). The same short guide is linked inside the app.
 
@@ -14,13 +14,22 @@ bash OPEN_APP.sh
 
 A browser opens. If it does not, open the exact link printed in the terminal. **Keep that terminal open.**
 
-Use the existing robot Python environment. If it is not already active, launch with:
+## Connect from your laptop — guided buttons
 
-```bash
-PYTHON=/path/to/the/robot/environment/bin/python bash OPEN_APP.sh
-```
+Choose **Set up the G1 over SSH**:
 
-Python 3.9+ is required. The app itself adds no third-party packages. If Unitree SDK2 is in a different environment, you can also select its Python under **Connection settings** in the app.
+1. Enter their existing SSH address (`user@host` or saved SSH alias) and the remote Python that has Unitree SDK2. Leave the SSH port blank unless they use a custom port.
+2. **Check SSH access.** This needs an already trusted host and an unlocked SSH key/agent. If their normal terminal still asks for a password, follow [REMOTE_SETUP.md](REMOTE_SETUP.md) first; the app cannot handle password prompts.
+3. **Copy recorder to G1.** Wait for a verified destination path.
+4. Optional: choose the policy file or ZIP, then **Transfer selected policy**. Give the verified destination path to the operator. The app does not unpack or run the policy.
+5. **Open robot recorder**, then follow the link to its browser tab. The app runs the fixed setup commands and opens the SSH tunnel for you.
+6. In the robot recorder, choose the actual robot-facing interface under **Connection settings** and follow the recording steps below.
+
+Keep the laptop app terminal and SSH connection alive. Finish recording and download the return ZIP before clicking **Close recorder connection**. Remote recordings stay under `~/.local/share/arena-g1-kit/data/runs/`, including after copying a new recorder version.
+
+## Already on the Linux control computer?
+
+Choose **Record on this computer**. Use the Python environment that already contains Unitree SDK2, or select its absolute interpreter path under **Connection settings**. Python 3.9+ is required locally and remotely. The app adds no third-party web packages; it does not install the SDK or change the policy environment.
 
 ## Record each policy
 
@@ -49,14 +58,6 @@ bash OPEN_APP.sh --demo
 
 The whole app shows **DEMO**, and every recording stays marked synthetic. Reopen without `--demo` for real collection. Never send a demo as robot evidence.
 
-## If the G1 computer is accessed by SSH
+## Manual fallback
 
-Run the app on that computer and use an SSH port forward to view it on your laptop:
-
-```bash
-ssh -L 8765:127.0.0.1:8765 YOUR_USER@YOUR_G1_COMPUTER
-```
-
-In that SSH terminal, run `bash OPEN_APP.sh --no-browser`. Open its printed `http://127.0.0.1:8765/#key=...` link on your laptop. Keep the SSH session open. If the app prints a different port because 8765 is busy, forward that exact port instead. The app listens on loopback only; do not expose it on the public network.
-
-Need the command-line fallback? [ADVANCED_TERMINAL.md](ADVANCED_TERMINAL.md). More detail: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+If SSH automation is unavailable, [CONNECTION_GUIDE.md](CONNECTION_GUIDE.md) has the manual SSH tunnel instructions. [ADVANCED_TERMINAL.md](ADVANCED_TERMINAL.md) provides recording commands without the web app. More detail: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

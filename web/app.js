@@ -5,6 +5,7 @@ if (key) { sessionStorage.setItem('g1-key', key); history.replaceState(null, '',
 const token = sessionStorage.getItem('g1-key') || '';
 let state = null, selected = localStorage.getItem('g1-selected') || '', initialized = false;
 let busy = false, downloading = null, uploadBusy = false, pollBusy = false, offline = false;
+let viewMode=sessionStorage.getItem('g1-view')||'local';
 const labels = {starting:'STARTING',recording:'RECORDING',stopping:'SAVING',stale:'STATE STREAM STALE',saved:'SAVED',error:'NEEDS ATTENTION',incomplete:'INCOMPLETE'};
 function visible(id, yes) { $(id).classList.toggle('hidden', !yes); }
 function error(message) { $('error').textContent = message; visible('error', !!message); }
@@ -31,6 +32,7 @@ function node(tag, text, cls) { const n=document.createElement(tag); n.textConte
 function selectedRun() { return state?.runs.find(r=>r.id===selected); }
 function render() {
   if (!state) return;
+  renderRemote();
   const jobWorking=state.job?.state==='working', locked=busy||jobWorking||uploadBusy||offline;
   visible('demo',state.demo); $('mode').textContent=state.demo?'DEMO · NO ROBOT':'LOCAL · READ ONLY';
   $('version').textContent='v'+state.version; $('disk').textContent=state.free_gib+' GB free';
@@ -85,6 +87,7 @@ async function refresh() {
       $('interface').firstChild.value='auto';
       fresh.interfaces.forEach(name=>{const opt=node('option',name);opt.value=name;$('interface').append(opt);});
       for(const id of ['interface','domain','python','operator','robot']) if(fresh.settings[id]!==undefined) $(id).value=fresh.settings[id];
+      if(fresh.remote?.config){$('ssh-destination').value=fresh.remote.config.destination;$('ssh-python').value=fresh.remote.config.python;$('ssh-port').value=fresh.remote.config.port||'';}
       initialized=true;
     }
     if(offline) error('');
@@ -111,5 +114,39 @@ $('files').onchange=async()=>{
   catch(e){error(e.message);}
   finally{uploadBusy=false;$('files').value='';$('upload-status').textContent='Choose completed files only. Files stay on the recorder computer and are included in the return ZIP.';await refresh();render();}
 };
+
+function remoteConfig(){return {destination:$('ssh-destination').value.trim(),python:$('ssh-python').value.trim()||'python3',port:$('ssh-port').value};}
+function renderRemote(){
+  if(state.onboard)viewMode='local';
+  $('storage-help').textContent=viewMode==='remote'?'Remote runs stay on the G1 computer. Download the return ZIP to keep a copy on your laptop.':'Runs are saved on the recorder computer. Refreshing or closing this page does not stop recording.';
+  visible('location-choice',!state.onboard);visible('remote-panel',viewMode==='remote');visible('local-workspace',viewMode!=='remote');visible('local-saved',viewMode!=='remote');
+  $('show-local').classList.toggle('selected',viewMode==='local');$('show-remote').classList.toggle('selected',viewMode==='remote');
+  const r=state.remote||{}, c=remoteConfig(), working=busy||uploadBusy||offline||state.job?.state==='working';
+  const matches=r.checked&&r.config?.destination===c.destination&&r.config?.python===c.python&&(r.config?.port||'')===(c.port?Number(c.port):'');
+  const disabled=working||state.demo||!!state.active;
+  $('ssh-check').disabled=disabled;$('ssh-install').disabled=disabled||!matches||!!r.url;$('ssh-transfer').disabled=disabled||!matches||!$('ssh-policy-file').files.length;$('ssh-open').disabled=disabled||!matches||!r.release||!r.info?.sdk;
+  $('ssh-close').disabled=working;visible('ssh-close',!!r.url);visible('ssh-link',!!r.url);
+  if(r.url)$('ssh-link').href=r.url;
+  $('ssh-command').textContent=/^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(c.destination)?'ssh '+(c.port&&/^\d+$/.test(c.port)?'-p '+c.port+' ':'')+c.destination:'ssh YOUR_USER@YOUR_G1_COMPUTER';
+  $('ssh-status').textContent=state.demo?'SSH operations are disabled in demo mode. Reopen without --demo to use your real SSH connection.':working&&state.job?.name?state.job.name+'…':r.disconnected?'The remote recorder connection ended. Recheck SSH access and reopen it; review any unfinished run.':matches?'SSH connected to '+(r.info?.hostname||c.destination)+'. '+(r.info?.sdk?'SDK imports passed. Live robot data still needs its own check.':'SDK could not import: select its existing Python environment and check again.'):'Enter the connection they already use, then check SSH access.';
+  $('ssh-install-status').textContent=r.release?'Recorder copied and verified: '+r.release.path:'';
+  $('ssh-policy-status').textContent=r.policy?'Verified '+r.policy.name+'\nSaved on G1: '+r.policy.path+'\nSHA-256: '+r.policy.sha256+'\nGive this path to the policy operator; include it and the checksum in the run notes.':'Choose a downloaded policy file/archive. Transfer does not install or execute it.';
+  $('ssh-details').textContent=[r.info?.detail,r.logs].filter(Boolean).join('\n');
+}
+$('show-local').onclick=()=>{viewMode='local';sessionStorage.setItem('g1-view',viewMode);render();};
+$('show-remote').onclick=()=>{viewMode='remote';sessionStorage.setItem('g1-view',viewMode);render();};
+['ssh-destination','ssh-python','ssh-port','ssh-policy-file'].forEach(id=>$(id).addEventListener('input',()=>state&&renderRemote()));
+$('ssh-check').onclick=()=>action(()=>api('/api/remote',{action:'check',...remoteConfig()}));
+$('ssh-install').onclick=()=>action(()=>api('/api/remote',{action:'install'}));
+$('ssh-open').onclick=()=>action(()=>api('/api/remote',{action:'open'}));
+$('ssh-close').onclick=()=>{if(confirm('Finish and save the run in the robot tab first. Close only the recorder connection now? This does not stop any policy.'))action(()=>api('/api/remote',{action:'close'}));};
+$('ssh-transfer').onclick=async()=>{
+  const file=$('ssh-policy-file').files[0];if(!file)return;
+  uploadBusy=true;error('');render();
+  try{const response=await fetch('/api/remote-upload?name='+encodeURIComponent(file.name),{method:'POST',headers:{'X-G1-Token':token,'Content-Type':'application/octet-stream'},body:file});const result=await response.json();if(!response.ok)throw new Error(result.error);toast('File received locally. Wait for the verified G1 path before using it.');}
+  catch(e){error(e.message);}
+  finally{uploadBusy=false;await refresh();render();}
+};
+
 if(!token) error('Open the full link printed in the app terminal. It gives this browser access to your local recorder.');
 else {refresh();setInterval(refresh,1200);}

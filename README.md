@@ -1,4 +1,4 @@
-# G1 Session Kit — 1.1.1
+# G1 Session Kit — 1.2.0
 
 **Operators: start with [START_HERE.md](START_HERE.md). Run `bash OPEN_APP.sh` to open the local control panel.**
 
@@ -10,6 +10,7 @@ The app is a small local web page served by Python’s standard library: no Node
 |---|---|
 | [START_HERE.md](START_HERE.md) | Tonight's step-by-step operator instructions |
 | [CONNECTION_GUIDE.md](CONNECTION_GUIDE.md) | Connect via the control laptop or onboard Linux/SSH; verify one stationary run |
+| [REMOTE_SETUP.md](REMOTE_SETUP.md) | Guided SSH check, recorder/policy transfer and remote browser connection |
 | `OPEN_APP.sh` | Open the local browser control panel |
 | `app.py`, `web/` | Local-only server and dependency-free browser UI |
 | [ADVANCED_TERMINAL.md](ADVANCED_TERMINAL.md) | Original terminal workflow as a fallback |
@@ -22,6 +23,8 @@ The app is a small local web page served by Python’s standard library: no Node
 | [ARENA_RECEIVING.md](ARENA_RECEIVING.md) | Receiving, verifying, interpreting, and comparing runs |
 | [VALIDATION.md](VALIDATION.md) | Tests actually run and hardware checks remaining |
 | `examples/demo-run/` | Clearly synthetic example of the delivered run/report |
+
+From a Mac or Linux laptop, choose **Set up the G1 over SSH** to check existing SSH access, copy the recorder, transfer a policy file with checksum verification, and open the robot recorder through a managed tunnel. An existing trusted SSH host and unlocked key/agent are required. The remote Linux Python needs the Unitree SDK. The app transfers policies but never executes them.
 
 Try a non-robot demo:
 

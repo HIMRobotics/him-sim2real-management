@@ -27,6 +27,7 @@ import webbrowser
 import zipfile
 
 import g1_session as kit
+from remote import Remote
 
 ROOT = Path(__file__).resolve().parent
 
@@ -45,7 +46,7 @@ def short_text(value, limit=4000):
 
 
 class App:
-    def __init__(self, data_root=ROOT, demo=False):
+    def __init__(self, data_root=ROOT, demo=False, onboard=False):
         self.root = Path(data_root).resolve()
         self.runs = self.root / 'runs'
         self.exports = self.root / 'exports'
@@ -59,6 +60,8 @@ class App:
             self.lock_file.close()
             raise RuntimeError('The app is already running for this folder. Use its existing browser tab/terminal.')
         self.demo = demo
+        self.onboard = onboard
+        self.remote = Remote(self.private)
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.process = None
@@ -259,7 +262,7 @@ class App:
                              'evidence': [e for e in labels if e.get('kind') == 'evidence'],
                              'has_report': (run / 'report.html').exists() and not active,
                              'path': str(run)})
-            return {'demo': self.demo, 'version': kit.VERSION, 'connection': self.connection,
+            return {'demo': self.demo, 'onboard': self.onboard, 'remote': self.remote.status(), 'version': kit.VERSION, 'connection': self.connection,
                     'connection_valid': self.connection_config is not None and time.monotonic() - self.checked_at <= 300,
                     'active': self.current if self.process else None, 'starting': bool(self.process),
                     'runs': rows, 'job': self.job, 'settings': self.settings,
@@ -318,7 +321,26 @@ class App:
             kit.recover(run)
             return {'message': 'Recovered as incomplete. Original raw data preserved.'}
 
+    def remote_action(self, body):
+        with self.lock:
+            self.busy()
+            if self.demo:
+                raise ValueError('SSH setup is disabled in demo mode. Reopen the app without --demo for real SSH access.')
+            if self.onboard:
+                raise ValueError('Use the original laptop setup page to manage SSH transfers')
+            if self.process:
+                raise ValueError("Finish this computer’s local recording before using remote setup")
+            op = body.get('action')
+            functions = {'check': lambda: self.remote.check(body), 'install': self.remote.install,
+                         'open': self.remote.open, 'close': self.remote.close}
+            if op not in functions:
+                raise ValueError('Unknown remote setup operation')
+            self.last_error = None
+            self.start_job({'check':'Checking SSH access','install':'Copying recorder to G1',
+                            'open':'Opening robot recorder','close':'Closing recorder connection'}[op], functions[op])
+
     def shutdown(self):
+        self.remote.close()
         with self.lock:
             self.closing = True
             process = self.process
@@ -338,10 +360,10 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, app):
+    def __init__(self, address, app, browser_port=None):
         self.app = app
         super().__init__(address, Handler)
-        self.origin = 'http://127.0.0.1:' + str(self.server_address[1])
+        self.origin = 'http://127.0.0.1:' + str(browser_port or self.server_address[1])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -356,8 +378,8 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(60)
 
     def guard(self, auth=True, mutation=False):
-        allowed_host = '127.0.0.1:' + str(self.server.server_address[1])
-        if self.headers.get('Host') != allowed_host:
+        allowed_hosts = {self.server.origin.split('://',1)[1], '127.0.0.1:' + str(self.server.server_address[1])}
+        if self.headers.get('Host') not in allowed_hosts:
             raise PermissionError('Use the exact local address printed by the app')
         if self.headers.get('Origin') not in (None, self.server.origin):
             raise PermissionError('Cross-site requests are not allowed')
@@ -451,6 +473,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.guard(mutation=True)
             path = urlparse(self.path).path
+            if path == '/api/remote-upload':
+                self.remote_upload()
+                return
             if path == '/api/upload':
                 self.upload()
                 return
@@ -460,7 +485,8 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(size))
             app = self.server.app
             action = {'/api/check': app.check, '/api/start': app.start, '/api/stop': app.stop,
-                      '/api/label': app.label, '/api/export': app.package, '/api/recover': app.recover}.get(path)
+                      '/api/label': app.label, '/api/export': app.package, '/api/recover': app.recover,
+                      '/api/remote': app.remote_action}.get(path)
             if action is None:
                 raise ValueError('Action not found')
             result = action(body)
@@ -469,6 +495,50 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:
             self.error(exc)
+
+    def remote_upload(self):
+        app = self.server.app
+        name = parse_qs(urlparse(self.path).query).get('name',[''])[0]
+        if not name or Path(name).name != name or len(name)>180 or any(ord(c)<32 for c in name) or chr(92) in name:
+            raise ValueError('Select a single policy file or archive with a normal filename')
+        size = int(self.headers.get('Content-Length',-1))
+        if not 0<size<=16*1024**3:
+            raise ValueError('Policy file must be nonempty and at most 16 GiB')
+        with app.lock:
+            app.busy()
+            if app.demo or app.onboard:
+                raise ValueError('Policy transfer is available only from the real laptop setup page')
+            if app.process:
+                raise ValueError('Finish this computer’s local recording first')
+            app.remote.require()
+            if shutil.disk_usage(app.root).free<size+2*1024**3:
+                raise ValueError('Not enough local disk space for staging plus the 2 GiB reserve')
+            job={'name':'Transferring policy file','state':'working'}
+            app.job=job
+            app.last_error=None
+        temp=app.private/(uuid.uuid4().hex+'.policy-upload')
+        try:
+            remaining=size
+            with temp.open('xb') as f:
+                while remaining:
+                    chunk=self.rfile.read(min(remaining,1024*1024))
+                    if not chunk: raise ValueError('Browser upload was interrupted; retry the file')
+                    f.write(chunk); remaining-=len(chunk)
+                    if shutil.disk_usage(app.root).free<2*1024**3: raise ValueError('Local disk reserve reached')
+            def transfer():
+                try:
+                    result=app.remote.send_policy(temp,name)
+                    with app.lock: job.update(state='done',result=result)
+                except Exception as exc:
+                    with app.lock: job.update(state='error',message=str(exc))
+                finally:
+                    temp.unlink(missing_ok=True)
+            threading.Thread(target=transfer,daemon=True).start()
+            self.send_json({'ok':True,'message':'Uploaded locally; verifying transfer to G1'})
+        except Exception as exc:
+            temp.unlink(missing_ok=True)
+            with app.lock: job.update(state='error',message=str(exc))
+            raise
 
     def upload(self):
         app = self.server.app
@@ -527,15 +597,20 @@ def main():
     p.add_argument('--data-dir', type=Path, default=ROOT)
     p.add_argument('--demo', action='store_true')
     p.add_argument('--no-browser', action='store_true')
+    p.add_argument('--onboard', action='store_true')
+    p.add_argument('--browser-port', type=int)
+    p.add_argument('--announce-json', action='store_true', help=argparse.SUPPRESS)
     args = p.parse_args()
-    app = App(args.data_dir, args.demo)
+    app = App(args.data_dir, args.demo, args.onboard)
     try:
         try:
-            server = Server(('127.0.0.1', args.port), app)
+            server = Server(('127.0.0.1', args.port), app, args.browser_port)
         except OSError as exc:
             if exc.errno not in (48, 98) or args.port == 0:
                 raise
-            server = Server(('127.0.0.1', 0), app)
+            server = Server(('127.0.0.1', 0), app, args.browser_port)
+        if args.announce_json:
+            print('ARENA_APP_READY '+json.dumps({'port':server.server_address[1],'token':app.token}),flush=True)
         url = server.origin + '/#key=' + app.token
         print('\nG1 Session Kit — ' + ('DEMO ONLY' if args.demo else 'LOCAL RECORDER'), flush=True)
         print('Open this exact link on this computer:\n' + url, flush=True)
