@@ -140,6 +140,11 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.request('/report/../../app.py')[0],400)
         self.assertEqual(self.request('/download/../../app.py')[0],400)
         self.assertEqual(self.request('/')[0],200)
+        status, headers, guide = self.request('/policies', auth=False)
+        self.assertEqual(status, 200)
+        self.assertIn('text/html', headers['Content-Type'])
+        self.assertIn(b'Running someone', guide)
+        self.assertEqual(self.request('/policies', auth=False, headers={'Host':'evil.test'})[0], 403)
 
     def test_duplicate_app_rejected(self):
         with self.assertRaises(RuntimeError):

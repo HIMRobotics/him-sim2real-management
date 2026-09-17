@@ -1,10 +1,12 @@
-# HIM Sim2Real Manager — 1.2.1
+# HIM Sim2Real Manager — 1.2.2
+
+New to G1 policies? Read [which files to get and how to run the author’s deployment](POLICY_GUIDE.md), also linked inside the app.
 
 **Operators: start with [START_HERE.md](START_HERE.md). Run `bash OPEN_APP.sh` to open the local control panel.**
 
 ## Get started for the session
 
-**Mac/Linux laptop; Python 3.9+ required.** Download and unzip `HIM_SIM2REAL_MANAGER_v1.2.1.zip` from the [release page](https://github.com/HIMRobotics/him-sim2real-management/releases/latest), open a terminal in its `G1_SESSION_KIT` folder, and run:
+**Mac/Linux laptop; Python 3.9+ required.** Download and unzip `HIM_SIM2REAL_MANAGER_v1.2.2.zip` from the [release page](https://github.com/HIMRobotics/him-sim2real-management/releases/latest), open a terminal in its `G1_SESSION_KIT` folder, and run:
 
 ```bash
 bash OPEN_APP.sh

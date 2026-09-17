@@ -1,5 +1,7 @@
 # Laptop → G1: guided setup and file transfer
 
+New to G1 policies? Read [which files to get and how to run the author’s deployment](POLICY_GUIDE.md), also linked inside the app.
+
 Run `bash OPEN_APP.sh` on a Mac or Linux laptop. Choose **Set up the G1 over SSH**. Native Windows hosting is not supported; a Windows browser can still view an app running on a Linux computer via the manual SSH instructions.
 
 1. Enter the existing SSH destination: `username@robot-host`, `username@robot-IP`, or an SSH config alias. Enter the remote Python interpreter that already has Unitree SDK2 (for example, its full virtual-environment path). The kit requires Python 3.9+.

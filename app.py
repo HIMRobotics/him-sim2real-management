@@ -432,11 +432,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path
-            if path in ('/', '/app.js', '/style.css', '/connect'):
+            if path in ('/', '/app.js', '/style.css', '/connect', '/policies'):
                 self.guard(auth=False)
                 filename, mime = {'/': ('index.html', 'text/html; charset=utf-8'),
                                   '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                                   '/connect': ('connect.html', 'text/html; charset=utf-8'),
+                                  '/policies': ('policies.html', 'text/html; charset=utf-8'),
                                   '/style.css': ('style.css', 'text/css; charset=utf-8')}[path]
                 self.file(ROOT / 'web' / filename, mime)
                 return

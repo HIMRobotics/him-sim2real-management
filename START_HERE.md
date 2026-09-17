@@ -1,5 +1,7 @@
 # HIM Sim2Real Manager — the simple version
 
+New to G1 policies? Read [which files to get and how to run the author’s deployment](POLICY_GUIDE.md), also linked inside the app.
+
 **Open this on a Mac/Linux laptop to connect over SSH, or directly on the Linux computer that already receives G1 data through Unitree SDK2.** This app runs locally, needs no internet or account, and never controls the robot. Keep using the policies' normal launch and stop procedures.
 
 For the laptop/onboard setup options and a real-hardware acceptance check, use [CONNECTION_GUIDE.md](CONNECTION_GUIDE.md). The same short guide is linked inside the app.

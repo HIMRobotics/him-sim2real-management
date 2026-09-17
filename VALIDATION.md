@@ -26,3 +26,5 @@ Version 1.2.0 adds guided SSH setup, verified recorder/policy file transfer, and
 Both Python versions passed all 32 tests for 1.2.0. The updated SSH panel was checked in the browser for layout, mode switching, prerequisite copy and demo-operation blocking. The full browser recording/export workflow listed above was exercised for 1.1.0; its HTTP workflow was rerun in the 1.2.0 automated suite. First live use still requires existing trusted SSH/key access, Linux Python 3.9+, working SDK imports, and a successful stationary recording/export on their robot.
 
 Version 1.2.1 updates product branding to HIM Sim2Real Manager, removes session-specific naming, and labels Unitree G1 as the currently supported robot. Robot connectivity and recording behavior are unchanged from 1.2.0. Additional robot integrations are not implemented yet.
+
+Version 1.2.2 adds the in-app policy guide and file-type explainers. The guide distinguishes documented Unitree runner examples from validated hardware compatibility. No unknown policies were loaded or executed.
