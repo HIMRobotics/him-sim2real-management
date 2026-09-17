@@ -2,13 +2,13 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HIM Sim2Real Manager</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
 <body>
-<header><div class="brand"><span class="mark">HIM</span><div><strong>HIM Sim2Real Manager</strong><span class="muted">Currently supports Unitree G1</span></div></div><span class="badge" id="mode">LOCAL · READ ONLY</span></header>
+<header><a class="brand brand-home" href="/" aria-label="HIM Sim2Real Manager home"><span class="mark">HIM</span><div><strong>HIM Sim2Real Manager</strong><span class="muted">Currently supports Unitree G1</span></div></a><nav class="header-nav" aria-label="Main navigation"><a href="/" class="home-link">Home</a></nav><span class="badge" id="mode">LOCAL · READ ONLY</span></header>
 <main>
 <div class="intro"><div><p class="eyebrow">SIM2REAL SESSIONS</p><h1>Run the policy.<br>Keep the evidence.</h1><p>Record alongside your policy. One named run, one file to send back.</p></div><aside><strong>The robot stays under your control.</strong><p>SSH setup copies files and starts the recorder only. Launch and stop the policy in its usual terminal. It does not open a camera or move the G1.</p></aside></div>
 <div id="demo" class="notice hidden">DEMO MODE · Synthetic data only. No robot is connected. To record the real G1, reopen the app without <code>--demo</code>.</div>
 <div id="error" role="alert" class="notice error hidden"></div>
 <div id="toast" role="status" class="notice hidden"></div>
-<p><a class="text-link" href="/policies" target="_blank" rel="noopener">New to G1? Which files do I need, and how do policies run? ↗</a></p>
+<p><a class="text-link" href="/policies">New to G1? Which files do I need, and how do policies run? ↗</a></p>
 <div id="location-choice" class="mode-switch"><button id="show-local" class="secondary">Record on this computer</button><button id="show-remote" class="secondary">Set up the G1 over SSH</button></div>
 <section id="remote-panel" class="panel hidden">
 <div class="step"><span>1</span><h2>Connect using their existing SSH access</h2></div>
@@ -20,7 +20,7 @@
 <p class="fine">Files go into new folders under the remote account. Existing policies, software and runs are preserved. Transfers are checksum-verified.</p>
 <p class="fine"><strong>Recorder:</strong> included with this app. The button below copies it for you; no file to choose.</p>
 <button id="ssh-install" class="secondary" disabled>Copy recorder to G1</button><p id="ssh-install-status" class="fine path"></p>
-<p class="fine"><strong>Policy:</strong> use the author’s complete deployment ZIP when available: model + configuration + runner instructions. A model file alone may be incomplete. Already installed? Skip this upload.</p><details><summary>Which policy file should I choose?</summary><p class="fine"><strong>.zip / .tar.gz:</strong> keep the deployment files together; the operator extracts them using the author’s instructions.<br><strong>.pt / .pth:</strong> ask whether it is a deployment export or training checkpoint. Unitree RL Gym needs a compatible TorchScript export.<br><strong>.onnx:</strong> use its matching runner and settings; include companion .data files when supplied.<br><strong>.yaml / .json:</strong> configuration, not the model.</p><p class="fine">This transfers bytes only. It does not inspect compatibility, convert models or start a controller. <a href="/policies" target="_blank" rel="noopener">Read the simple policy guide and Unitree examples ↗</a></p></details>
+<p class="fine"><strong>Policy:</strong> use the author’s complete deployment ZIP when available: model + configuration + runner instructions. A model file alone may be incomplete. Already installed? Skip this upload.</p><details><summary>Which policy file should I choose?</summary><p class="fine"><strong>.zip / .tar.gz:</strong> keep the deployment files together; the operator extracts them using the author’s instructions.<br><strong>.pt / .pth:</strong> ask whether it is a deployment export or training checkpoint. Unitree RL Gym needs a compatible TorchScript export.<br><strong>.onnx:</strong> use its matching runner and settings; include companion .data files when supplied.<br><strong>.yaml / .json:</strong> configuration, not the model.</p><p class="fine">This transfers bytes only. It does not inspect compatibility, convert models or start a controller. <a href="/policies">Read the simple policy guide and Unitree examples ↗</a></p></details>
 <label>Policy file or archive <span class="muted">optional</span><input id="ssh-policy-file" type="file"></label><button id="ssh-transfer" class="secondary" disabled>Transfer selected policy</button><p id="ssh-policy-status" class="fine path">Choose a downloaded policy file/archive. Transfer does not install or execute it.</p>
 <div class="divider"></div><div class="step"><span>3</span><h2>Open data collection on the G1</h2></div>
 <button id="ssh-open" disabled>Open robot recorder</button><a id="ssh-link" class="button hidden" target="_blank" rel="noopener">Go to robot recorder ↗</a>
@@ -31,7 +31,7 @@
 <div class="workspace" id="local-workspace">
 <section class="panel setup">
 <div class="step"><span>1</span><h2>Check connection</h2></div>
-<p class="fine"><a class="text-link" href="/connect" target="_blank" rel="noopener">How to connect to the G1 ↗</a></p>
+<p class="fine"><a class="text-link" href="/connect">How to connect to the G1 ↗</a></p>
 <p id="connection" role="status">Connecting to the local app…</p>
 <details id="settings"><summary>Connection settings</summary>
 <label>Robot network interface<select id="interface"><option value="auto">Automatic</option></select></label>
@@ -47,7 +47,7 @@
 <label>Run name<input id="name" required maxlength="100" placeholder="policy-a-standing-01"></label>
 <div class="pair"><label>Policy / Arena ID<input id="policy" maxlength="200" placeholder="Submission name or ID"></label><label>Operator<input id="operator" required maxlength="100" placeholder="Your name"></label></div>
 <label>Task &amp; success definition<textarea id="notes" rows="2" maxlength="4000" placeholder="What are you testing? What counts as success?"></textarea></label>
-<p class="fine">Include the runner version, configuration and launch command in your notes. The operator starts that runner after recording begins. <a href="/policies" target="_blank" rel="noopener">How to run a policy ↗</a></p>
+<p class="fine">Include the runner version, configuration and launch command in your notes. The operator starts that runner after recording begins. <a href="/policies">How to run a policy ↗</a></p>
 <button id="start" type="submit" disabled>Start recording</button>
 <p class="fine" id="start-help">Check the connection first. Start the policy only after “Recording” appears.</p>
 </form>

@@ -28,3 +28,5 @@ Both Python versions passed all 32 tests for 1.2.0. The updated SSH panel was ch
 Version 1.2.1 updates product branding to HIM Sim2Real Manager, removes session-specific naming, and labels Unitree G1 as the currently supported robot. Robot connectivity and recording behavior are unchanged from 1.2.0. Additional robot integrations are not implemented yet.
 
 Version 1.2.2 adds the in-app policy guide and file-type explainers. The guide distinguishes documented Unitree runner examples from validated hardware compatibility. No unknown policies were loaded or executed.
+
+Version 1.2.3 adds a visible Home link and clickable product name to each app/guide header. Internal guides now open in the current tab, retaining the recorder session. Browser navigation from the policy guide back to the manager was checked.
