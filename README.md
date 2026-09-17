@@ -1,10 +1,10 @@
-# G1 Session Kit — 1.2.0
+# HIM Sim2Real Manager — 1.2.1
 
 **Operators: start with [START_HERE.md](START_HERE.md). Run `bash OPEN_APP.sh` to open the local control panel.**
 
 ## Get started for the session
 
-**Mac/Linux laptop; Python 3.9+ required.** Download and unzip `G1_SESSION_KIT_v1.2.0.zip` from the [release page](https://github.com/HIMRobotics/him-sim2real-management/releases/latest), open a terminal in its `G1_SESSION_KIT` folder, and run:
+**Mac/Linux laptop; Python 3.9+ required.** Download and unzip `HIM_SIM2REAL_MANAGER_v1.2.1.zip` from the [release page](https://github.com/HIMRobotics/him-sim2real-management/releases/latest), open a terminal in its `G1_SESSION_KIT` folder, and run:
 
 ```bash
 bash OPEN_APP.sh
@@ -26,13 +26,15 @@ Before running a policy, complete the [short stationary recording and export che
 
 Need to try the interface without a robot? Run `bash OPEN_APP.sh --demo`; demo data is visibly marked synthetic and SSH operations are disabled.
 
-A portable, read-only recorder for two unknown Arena policies or any G1 policy exposing standard Unitree HG DDS telemetry. It runs alongside the policy and creates named `runs/` folders, portable HTML diagnostics, operator trial labels, and verified return archives in `exports/`.
+**Current robot support: Unitree G1.** Additional robot integrations are planned; this release connects only to the G1’s standard Unitree HG DDS telemetry.
+
+A portable, read-only recorder for Arena policy sessions. It runs alongside the policy and creates named `runs/` folders, portable HTML diagnostics, operator trial labels, and verified return archives in `exports/`.
 
 The app is a small local web page served by Python’s standard library: no Node, build step, internet, account, or extra web packages. It does not take camera ownership, publish robot commands, or change network configuration. Live capture requires an existing working Unitree SDK2 Python environment. Offline/demo/report/export operations use only Python's standard library, version 3.9+.
 
 | File | Purpose |
 |---|---|
-| [START_HERE.md](START_HERE.md) | Tonight's step-by-step operator instructions |
+| [START_HERE.md](START_HERE.md) | Step-by-step operator instructions |
 | [CONNECTION_GUIDE.md](CONNECTION_GUIDE.md) | Connect via the control laptop or onboard Linux/SSH; verify one stationary run |
 | [REMOTE_SETUP.md](REMOTE_SETUP.md) | Guided SSH check, recorder/policy transfer and remote browser connection |
 | `OPEN_APP.sh` | Open the local browser control panel |

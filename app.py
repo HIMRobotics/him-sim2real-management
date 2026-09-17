@@ -612,7 +612,7 @@ def main():
         if args.announce_json:
             print('ARENA_APP_READY '+json.dumps({'port':server.server_address[1],'token':app.token}),flush=True)
         url = server.origin + '/#key=' + app.token
-        print('\nG1 Session Kit — ' + ('DEMO ONLY' if args.demo else 'LOCAL RECORDER'), flush=True)
+        print('\nHIM Sim2Real Manager — ' + ('DEMO ONLY' if args.demo else 'LOCAL RECORDER'), flush=True)
         print('Open this exact link on this computer:\n' + url, flush=True)
         print('\nKeep this terminal open. Browser refresh/closure does not stop recording.\nCtrl+C here finishes the recorder; robot policies remain under operator control.\n', flush=True)
         if not args.no_browser:

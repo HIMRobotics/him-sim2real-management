@@ -1,4 +1,4 @@
-G1 SESSION KIT — SIX STEPS
+HIM SIM2REAL MANAGER — SIX STEPS
 
 Use a Mac/Linux laptop for guided SSH setup, or the existing Linux G1 computer.
 In this folder: bash OPEN_APP.sh

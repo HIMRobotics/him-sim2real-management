@@ -1,4 +1,4 @@
-# Tonight: record both G1 policies and return useful data
+# Record G1 policies and return useful data
 
 This folder records the G1 while you run a policy in your normal way. **It never sends motor commands.** You do not need to modify either policy.
 

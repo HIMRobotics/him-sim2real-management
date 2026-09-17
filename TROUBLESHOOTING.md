@@ -1,4 +1,4 @@
-# Troubleshooting for tonight
+# Troubleshooting
 
 **Web app:** launch with `bash OPEN_APP.sh`. Keep the app terminal open. If the browser does not open, copy the exact link printed there, including its access key. That link is only for the local recorder; do not share it.
 
@@ -20,7 +20,7 @@ export PYTHON=/absolute/path/to/the/existing/sdk/environment/bin/python
 ./kit.sh doctor
 ```
 
-Keep that environment selected for `start.sh`. If no working SDK2 environment exists, have the robot operator provision it using [Unitree's official instructions](https://github.com/unitreerobotics/unitree_sdk2_python). Installing only a Python package may not supply the compatible native Cyclone DDS library. Do not replace the working policy environment or update robot firmware for this collector. The kit includes no bundled SDK/native binaries and cannot guarantee an unprovisioned computer will connect tonight.
+Keep that environment selected for `start.sh`. If no working SDK2 environment exists, have the robot operator provision it using [Unitree's official instructions](https://github.com/unitreerobotics/unitree_sdk2_python). Installing only a Python package may not supply the compatible native Cyclone DDS library. Do not replace the working policy environment or update robot firmware for this collector. The kit includes no bundled SDK/native binaries and cannot guarantee an unprovisioned computer will connect.
 
 ## No valid `rt/lowstate` / automatic interface selection fails
 
