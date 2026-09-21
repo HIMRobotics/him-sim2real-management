@@ -62,11 +62,26 @@ Try a non-robot demo:
 
 The run is permanently marked `synthetic_demo`. This tests file creation and reporting, not SDK connectivity. Never include it as a measured robot result.
 
+## Development with uv
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run from the repository root:
+
+```bash
+uv sync --locked
+uv run python app.py --demo
+```
+
+uv creates `.venv` and uses Python 3.12 by default, downloading it if needed. The project supports Python 3.9+. The app and offline tools have no third-party runtime dependencies. The default development environment includes pytest, Ruff, and mypy.
+
 Run the included tests:
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv run --locked python -m unittest discover -s tests -v
 ```
+
+Add dependencies with `uv add PACKAGE`, or development tools with `uv add --dev PACKAGE`. Commit both `pyproject.toml` and `uv.lock` after dependency changes. Use `uv sync --locked` to reproduce the committed environment. See the [uv project guide](https://docs.astral.sh/uv/guides/projects/) for details.
+
+For live recording, keep using the existing validated Unitree SDK Python environment through the launchers, for example `PYTHON=/path/to/sdk/python bash OPEN_APP.sh`. The isolated uv environment does not include the robot SDK or its native DDS libraries. The original `python3` and shell launcher workflows remain available.
 
 Existing project references: `g1_table_tennis_rally/DEPLOYMENT_DATA.md` describes the older controller-specific RGB-D recorder. `him-sports-eval` provides formal task-specific evaluation and review. This kit is standalone; it does not start either controller or automatically translate its logs into formal benchmark observations.
 
