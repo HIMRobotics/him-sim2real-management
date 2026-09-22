@@ -3,9 +3,9 @@
 ## Summary
 
 Updated September 22, 2026. **Current stage: Stage 1, partially complete.**
-The dry-run core, configuration and 15 deterministic tests are implemented.
-The supervisor runtime, controller double-press detector, transports, IPC,
-CLI and test producer are not yet implemented. Stages 2 and 3 have not started.
+The dry-run core, configuration, Start double-press detector, read-only SDK
+controller monitor and 23 deterministic tests are implemented. The full
+supervisor runtime, policy transports, IPC, CLI and test producer are pending. Stages 2 and 3 have not started.
 
 Revise `ESTOP_PLAN.md` around staged delivery inside `him-sim2real-management`. Implement the robot-side supervisor, watchdogs, local controls, and fault tests first. Stage one defaults to dry-run and never publishes motor commands.
 
@@ -21,18 +21,18 @@ Keep that interface independent of a training framework. Unitree RL Gym becomes 
 - [x] Four configurable 200 ms watchdog checks. These run when the core is called, not in a background process yet.
 - [x] `robot_safety/config.py`: immutable settings, documented units, configurable placeholder bounds and observation history size.
 - [x] Descriptive internal state names and concise documentation. Core formatting and lint checks pass with Ruff.
-- [x] 15 deterministic core/config tests pass. No hardware tests or motor commands have been performed.
+- [x] 23 deterministic core/config/controller tests pass. No hardware tests or motor commands have been performed.
 
-**Next task: Start double-press detection**
+**Start double-press detection (implemented, hardware verification pending)**
 
-- [ ] Add a controller-input module that decodes Start from the installed SDK mapping. Remove the unused Select-based configuration placeholder.
-- [ ] Detect press → release → press within a configurable 500 ms initial dry-run window, measured between rising edges and inclusive at the boundary. This interval is our proposed detector setting, not a verified firmware specification.
-- [ ] Emit a stop event on the second press. Holding Start or repeating pressed samples cannot count as additional presses. Consume a completed pair. An expired second press becomes the first press of a new pair.
-- [ ] Require an observed release after startup or input reset before counting presses, so attaching while Start is held cannot fabricate a gesture.
-- [ ] Separate `stop_requested`, the detected event, from `start_button_pressed`, the physical input used to block reset. The current `stop_pressed` argument does not distinguish these purposes.
-- [ ] Keep damping latched after release. Require fresh state, Start released and explicit reset followed by separate arm. Clear pending gesture history on reset or stale input.
+- [x] Add a controller-input module that decodes Start from the installed SDK mapping. Remove the unused Select-based configuration placeholder.
+- [x] Detect press → release → press within a configurable 500 ms initial dry-run window, measured between rising edges and inclusive at the boundary. This interval is our proposed detector setting, not a verified firmware specification.
+- [x] Emit a stop event on the second press. Holding Start or repeating pressed samples cannot count as additional presses. Consume a completed pair. An expired second press becomes the first press of a new pair.
+- [x] Require an observed release after startup or input reset before counting presses, so attaching while Start is held cannot fabricate a gesture.
+- [x] Separate `stop_requested`, the detected event, from `start_button_pressed`, the physical input used to block reset. The old `stop_pressed` argument has been replaced.
+- [x] Keep damping latched after release. Require fresh state, Start released and explicit reset followed by separate arm. Clear pending gesture history on reset or stale input.
 - [ ] Serialize stop events ahead of reset/arm requests in each runtime cycle. Timestamp equality alone is not sufficient arbitration.
-- [ ] Test single/double/triple presses, exact window boundaries, expired windows, long holds, repeated samples, startup while held, stale input and reset/rearm behavior.
+- [x] Test single/double/triple presses, exact window boundaries, expired windows, long holds, repeated samples, startup while held, stale input and reset/rearm behavior.
 
 The Start double-press binding follows the operator's description of this G1.
 Its firmware behavior and priority over custom low-level control still require
@@ -40,6 +40,8 @@ hardware verification. Our detector will run independently of policy inference.
 
 The remaining Stage 1 items below are pending except for the core behavior
 and configuration identified above.
+
+**Next task:** build the continuously scheduled supervisor and local IPC/test producer. The manual diagnostic `tools/controller_monitor.py` is available now, but does not provide that runtime or motor control. See `robot_safety/README.md` for actual-controller test instructions.
 
 **Implementation structure**
 
