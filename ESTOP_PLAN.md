@@ -21,9 +21,9 @@ Keep that interface independent of a training framework. Unitree RL Gym becomes 
 - [x] Four configurable 200 ms watchdog checks. These run when the core is called, not in a background process yet.
 - [x] `robot_safety/config.py`: immutable settings, documented units, configurable placeholder bounds and observation history size.
 - [x] Descriptive internal state names and concise documentation. Core formatting and lint checks pass with Ruff.
-- [x] 23 deterministic core/config/controller tests pass. No hardware tests or motor commands have been performed.
+- [x] 23 deterministic core/config/controller tests pass. The operator also verified Start double-press detection with the actual G1 controller. Physical damping has not been tested and the monitor sends no motor commands.
 
-**Start double-press detection (implemented, hardware verification pending)**
+**Start double-press detection (implemented, controller input verified)**
 
 - [x] Add a controller-input module that decodes Start from the installed SDK mapping. Remove the unused Select-based configuration placeholder.
 - [x] Detect press → release → press within a configurable 500 ms initial dry-run window, measured between rising edges and inclusive at the boundary. This interval is our proposed detector setting, not a verified firmware specification.
@@ -35,8 +35,10 @@ Keep that interface independent of a training framework. Unitree RL Gym becomes 
 - [x] Test single/double/triple presses, exact window boundaries, expired windows, long holds, repeated samples, startup while held, stale input and reset/rearm behavior.
 
 The Start double-press binding follows the operator's description of this G1.
-Its firmware behavior and priority over custom low-level control still require
-hardware verification. Our detector will run independently of policy inference.
+The operator supplied a monitor trace showing Start decoding (`0400`) and two
+detected double presses about 160 ms apart. A 1.06-second interval was rejected
+by the 500 ms window. This verifies received input detection only. Firmware
+priority over custom policies and physical damping still require hardware verification. Our detector will run independently of policy inference.
 
 The remaining Stage 1 items below are pending except for the core behavior
 and configuration identified above.

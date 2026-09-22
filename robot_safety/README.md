@@ -41,3 +41,7 @@ python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
 Run with `--debug` to print the two raw button bytes, robot tick, sample gaps, and intervals between detected presses. If no Start transitions appear on `rt/lowstate`, try `--topic rt/lf/lowstate`, as used by the installed SDK controller example. Both topics still require verification on your firmware. A Start press should set bit 2 in the first printed button byte.
 
 If transitions appear but no stop event, check that two rising edges occur within the configured window and that sample gaps stay below the 200 ms freshness timeout. Repeated robot ticks no longer erase gesture history in this diagnostic tool. A diagnostic observation is not a verified radio-health or motor-stop guarantee.
+
+## Recorded operator validation
+
+On September 22, 2026, the operator confirmed successful detection using the actual G1 controller. The supplied debug trace showed Start as `0400`, two double-press events with approximately 160 ms between presses, and rejection of an interval of approximately 1.06 seconds. Displayed telemetry gaps were around 1 ms. Firmware version, interface and selected topic were not recorded in the supplied trace. This validates controller-input decoding and gesture detection only, not motor damping or stop priority over a policy.
