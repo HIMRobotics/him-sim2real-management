@@ -7,6 +7,7 @@ from copy import deepcopy
 from enum import Enum
 
 from .config import COMMAND_FIELDS, Config
+from .controller import StartDoublePressDetector
 
 
 def vector(value, size, low, high):
@@ -41,6 +42,9 @@ class Supervisor:
     def __init__(self, config=None):
         if config is None:
             config = Config()
+        self.start_double_press_detector = StartDoublePressDetector(
+            config.double_press_window_secs, config.robot_timeout
+        )
         self.config = config  # Immutable joint and watchdog settings.
         self.supervisor_instance_id = (
             uuid.uuid4().hex
@@ -49,7 +53,9 @@ class Supervisor:
         # Operating mode and stop diagnostics.
         self.supervisor_phase = SupervisorPhase.INHIBITED
         self.stop_reason = None  # First fault or stop cause for the current latch.
-        self.stop_pressed = False  # Latest decoded stop input, blocks reset.
+        self.start_button_pressed = (
+            False  # Physical Start state, blocks reset while pressed.
+        )
         self.time_stop_latched_secs = (
             None  # Most recent latch time, retained after reset.
         )
@@ -103,24 +109,27 @@ class Supervisor:
             None,
         )
 
-    def state(self, observation, stop_pressed, cur_time_secs):
+    def state(
+        self, observation, start_button_pressed, cur_time_secs, *, stop_requested=False
+    ):
         """Process a robot observation and the decoded controller stop input.
 
         Args:
             observation: Dict with joint positions ``q`` in radians and
                 velocities ``dq`` in radians/second, each a list of
                 ``config.joints`` values in the configured joint order.
-            stop_pressed: True when the decoded controller input requests
-                a stop. This is not the raw Start button state. The caller
-                must detect the double press separately. False does not
-                clear a latched stop or establish that the radio is live.
+            start_button_pressed: Raw Start state from the controller decoder.
+                A double press requests a stop. A held Start blocks reset.
+            stop_requested: Independent one-shot stop event, even if Start
+                is released. False never clears a latched stop.
             cur_time_secs: Local monotonic processing time in seconds.
         """
         # Check deadlines before a new packet can replace the old timestamp.
         self.watchdogs(cur_time_secs)
         joint_count = self.config.joints
         if (
-            type(stop_pressed) is not bool
+            type(start_button_pressed) is not bool
+            or type(stop_requested) is not bool
             or not isinstance(observation, dict)
             or not all(
                 vector(observation.get(field_name), joint_count, *bounds)
@@ -130,11 +139,12 @@ class Supervisor:
                 )
             )
         ):
+            self.start_double_press_detector.reset()
             self.stop("invalid_robot_state", cur_time_secs)
             return
-        self.time_last_robot_state_received_secs, self.stop_pressed = (
+        self.time_last_robot_state_received_secs, self.start_button_pressed = (
             cur_time_secs,
-            bool(stop_pressed),
+            start_button_pressed,
         )
         self.latest_observation_id += 1
         self.observation_received_times_secs[self.latest_observation_id] = cur_time_secs
@@ -146,7 +156,10 @@ class Supervisor:
         self.latest_robot_observation = deepcopy(
             dict(observation, state_id=self.latest_observation_id)
         )
-        if stop_pressed:
+        double_press_detected = self.start_double_press_detector.update(
+            start_button_pressed, cur_time_secs
+        )
+        if stop_requested or double_press_detected:
             self.stop("controller_stop", cur_time_secs)
 
     def control(self, command, cur_time_secs):
@@ -164,7 +177,7 @@ class Supervisor:
             ):
                 return {"error": "stop takes precedence in this cycle"}
             if (
-                self.stop_pressed
+                self.start_button_pressed
                 or self.time_last_robot_state_received_secs is None
                 or cur_time_secs - self.time_last_robot_state_received_secs
                 >= self.config.robot_timeout
@@ -177,6 +190,7 @@ class Supervisor:
                     SupervisorPhase.INHIBITED,
                     None,
                 )
+                self.start_double_press_detector.reset()
                 self.policy_session_id, self.accepted_policy_command = None, None
             elif self.supervisor_phase == SupervisorPhase.INHIBITED:
                 self.supervisor_phase, self.policy_session_id = (
@@ -331,7 +345,7 @@ class Supervisor:
             "motor_application_latency": None,
             "controller_radio_live": None,
             "state": deepcopy(self.latest_robot_observation),
-            "stop_pressed": self.stop_pressed,
+            "start_button_pressed": self.start_button_pressed,
             "action_age": None
             if self.time_action_watchdog_refreshed_secs is None
             else cur_time_secs - self.time_action_watchdog_refreshed_secs,

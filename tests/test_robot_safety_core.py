@@ -132,7 +132,7 @@ class SupervisorTests(unittest.TestCase):
                 elif phase == 'STOP_LATCHED':
                     supervisor.stop('operator_stop', 0.)
                 supervisor.state({'q': [0., 0.], 'dq': [0., 0.]},
-                                 True, .01)
+                                 True, .01, stop_requested=True)
                 self.assertEqual(supervisor.supervisor_phase, 'STOP_LATCHED')
                 self.assertIsNone(supervisor.policy_session_id)
                 self.assertIsNone(supervisor.accepted_policy_command)
