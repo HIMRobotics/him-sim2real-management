@@ -17,3 +17,8 @@ venv/
 .DS_Store
 .pytest_cache/
 .ruff_cache/
+
+# Local ROS 2 build products
+/build/
+/install/
+/log/

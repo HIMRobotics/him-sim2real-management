@@ -7,6 +7,7 @@ MAX_CONFIGURED_JOINTS = 35  # Existing software cap, not a robot capability clai
 START_BUTTON_BYTE = 2
 START_BUTTON_MASK = 1 << 2
 WIRELESS_REMOTE_SIZE = 40
+EXPIRY_ROUNDING_TOLERANCE_SECS = 1e-9  # Allow floating-point subtraction roundoff.
 COMMAND_FIELDS = ("q", "dq", "kp", "kd", "tau")
 
 
@@ -66,13 +67,14 @@ class Config:
     double_press_window_secs: float = 0.5  # Maximum interval between Start press edges.
 
     observation_history_size: int = 512
+    runtime_queue_capacity: int = 64  # Maximum observations or controls per cycle.
     command_limits: JointCommandLimits = field(default_factory=JointCommandLimits)
     robot_position_bounds_rad: tuple = (-1e6, 1e6)
     robot_velocity_bounds_rad_per_sec: tuple = (-1e6, 1e6)
 
     def __post_init__(self):
         if not 1 <= self.joints <= MAX_CONFIGURED_JOINTS:
-            raise ValueError("invalid joint count or stop bit")
+            raise ValueError("invalid joint count")
         for key in (
             "period",
             "action_timeout",
@@ -91,6 +93,11 @@ class Config:
             or self.observation_history_size < 1
         ):
             raise ValueError("observation history size must be a positive integer")
+        if (
+            type(self.runtime_queue_capacity) is not int
+            or self.runtime_queue_capacity < 1
+        ):
+            raise ValueError("runtime queue capacity must be a positive integer")
         if not isinstance(self.command_limits, JointCommandLimits):
             raise TypeError("command_limits must be JointCommandLimits")
         validate_bounds(self.robot_position_bounds_rad)

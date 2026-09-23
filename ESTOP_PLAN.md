@@ -1,141 +1,109 @@
-# G1 robot-side supervisor first, frontend integration later
+# G1 safety pipeline: robot side first, frontend later
 
-## Summary
+Updated September 23, 2026. **Stage 1 is partially complete. All output remains dry-run.**
 
-Updated September 22, 2026. **Current stage: Stage 1, partially complete.**
-The dry-run core, configuration, Start double-press detector, read-only SDK
-controller monitor and 23 deterministic tests are implemented. The full
-supervisor runtime, policy transports, IPC, CLI and test producer are pending. Stages 2 and 3 have not started.
+## Architecture and current checkpoint
 
-Revise `ESTOP_PLAN.md` around staged delivery inside `him-sim2real-management`. Implement the robot-side supervisor, watchdogs, local controls, and fault tests first. Stage one defaults to dry-run and never publishes motor commands.
+```text
+policy -> runner -> precheck -> safety checker -> postcheck -> motor gate
+                                                              |
+                                                    dry_run_output (today)
+                                                    Unitree controller (future)
+                                                              |
+                                                           actuators
 
-The first test runner is a **stand-in for an actual policy**: it generates predictable proposed joint commands and can deliberately freeze, disconnect, or send invalid data. It exercises the same interface that real runners will use.
+controller stop -> abort -> checker and motor gate
+```
 
-Keep that interface independent of a training framework. Unitree RL Gym becomes the first real adapter; multiple compatible policies can then share it. RL Lab and other runners can adopt the same interface later.
+The checker relays each accepted whole-joint frame once. An invalid frame latches
+abort and blocks future relaying. The independent motor gate selects damping on
+abort, command expiry or missing postcheck messages. Controller double press
+broadcasts directly to both nodes. Run roles in separate processes.
 
-## Stage 1 — Robot supervisor and dry-run validation (in progress)
+ROS topics and typed messages are defined under `ros2/`. Commands use bounded
+latest-value histories. Abort is retained and repeated every 100 ms. Receipt and
+expiry timestamps currently require the same Linux host/boot and clock namespace.
+ROS topic naming alone does not prevent unauthorized publishers or enforce latency.
 
-**Implemented so far**
+## Stage 1 — Software checks and ROS dry-run graph
 
-- [x] `robot_safety/core.py`: operating-state enum, stop latch, explicit arm/reset, session revocation, action validation and fake command selection.
-- [x] Four configurable 200 ms watchdog checks. These run when the core is called, not in a background process yet.
-- [x] `robot_safety/config.py`: immutable settings, documented units, configurable placeholder bounds and observation history size.
-- [x] Descriptive internal state names and concise documentation. Core formatting and lint checks pass with Ruff.
-- [x] 23 deterministic core/config/controller tests pass. The operator also verified Start double-press detection with the actual G1 controller. Physical damping has not been tested and the monitor sends no motor commands.
+Completed:
 
-**Start double-press detection (implemented, controller input verified)**
+- [x] Core operating states, command validation, session/sequence checks and stop latch.
+- [x] Configurable 200 ms freshness checks and a 5 ms target arbitration cadence.
+- [x] Start press-release-press detector with a configurable 500 ms window.
+- [x] Physical button state is separate from the one-shot stop event.
+- [x] Operator verified actual-controller input: `0400`, two approximately 160 ms double presses, and rejection of a 1.06-second interval. Physical damping was not tested.
+- [x] Typed precheck/postcheck, feedback, observation, abort and diagnostic output messages.
+- [x] ROS checker, motor gate and controller-stop adapters with initial explicit arm services.
+- [x] Motor gate independently expires commands when the checker is silent.
+- [x] Core, controller, configuration, gate and isolated ROS message-delivery tests.
 
-- [x] Add a controller-input module that decodes Start from the installed SDK mapping. Remove the unused Select-based configuration placeholder.
-- [x] Detect press → release → press within a configurable 500 ms initial dry-run window, measured between rising edges and inclusive at the boundary. This interval is our proposed detector setting, not a verified firmware specification.
-- [x] Emit a stop event on the second press. Holding Start or repeating pressed samples cannot count as additional presses. Consume a completed pair. An expired second press becomes the first press of a new pair.
-- [x] Require an observed release after startup or input reset before counting presses, so attaching while Start is held cannot fabricate a gesture.
-- [x] Separate `stop_requested`, the detected event, from `start_button_pressed`, the physical input used to block reset. The old `stop_pressed` argument has been replaced.
-- [x] Keep damping latched after release. Require fresh state, Start released and explicit reset followed by separate arm. Clear pending gesture history on reset or stale input.
-- [ ] Serialize stop events ahead of reset/arm requests in each runtime cycle. Timestamp equality alone is not sufficient arbitration.
-- [x] Test single/double/triple presses, exact window boundaries, expired windows, long holds, repeated samples, startup while held, stale input and reset/rearm behavior.
+The earlier `runtime.py` remains an offline reference with synthetic queue tests.
+It is not used by the ROS nodes, whose callbacks and timers run in ROS executors.
 
-The Start double-press binding follows the operator's description of this G1.
-The operator supplied a monitor trace showing Start decoding (`0400`) and two
-detected double presses about 160 ms apart. A 1.06-second interval was rejected
-by the 500 ms window. This verifies received input detection only. Firmware
-priority over custom policies and physical damping still require hardware verification. Our detector will run independently of policy inference.
+Next review checkpoints, in order:
 
-The remaining Stage 1 items below are pending except for the core behavior
-and configuration identified above.
+1. Add a read-only SDK bridge to `/safety/robot_feedback`, preserving local receipt
+   time, joint mapping and physical Start state. No motor publisher.
+2. Add a synthetic ROS command producer, including deliberately invalid actions
+   and freezes. Verify real feedback plus fake output through the full graph.
+3. Add coordinated arm/reset and run identity. The core has local reset, but the
+   current ROS nodes deliberately expose no independent reset service. Retained
+   aborts and old sessions must not permit partial or automatic recovery.
+4. Define policy end/disconnection notification and operator lease. Topic silence
+   already causes a timeout, but immediate process-exit notification is not implemented.
 
-**Next task:** build the continuously scheduled supervisor and local IPC/test producer. The manual diagnostic `tools/controller_monitor.py` is available now, but does not provide that runtime or motor control. See `robot_safety/README.md` for actual-controller test instructions.
+Stage 1 completion: invalid input and controller abort produce fake damping,
+checker silence triggers the independent gate, startup/reconnect cannot resume
+motion, and no node can create Unitree motor output.
 
-**Implementation structure**
+## Stage 2 — Managed services and first real runner
 
-- Add a Python `robot_safety/` package using the installed G1-compatible Python SDK. The local C++ SDK checkout lacks G1 message definitions, so C++ migration is deferred.
-- Run the supervisor in its own process, separate from inference, recording, and the web application.
-- Provide two transports: synthetic robot state for automated tests, and read-only G1 state for observing controller input.
-- Both transports route selected commands to a fake output sink. Stage one has no option to enable real motor publication.
-- Use a configurable 5 ms arbitration period as an initial software target, not a guaranteed real-time deadline.
+- Add systemd units and installation/check scripts. Bash performs setup only.
+- Tie health notifications to actual callback/timer progress, with an initial
+  1-second process watchdog separate from command deadlines. Restart inhibited.
+- Integrate one real runner, initially RL Gym, replacing all direct motor writes
+  with precheck publication, including startup and cleanup.
+- Preserve the author's joint mapping, observations, gains and timing.
+- Isolate policy workers from Unitree motor interfaces and restrict who can
+  publish postcheck. Registration or lock files do not establish exclusivity.
+- Test stalled inference, flooded inputs, process death, lost connections,
+  logging failure and reboot. A service restart is recovery, not a physical stop.
 
-**Control interface**
+## Stage 3 — Physical G1 acceptance, then frontend
 
-Provide a local Unix-domain socket interface and CLI with `status`, `stop`, `reset`, `arm`, and test-runner launch commands. Restrict socket access using filesystem permissions and peer credentials.
+Known hardware: operator reports **G1 EDU**. Arm joint count, wrist configuration,
+waist configuration, firmware and support arrangement still need confirmation.
 
-Use separate operator-control and policy-action sockets so flooded policy input cannot queue ahead of a stop. Action messages contain a session ID, increasing sequence, supervisor-issued state ID, and per-joint proposed targets/gains. Keep only the latest valid action; bound message sizes and processing work.
+Before motor output, establish a validated per-joint profile, controller ownership,
+mode-specific stop behavior and an appropriate supported test setup. The 29-joint
+software default and uniform limits/gains do not identify or validate the hardware.
 
-Supply robot state through this interface so future isolated policy workers do not need direct DDS access.
+Physical transition:
 
-**Stop behavior**
+1. Real telemetry with fake output and a small smooth arm trajectory.
+2. Fault tests and verification of the independent stop path while supported.
+3. Arm control handover holding fresh measured joint positions, without motion.
+4. A small jerk-limited arm movement with validated position, speed, acceleration,
+   gain and tracking limits. No timing-stall catch-up jump.
+5. Expand range and policy complexity only after recorded acceptance.
 
-- Start `INHIBITED`; never automatically arm after launch, reconnect, or restart.
-- Use `ARMED`, `RUNNING`, and `STOP_LATCHED` states with a separate fault reason.
-- Double-press Start is the controller stop binding. Latch the stop on the second detected press in every control phase.
-- A stop revokes the policy session, discards pending actions, and selects damping output on the next arbitration cycle.
-- Damping output uses zero stiffness, zero desired velocity, zero feedforward torque, and a configured damping profile. Stage-one gains are dry-run placeholders, not validated G1 damping profiles.
-- Stop takes precedence over arm/reset and policy commands. Start being physically pressed prevents reset, independently of the stop event.
-- Reset returns to inhibited and requires a separate arm action. No stale session becomes valid again.
-- A normal policy exit, disconnected action client, or invalid action immediately latches damping.
-- No 30-second grace period or stationary controller is included, following the selected immediate-damping behavior.
+An arm SDK adapter must preserve the selected stock-controller ownership model.
+It is distinct from full-body low-level takeover. Normal controlled deceleration,
+arm-control release and whole-body emergency damping are different responses.
+Damping can cause a fall. Verify downstream command-loss behavior when the motor
+gate or computer fails, and record unsupported failure boundaries.
 
-**Watchdogs**
+Only after robot-side acceptance, add frontend stop/status APIs, explicit
+coordinated reset/rearm, operator connection handling and asynchronous event
+recording. Keep Stop recording separate. Show request, latch, publication and
+physical feedback as distinct evidence. Never infer physical safety from an ACK.
 
-Use monotonic time and independently track:
+## Validation records and references
 
-- **Action freshness:** latch damping at 200 ms without a valid new action.
-- **Observation freshness:** reject actions based on supervisor-issued state aged 200 ms or more.
-- **Robot-state freshness:** latch damping at 200 ms without fresh state.
-- **Loop progress:** a gap of 200 ms latches a fault when execution resumes.
+See `robot_safety/README.md` for build/test commands, topic contracts and the
+operator's controller-input test. Automated and physical tests remain distinct.
 
-These are initial configurable dry-run thresholds. Replayed or malformed messages do not refresh deadlines. The action watchdog starts on arm. Robot-state age is measured from the last valid observation, and loop progress from the last cycle. No policy command is selected until a valid action is available.
-
-Do not label these measurements as motor-application latency. Report that latency as unavailable unless a verified robot acknowledgment mechanism is added. Likewise, fresh telemetry does not establish a live controller radio link.
-
-## Stage 2 — Service setup and first real runner (not started)
-
-**Watchdog service setup**
-
-- Provide installation/check scripts and a systemd service template; Bash handles setup, not timing-critical monitoring.
-- Use systemd notification/watchdog support with a 1-second process-health timeout. Notifications depend on fresh arbitration-loop progress, not merely a living background thread.
-- Restart failed services into inhibited dry-run mode; never relaunch or resume a policy automatically.
-- Separate loop execution from logging and control-request handling. Logging failures cannot block arbitration.
-- Detect systems without systemd and provide foreground execution. This environment does not currently show systemd as PID 1, so service behavior requires validation on the actual robot host.
-- Treat service restart as recovery. It does not guarantee damping during a supervisor or computer failure.
-
-**Real policy adapter**
-
-Integrate Unitree RL Gym by replacing all motor writes—including startup poses and shutdown—with supervisor calls. Preserve the author’s observation construction, joint mapping, gains, and timing.
-
-Run the worker without robot-network access and supply state through the supervisor. Until that isolation is enforced, describe the integration as cooperative, not bypass-proof. Restrict unmanaged publishers on the robot network as part of hardware commissioning.
-
-Validate the real runner against the fake output sink before enabling hardware transport.
-
-## Stage 3 — Physical G1 acceptance, then frontend (not started)
-
-**Physical control**
-
-Add real SDK motor publication only after recording the exact robot variant, firmware, joint mapping, damping profile, and controller ownership procedure.
-
-Require an explicit hardware configuration and activation step. Do not automatically terminate the stock controller or compete with another publisher. Before ownership, the supervisor must report that it cannot enforce motor damping.
-
-With the robot appropriately supported:
-
-- Verify controller stop during startup, pose transitions, and stalled inference.
-- Verify command-loss behavior when the supervisor freezes or loses communication.
-- Measure controller-input latency, supervisor response, and observed robot response separately.
-- Establish whether radio loss can be detected and whether firmware provides a bounded protective response.
-
-Unverified whole-computer or communication-failure protection remains a stated limitation.
-
-**Frontend integration**
-
-After robot-side acceptance, add authenticated stop/status endpoints and a persistent Emergency damping button. Stop requests bypass recording/upload/export work and require no confirmation. Preserve the separate Stop recording action.
-
-Show stop requested, supervisor latched, damping publication, and available robot feedback as distinct evidence. An acknowledgment must not display “robot safe.” Frontend reconnect never clears the latch.
-
-## Tests and completion criteria
-
-- Deterministic clock tests at, below, and above each watchdog deadline.
-- Controller stop during every lifecycle state, including concurrent arm/reset.
-- Frozen/crashed policy, stale observations, duplicate sequences, invalid values, and flooded action input.
-- No policy command selected after a latch; old sessions remain rejected after reset.
-- Dry-run mode creates no motor-command publisher and never releases stock-controller ownership.
-- Supervisor stalls, restart behavior, unavailable systemd, and logging failure.
-- Existing recorder tests continue passing.
-
-**Robot-side deliverable (Stage 1 plus Stage 2 service setup):** revised plan, working dry-run supervisor, test producer, local CLI, service/setup files, and automated fault tests. No frontend changes or physical motor activation in this milestone.
+- [Unitree RL Gym runner](https://github.com/unitreerobotics/unitree_rl_gym/blob/main/deploy/deploy_real/deploy_real.py)
+- [Unitree G1 arm example and joint mapping](https://github.com/unitreerobotics/unitree_sdk2_python/blob/master/example/g1/high_level/g1_arm7_sdk_dds_example.py)
