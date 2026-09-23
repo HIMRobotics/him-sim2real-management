@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Run one dry-run safety ROS node per process."""
+
+from robot_safety.ros_nodes import main
+
+if __name__ == "__main__":
+    main()
