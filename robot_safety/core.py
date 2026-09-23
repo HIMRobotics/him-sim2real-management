@@ -110,9 +110,15 @@ class Supervisor:
         )
 
     def state(
-        self, observation, start_button_pressed, cur_time_secs, *, stop_requested=False
+        self,
+        observation,
+        start_button_pressed,
+        cur_time_secs,
+        *,
+        stop_requested=False,
+        received_time_secs=None,
     ):
-        """Process a robot observation and the decoded controller stop input.
+        """Process feedback and return whether this sample requests a stop.
 
         Args:
             observation: Dict with joint positions ``q`` in radians and
@@ -123,9 +129,23 @@ class Supervisor:
             stop_requested: Independent one-shot stop event, even if Start
                 is released. False never clears a latched stop.
             cur_time_secs: Local monotonic processing time in seconds.
+            received_time_secs: Local receipt time before queueing. Defaults
+                to processing time for callers without an input queue.
         """
         # Check deadlines before a new packet can replace the old timestamp.
         self.watchdogs(cur_time_secs)
+        if received_time_secs is None:
+            received_time_secs = cur_time_secs
+        if (
+            not math.isfinite(received_time_secs)
+            or not 0 <= cur_time_secs - received_time_secs < self.config.robot_timeout
+            or (
+                self.time_last_robot_state_received_secs is not None
+                and received_time_secs < self.time_last_robot_state_received_secs
+            )
+        ):
+            self.input_fault("stale_robot_input", cur_time_secs)
+            return
         joint_count = self.config.joints
         if (
             type(start_button_pressed) is not bool
@@ -143,11 +163,13 @@ class Supervisor:
             self.stop("invalid_robot_state", cur_time_secs)
             return
         self.time_last_robot_state_received_secs, self.start_button_pressed = (
-            cur_time_secs,
+            received_time_secs,
             start_button_pressed,
         )
         self.latest_observation_id += 1
-        self.observation_received_times_secs[self.latest_observation_id] = cur_time_secs
+        self.observation_received_times_secs[self.latest_observation_id] = (
+            received_time_secs
+        )
         while (
             len(self.observation_received_times_secs)
             > self.config.observation_history_size
@@ -157,10 +179,17 @@ class Supervisor:
             dict(observation, state_id=self.latest_observation_id)
         )
         double_press_detected = self.start_double_press_detector.update(
-            start_button_pressed, cur_time_secs
+            start_button_pressed, received_time_secs
         )
         if stop_requested or double_press_detected:
             self.stop("controller_stop", cur_time_secs)
+        return stop_requested or double_press_detected
+
+    def input_fault(self, stop_reason, cur_time_secs):
+        """Latch an input fault and require fresh feedback before reset."""
+        self.start_double_press_detector.reset()
+        self.time_last_robot_state_received_secs = None
+        self.stop(stop_reason, cur_time_secs)
 
     def control(self, command, cur_time_secs):
         """Handle ``stop``, ``reset``, ``arm``, or ``status`` at ``cur_time_secs``.
