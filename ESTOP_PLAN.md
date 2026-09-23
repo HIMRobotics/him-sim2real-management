@@ -44,7 +44,7 @@ It is not used by the ROS nodes, whose callbacks and timers run in ROS executors
 
 Next review checkpoints, in order:
 
-1. Add a read-only SDK bridge to `/safety/robot_feedback`, preserving local receipt
+1. Implemented for review: a read-only SDK bridge to `/safety/robot_feedback`, preserving local receipt
    time, joint mapping and physical Start state. No motor publisher.
 2. Add a synthetic ROS command producer, including deliberately invalid actions
    and freezes. Verify real feedback plus fake output through the full graph.
@@ -73,8 +73,17 @@ motion, and no node can create Unitree motor output.
 
 ## Stage 3 — Physical G1 acceptance, then frontend
 
-Known hardware: operator reports **G1 EDU**. Arm joint count, wrist configuration,
-waist configuration, firmware and support arrangement still need confirmation.
+Known hardware: operator reports **G1 EDU, 29 DOF, seven joints per arm**, with
+no dexterous hand attachments. A locked-waist configuration is available, but the
+current physical lock state remains unconfirmed. Operator reports a 1,200-pound
+rated gantry/hoist with suitable harness, feet bearing weight and arm clearance.
+
+Installed Python SDK: 1.0.1, commit `65691c8`, Cyclone DDS 0.10.2. PC4 manifest:
+master service 1.0.0.2, patch 1.0.0.6, video hub 1.0.2.3. Live LowState version
+was `[0, 0]`, so motion-controller and motor firmware remain unidentified.
+
+The new read-only bridge maps all 29 body slots, including locked waist slots.
+This mapping is not a commissioned command profile or proof of movable joints.
 
 Before motor output, establish a validated per-joint profile, controller ownership,
 mode-specific stop behavior and an appropriate supported test setup. The 29-joint
