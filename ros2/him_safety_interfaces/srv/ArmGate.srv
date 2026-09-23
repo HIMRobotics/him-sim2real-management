@@ -1,0 +1,5 @@
+# Pass the session returned by the checker's arm service.
+string<=128 session_id
+---
+bool success
+string message
