@@ -24,7 +24,7 @@ The core remains the ROS-independent checker logic. `motor_gate.py` contains the
 
 | Topic | Typed message | Role |
 | --- | --- | --- |
-| `/safety/robot_feedback` | `RobotFeedback` | Future SDK bridge supplies measurements and physical Start |
+| `/safety/robot_feedback` | `RobotFeedback` | Read-only SDK bridge supplies measurements and physical Start |
 | `/safety/policy_observation` | `RobotFeedback` | Checker assigns observation IDs for policy requests |
 | `/safety/precheck` | `JointCommand` | Runner proposes a complete frame with session, sequence and observation ID |
 | `/safety/postcheck` | `CheckedCommand` | Checker forwards approved frame and fixed expiry |
@@ -50,7 +50,7 @@ export ROS_LOCALHOST_ONLY=1
 ros2 run him_safety_nodes safety_node checker
 ```
 
-In other terminals with the same setup/domain, use roles `motor_gate` and `controller_stop`. No ROS-to-Unitree bridge or policy producer is supplied yet, so these commands do not constitute a full live robot test. With no feedback the controller-stop node deliberately aborts after its freshness timeout. Keep this isolated test graph separate from active robot control.
+In other terminals with the same setup/domain, use roles `motor_gate` and `controller_stop`. The read-only bridge is available below. A policy producer is still pending, so these commands do not constitute a full control test. With no feedback the controller-stop node deliberately aborts after its freshness timeout. Keep this isolated test graph separate from active robot control.
 
 Run ROS graph tests after building and sourcing the overlay:
 
@@ -66,7 +66,7 @@ python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
 
 ## Next review checkpoint
 
-Add the read-only SDK-to-ROS feedback bridge and synthetic policy producer, then design coordinated arm/reset. Per-joint hardware profiles, ROS publisher access isolation, real motor publication, service watchdogs and frontend integration remain pending. This checkpoint makes no claim of physical stop capability or hard-real-time timing.
+Review the read-only SDK-to-ROS feedback bridge, then add the synthetic policy producer and design coordinated arm/reset. Per-joint hardware profiles, ROS publisher access isolation, real motor publication, service watchdogs and frontend integration remain pending. This checkpoint makes no claim of physical stop capability or hard-real-time timing.
 
 ---
 
@@ -80,7 +80,7 @@ Add the read-only SDK-to-ROS feedback bridge and synthetic policy producer, then
 
 `Supervisor.state(observation, start_button_pressed, cur_time_secs, *, stop_requested=False)` now receives the physical Start state. It runs the detector and latches its event. The optional `stop_requested` argument accepts an independent event even with Start released. Physical Start blocks reset/arm, while the latch persists after release. Explicit reset clears gesture history and returns to inhibited, with separate arming required.
 
-The old `stop_pressed` argument/status field is replaced by `start_button_pressed`. Callers that previously passed a stop event positionally must migrate to `stop_requested=`. There is still no motor publisher or full supervisor runtime.
+The old `stop_pressed` argument/status field is replaced by `start_button_pressed`. Callers that previously passed a stop event positionally must migrate to `stop_requested=`. There is still no motor publisher or commissioned hardware runtime.
 
 ## Test with the actual controller
 
@@ -126,16 +126,63 @@ instructions above for the current architecture.
 
 ## Identifying the physical setup
 
-The operator reports G1 EDU. Confirm the exact joint configuration from the order
-specification or Unitree support using the robot serial number. Do not infer the
-variant from the size of a fixed SDK message array or move joints to identify it.
-The installed SDK has separate 5-joint and 7-joint arm examples, and marks wrist
-pitch/yaw unavailable on the 23-DoF variant. Waist availability must be confirmed
-separately. Hands/grippers and attached payloads also need to be recorded.
+The operator confirms G1 EDU, 29 DOF, seven joints per arm and no dexterous
+hand attachments. A locked-waist option exists, but the current lock state is
+unconfirmed. Do not infer movable joints from the fixed SDK message array.
+The operator reports a 1,200-pound rated gantry/hoist with suitable harness,
+feet bearing weight and arm clearance. Hardware command limits, gains and
+mode-specific stop behavior remain unvalidated.
 
-Support arrangement means the actual physical setup, not software: identify the
-gantry/hoist and harness or other manufacturer-approved support, its documented
-load rating and attachment method, whether the feet bear weight, and clear space
-for the arm and any possible fall/swing. A chair or person holding the robot is
-not automatically an adequate fall-arrest arrangement. Confirm suitability with
-the lab's responsible operator and manufacturer guidance before motor tests.
+## Read-only hardware feedback checkpoint
+
+Run on the same host as the other safety nodes, using the system Python SDK:
+
+```bash
+source /opt/ros/foxy/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=97
+export ROS_LOCALHOST_ONLY=1
+export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
+export LD_LIBRARY_PATH="$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH"
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 run him_safety_nodes safety_node feedback --ros-args -p sdk_interface:=eth0 -p sdk_domain:=0
+```
+
+On this machine, the explicit SDK library path avoids Foxy loading an incompatible
+Cyclone DDS library (`undefined symbol: ddsi_sertype_v0`). Fast DDS handles ROS
+while the SDK uses its own Cyclone DDS installation.
+
+`sdk_domain` selects the robot DDS domain independently of the ROS safety domain.
+Use the robot-facing interface verified for your machine. This creates only an
+SDK subscriber to `rt/lowstate`. ROS publishers are feedback and abort only.
+Start the feedback bridge and wait for telemetry before the controller-stop
+process. The bridge allows five seconds for initial DDS discovery, then applies
+the 200 ms feedback deadline. The controller-stop process still requires feedback
+within 200 ms of startup. No commands are permitted by this discovery grace. Coordinated
+startup and reset are pending. Do not run beside an armed safety deployment.
+
+`feedback.py` maps SDK indices 0 through 28 in their original order. Waist slots
+remain present even if locked. Slots 29 through 34 are excluded, not interpreted
+as additional joints. Positions are radians and velocities are radians/second.
+`observation_id` remains zero until the checker assigns it.
+
+The SDK callback copies state and stamps local monotonic receipt time into a
+bounded FIFO. The ROS timer drains it without replacing button transitions with
+only the latest sample. Invalid data, queue overflow, stale/reordered samples or
+missing feedback latch abort and stop feedback publication until process restart.
+The bridge never refreshes a cached sample timestamp. A bridge crash relies on
+the downstream freshness watchdogs. DDS loss before the callback, frozen robot
+telemetry and remote radio health are not independently detected by this bridge.
+No robot tick or firmware version semantics are assumed.
+
+Installed software observed September 23, 2026: Python SDK 1.0.1 at commit
+`65691c8`, Cyclone DDS 0.10.2. PC4 manifest lists master service 1.0.0.2,
+patch 1.0.0.6 and video hub 1.0.2.3. Live LowState version `[0, 0]` did not
+identify motion-controller or motor firmware.
+
+Live bridge smoke test on September 23, 2026: received 1,000 ROS feedback
+messages from real `rt/lowstate`, each with 29 position/velocity slots, without a
+bridge abort. The final sample age was approximately 5.7 ms, not a latency bound.
+No motor output was created. The SDK printed `[Reader] take sample error` during
+subscriber shutdown. Fault/gesture propagation through the complete live graph
+is still pending.

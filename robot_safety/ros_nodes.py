@@ -271,15 +271,22 @@ class ControllerStopNode(SafetyNode):
 def main():
     """Launch one role per process so a frozen checker cannot freeze the gate."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("role", choices=("checker", "motor_gate", "controller_stop"))
+    parser.add_argument(
+        "role", choices=("checker", "motor_gate", "controller_stop", "feedback")
+    )
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
+    from .feedback_node import RobotFeedbackNode
+
     node = {
         "checker": SafetyCheckerNode,
         "motor_gate": MotorGateNode,
         "controller_stop": ControllerStopNode,
+        "feedback": RobotFeedbackNode,
     }[args.role]()
     try:
+        if args.role == "feedback":
+            node.start_sdk()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass

@@ -104,5 +104,85 @@ class SafetyGraphTests(unittest.TestCase):
         )
 
 
+class FeedbackBridgeTests(unittest.TestCase):
+    def setUp(self):
+        from robot_safety.feedback_node import RobotFeedbackNode
+
+        rclpy.init(args=["--ros-args", "-p", "sdk_interface:=test_unused"])
+        self.bridge = RobotFeedbackNode()
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.bridge)
+
+    def tearDown(self):
+        self.executor.shutdown()
+        self.bridge.destroy_node()
+        rclpy.shutdown()
+
+    def test_receipt_time_and_button_state_delivered(self):
+        from robot_safety import ros_topics
+        from robot_safety.feedback import FeedbackSample
+
+        received = []
+        subscription = self.bridge.create_subscription(
+            RobotFeedback,
+            ros_topics.ROBOT_FEEDBACK,
+            received.append,
+            self.bridge.feedback_qos,
+        )
+        deadline = time.monotonic() + 3.0
+        while self.bridge.feedback_publisher.get_subscription_count() == 0:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.005)
+        timestamp = time.monotonic()
+        self.bridge.inbox.samples.put_nowait(
+            FeedbackSample(timestamp, (0.1,) * 29, (0.0,) * 29, True)
+        )
+        self.bridge.publish_feedback()
+        while not received:
+            self.assertLess(time.monotonic(), deadline)
+            self.executor.spin_once(timeout_sec=0.005)
+        self.assertEqual(received[0].received_at_secs, timestamp)
+        self.assertTrue(received[0].start_button_pressed)
+        self.assertEqual(received[0].observation_id, 0)
+        self.bridge.destroy_subscription(subscription)
+
+    def test_initial_discovery_has_separate_deadline(self):
+        from unittest.mock import patch
+
+        from robot_safety.feedback import SDK_DISCOVERY_TIMEOUT_SECS
+
+        with patch(
+            "robot_safety.feedback_node.time.monotonic",
+            return_value=self.bridge.time_started_secs + 0.3,
+        ):
+            self.bridge.publish_feedback()
+            self.assertIsNone(self.bridge.abort_reason)
+        with patch(
+            "robot_safety.feedback_node.time.monotonic",
+            return_value=self.bridge.time_started_secs + SDK_DISCOVERY_TIMEOUT_SECS,
+        ):
+            self.bridge.publish_feedback()
+            self.assertEqual(self.bridge.abort_reason, "sdk_discovery_timeout")
+
+    def test_missing_feedback_after_discovery_uses_short_deadline(self):
+        self.bridge.time_last_feedback_secs = time.monotonic() - 0.3
+        self.bridge.publish_feedback()
+        self.assertEqual(self.bridge.abort_reason, "sdk_feedback_timeout")
+
+    def test_stale_sample_latches_and_blocks_recovery(self):
+        from robot_safety.feedback import FeedbackSample
+
+        self.bridge.inbox.samples.put_nowait(
+            FeedbackSample(time.monotonic() - 1.0, (0.0,) * 29, (0.0,) * 29, False)
+        )
+        self.bridge.publish_feedback()
+        self.assertEqual(self.bridge.abort_reason, "stale_or_reordered_sdk_feedback")
+        self.bridge.inbox.samples.put_nowait(
+            FeedbackSample(time.monotonic(), (0.0,) * 29, (0.0,) * 29, False)
+        )
+        self.bridge.publish_feedback()
+        self.assertEqual(self.bridge.inbox.samples.qsize(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
