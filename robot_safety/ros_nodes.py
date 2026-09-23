@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import signal
 import time
 from pathlib import Path
 
@@ -75,6 +76,7 @@ class SafetyNode(Node):
         """Publish immediately on first fault and periodically thereafter."""
         if self.abort_reason is None:
             self.abort_reason = reason[:128]
+            self.get_logger().error(f"Abort latched: {self.abort_reason}")
             self.repeat_abort()
 
     def repeat_abort(self):
@@ -240,6 +242,16 @@ class ControllerStopNode(SafetyNode):
             self.config.double_press_window_secs, self.config.robot_timeout
         )
         self.time_last_feedback_secs = time.monotonic()
+        self.received_controller_feedback = False
+        self.startup_timeout_secs = self.declare_parameter(
+            "startup_timeout_secs", self.config.robot_timeout
+        ).value
+        if (
+            not math.isfinite(self.startup_timeout_secs)
+            or self.startup_timeout_secs <= 0
+        ):
+            raise ValueError("startup timeout must be finite and positive")
+        self.create_service(Trigger, topics.CONTROLLER_READY, self.on_ready)
         self.create_subscription(
             RobotFeedback, topics.ROBOT_FEEDBACK, self.on_feedback, self.feedback_qos
         )
@@ -259,20 +271,40 @@ class ControllerStopNode(SafetyNode):
             self.latch_abort("invalid_controller_timestamp")
             return
         self.time_last_feedback_secs = message.received_at_secs
+        self.received_controller_feedback = True
         if stop:
             self.latch_abort("controller_double_start")
 
     def check_freshness(self):
-        if time.monotonic() - self.time_last_feedback_secs >= self.config.robot_timeout:
+        timeout = (
+            self.config.robot_timeout
+            if self.received_controller_feedback
+            else self.startup_timeout_secs
+        )
+        if time.monotonic() - self.time_last_feedback_secs >= timeout:
             self.double_press_detector.reset()
             self.latch_abort("controller_feedback_timeout")
+
+    def on_ready(self, _request, response):
+        """Confirm fresh released-Start input before the dry-run producer arms."""
+        self.check_freshness()
+        response.success = (
+            self.abort_reason is None
+            and self.received_controller_feedback
+            and self.double_press_detector.previous_start_pressed is False
+        )
+        response.message = (
+            "ready" if response.success else "Controller input is not ready"
+        )
+        return response
 
 
 def main():
     """Launch one role per process so a frozen checker cannot freeze the gate."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "role", choices=("checker", "motor_gate", "controller_stop", "feedback")
+        "role",
+        choices=("checker", "motor_gate", "controller_stop", "feedback"),
     )
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
@@ -291,5 +323,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Terminal SIGINT and launch shutdown can both arrive during cleanup.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -66,7 +66,7 @@ python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
 
 ## Next review checkpoint
 
-Review the read-only SDK-to-ROS feedback bridge, then add the synthetic policy producer and design coordinated arm/reset. Per-joint hardware profiles, ROS publisher access isolation, real motor publication, service watchdogs and frontend integration remain pending. This checkpoint makes no claim of physical stop capability or hard-real-time timing.
+The feedback adapter and manual slow-arm-raise producer are implemented. Next, design coordinated arm/reset and the commissioned hardware adapter. Per-joint hardware profiles, ROS publisher access isolation, real motor publication, service watchdogs and frontend integration remain pending. This checkpoint makes no claim of physical stop capability or hard-real-time timing.
 
 ---
 
@@ -127,8 +127,19 @@ instructions above for the current architecture.
 ## Identifying the physical setup
 
 The operator confirms G1 EDU, 29 DOF, seven joints per arm and no dexterous
-hand attachments. A locked-waist option exists, but the current lock state is
-unconfirmed. Do not infer movable joints from the fixed SDK message array.
+hand attachments. On September 23, 2026, a read-only SDK subscription to
+`rt/lowstate` on `eth0`, DDS domain 0, reported `mode_machine=5`. Unitree maps
+this to `g1_29dof_rev_1_0`, with type 6 identifying the locked-waist counterpart.
+The operator confirms the two waist fixing pieces are absent. This is consistent
+with an unlocked three-joint waist. Waist yaw, roll and pitch retain SDK indices
+12, 13 and 14. The existing 29-joint mapping already includes all three, so no
+joint-count or mapping change is needed.
+
+See the [official machine-type table](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/README.md).
+This records the robot's reported configuration and the operator's inspection.
+It does not verify calibration, motor health or control authority. No app setting
+was changed, and no motion command was used for identification. Do not infer
+movable joints from the fixed SDK message array.
 The operator reports a 1,200-pound rated gantry/hoist with suitable harness,
 feet bearing weight and arm clearance. Hardware command limits, gains and
 mode-specific stop behavior remain unvalidated.
@@ -186,3 +197,9 @@ bridge abort. The final sample age was approximately 5.7 ms, not a latency bound
 No motor output was created. The SDK printed `[Reader] take sample error` during
 subscriber shutdown. Fault/gesture propagation through the complete live graph
 is still pending.
+
+## Manual arm-raise test
+
+The one-off trajectory, producer, launch file and launcher live in
+[`tests/manual`](../tests/manual/README.md). They are not installed as reusable
+safety nodes. See that guide for the single-command dry-run test.

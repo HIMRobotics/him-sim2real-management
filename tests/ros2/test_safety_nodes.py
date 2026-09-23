@@ -184,5 +184,181 @@ class FeedbackBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.inbox.samples.qsize(), 1)
 
 
+class ArmRaiseGraphTests(unittest.TestCase):
+    def test_service_start_controller_double_press_and_all_joint_damping(self):
+        from robot_safety import ros_topics
+        from robot_safety.ros_nodes import ControllerStopNode
+        from tests.manual.arm_raise_node import ArmRaiseNode, ArmRaisePhase
+
+        rclpy.init()
+        checker = SafetyCheckerNode()
+        gate = MotorGateNode()
+        producer = ArmRaiseNode()
+        controller = ControllerStopNode()
+        executor = SingleThreadedExecutor()
+        nodes = (checker, gate, producer, controller)
+        for node in nodes:
+            executor.add_node(node)
+        publisher = producer.create_publisher(
+            RobotFeedback, ros_topics.ROBOT_FEEDBACK, producer.feedback_qos
+        )
+
+        def spin_until(predicate, pressed=False):
+            deadline = time.monotonic() + 3.0
+            while not predicate() and time.monotonic() < deadline:
+                feedback = RobotFeedback()
+                feedback.host_boot_id = producer.host_boot_id
+                feedback.received_at_secs = time.monotonic()
+                feedback.q = [0.2] * 29
+                feedback.dq = [0.0] * 29
+                feedback.start_button_pressed = pressed
+                publisher.publish(feedback)
+                executor.spin_once(timeout_sec=0.001)
+            self.assertTrue(predicate())
+
+        try:
+            # Discover peers before spinning the controller's startup watchdog.
+            deadline = time.monotonic() + 3.0
+            while not (
+                publisher.get_subscription_count() >= 2
+                and producer.command_publisher.get_subscription_count() > 0
+                and producer.checker_arm_client.service_is_ready()
+                and producer.gate_arm_client.service_is_ready()
+                and producer.abort_publisher.get_subscription_count() >= 3
+            ):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.005)
+            controller.time_last_feedback_secs = time.monotonic()
+            spin_until(lambda: producer.observation_is_ready())
+            start_client = producer.create_client(Trigger, "/safety/arm_raise/start")
+            self.assertTrue(start_client.wait_for_service(timeout_sec=2.0))
+            start_future = start_client.call_async(Trigger.Request())
+            spin_until(lambda: start_future.done())
+            self.assertTrue(start_future.result().success)
+            spin_until(
+                lambda: gate.motor_gate.supervisor_phase == SupervisorPhase.RUNNING
+            )
+            self.assertEqual(producer.phase, ArmRaisePhase.RUNNING)
+            spin_until(
+                lambda: controller.double_press_detector.previous_start_pressed is True,
+                pressed=True,
+            )
+            spin_until(
+                lambda: controller.double_press_detector.previous_start_pressed is False
+            )
+            spin_until(lambda: controller.abort_reason is not None, pressed=True)
+            spin_until(
+                lambda: (
+                    producer.phase == ArmRaisePhase.STOPPED
+                    and gate.motor_gate.supervisor_phase == SupervisorPhase.STOP_LATCHED
+                )
+            )
+            self.assertEqual(controller.abort_reason, "controller_double_start")
+            output = gate.motor_gate.cycle(time.monotonic())
+            self.assertEqual(output["kind"], "damping")
+            for field in ("q", "dq", "kp", "tau"):
+                self.assertEqual(output[field], [0.0] * 29)
+            self.assertEqual(output["kd"], [gate.config.damping] * 29)
+            sequence_at_stop = producer.command_sequence
+            producer.publish_command()
+            self.assertEqual(producer.command_sequence, sequence_at_stop)
+            self.assertFalse(
+                producer.on_start(Trigger.Request(), Trigger.Response()).success
+            )
+        finally:
+            executor.shutdown()
+            for node in reversed(nodes):
+                node.destroy_node()
+            rclpy.shutdown()
+
+
+class ArmRaiseStopTests(unittest.TestCase):
+    def test_stall_completion_and_stale_feedback_stop_without_publishing(self):
+        from unittest.mock import patch
+
+        from tests.manual.arm_raise import ArmRaiseSettings, SlowArmRaise
+        from tests.manual.arm_raise_node import ArmRaiseNode, ArmRaisePhase
+
+        for condition in ("stall", "complete", "stale"):
+            with self.subTest(condition=condition):
+                rclpy.init()
+                node = ArmRaiseNode()
+                try:
+                    now = time.monotonic()
+                    observation = RobotFeedback()
+                    observation.host_boot_id = node.host_boot_id
+                    observation.received_at_secs = now - (
+                        0.3 if condition == "stale" else 0
+                    )
+                    observation.observation_id = 1
+                    observation.q = [0.0] * 29
+                    node.latest_observation = observation
+                    node.phase = ArmRaisePhase.RUNNING
+                    node.trajectory = SlowArmRaise(observation.q, ArmRaiseSettings())
+                    node.time_started_secs = now - (
+                        11 if condition == "complete" else 0
+                    )
+                    node.time_last_command_secs = now - (
+                        0.03 if condition == "stall" else 0
+                    )
+                    with patch(
+                        "tests.manual.arm_raise_node.time.monotonic", return_value=now
+                    ):
+                        node.publish_command()
+                    expected = {
+                        "stall": "arm_raise_publish_gap",
+                        "complete": "arm_raise_complete",
+                        "stale": "arm_raise_feedback_timeout",
+                    }
+                    self.assertEqual(node.abort_reason, expected[condition])
+                    self.assertEqual(node.command_sequence, 0)
+                    self.assertEqual(node.phase, ArmRaisePhase.STOPPED)
+                finally:
+                    node.destroy_node()
+                    rclpy.shutdown()
+
+
+class ControllerReadinessTests(unittest.TestCase):
+    def test_discovery_grace_requires_feedback_and_does_not_extend_active_deadline(
+        self,
+    ):
+        from unittest.mock import patch
+
+        from robot_safety.ros_nodes import ControllerStopNode
+
+        rclpy.init(args=["--ros-args", "-p", "startup_timeout_secs:=5.0"])
+        node = ControllerStopNode()
+        try:
+            initial_time = node.time_last_feedback_secs
+            with patch(
+                "robot_safety.ros_nodes.time.monotonic", return_value=initial_time + 1
+            ):
+                response = node.on_ready(Trigger.Request(), Trigger.Response())
+                self.assertFalse(response.success)
+                self.assertIsNone(node.abort_reason)
+                feedback = RobotFeedback()
+                feedback.host_boot_id = node.host_boot_id
+                feedback.received_at_secs = initial_time + 1
+                node.on_feedback(feedback)
+                self.assertTrue(
+                    node.on_ready(Trigger.Request(), Trigger.Response()).success
+                )
+                feedback.start_button_pressed = True
+                node.on_feedback(feedback)
+                self.assertFalse(
+                    node.on_ready(Trigger.Request(), Trigger.Response()).success
+                )
+            with patch(
+                "robot_safety.ros_nodes.time.monotonic", return_value=initial_time + 1.3
+            ):
+                self.assertFalse(
+                    node.on_ready(Trigger.Request(), Trigger.Response()).success
+                )
+                self.assertEqual(node.abort_reason, "controller_feedback_timeout")
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

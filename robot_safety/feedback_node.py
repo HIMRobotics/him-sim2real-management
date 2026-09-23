@@ -1,5 +1,4 @@
-"""Read live G1 joint measurements and Start state from SDK rt/lowstate.
-"""
+"""Read live G1 joint measurements and Start state from SDK rt/lowstate."""
 
 import time
 
