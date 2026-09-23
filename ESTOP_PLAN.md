@@ -46,8 +46,10 @@ Next review checkpoints, in order:
 
 1. Implemented for review: a read-only SDK bridge to `/safety/robot_feedback`, preserving local receipt
    time, joint mapping and physical Start state. No motor publisher.
-2. Add a synthetic ROS command producer, including deliberately invalid actions
-   and freezes. Verify real feedback plus fake output through the full graph.
+2. Implemented for review: a one-shot, slow left-arm-raise producer with explicit
+   start and abort on completion. ROS tests cover simulated double Start through
+   whole-body fake damping. Existing graph tests cover invalid commands and checker
+   silence. Manual controller testing with the new producer is pending.
 3. Add coordinated arm/reset and run identity. The core has local reset, but the
    current ROS nodes deliberately expose no independent reset service. Retained
    aborts and old sessions must not permit partial or automatic recovery.
@@ -74,15 +76,19 @@ motion, and no node can create Unitree motor output.
 ## Stage 3 — Physical G1 acceptance, then frontend
 
 Known hardware: operator reports **G1 EDU, 29 DOF, seven joints per arm**, with
-no dexterous hand attachments. A locked-waist configuration is available, but the
-current physical lock state remains unconfirmed. Operator reports a 1,200-pound
+no dexterous hand attachments. Read-only SDK telemetry on September 23, 2026
+reported `mode_machine=5`, matching `g1_29dof_rev_1_0`. The operator confirms
+both waist fixing pieces are absent. Together these identify the expected
+unlocked three-joint waist configuration, not proof of calibration or motor health.
+Operator reports a 1,200-pound
 rated gantry/hoist with suitable harness, feet bearing weight and arm clearance.
 
 Installed Python SDK: 1.0.1, commit `65691c8`, Cyclone DDS 0.10.2. PC4 manifest:
 master service 1.0.0.2, patch 1.0.0.6, video hub 1.0.2.3. Live LowState version
 was `[0, 0]`, so motion-controller and motor firmware remain unidentified.
 
-The new read-only bridge maps all 29 body slots, including locked waist slots.
+The read-only bridge maps all 29 body slots, including waist yaw/roll/pitch at
+indices 12/13/14. No waist joint is excluded for this identified configuration.
 This mapping is not a commissioned command profile or proof of movable joints.
 
 Before motor output, establish a validated per-joint profile, controller ownership,
@@ -116,3 +122,24 @@ operator's controller-input test. Automated and physical tests remain distinct.
 
 - [Unitree RL Gym runner](https://github.com/unitreerobotics/unitree_rl_gym/blob/main/deploy/deploy_real/deploy_real.py)
 - [Unitree G1 arm example and joint mapping](https://github.com/unitreerobotics/unitree_sdk2_python/blob/master/example/g1/high_level/g1_arm7_sdk_dds_example.py)
+
+## Arm-raise review checkpoint
+
+The operator requests whole-body damping on abort, even during an arm-only test.
+The assumed setup is standing on both feet and attached to the gantry. Losing
+active posture support may load the harness. The implementation still publishes
+only diagnostic output. A real adapter must establish whole-body stop authority
+over the active stock controller before any supported physical arm-raise test.
+
+The dry-run launch now manages all five processes from one command, combines
+logs and shuts down the group on process exit. Initial controller discovery has
+a five-second grace, followed by the normal 200 ms deadline. Starting remains
+explicit and checks fresh released-Start input from the controller detector before
+arming. This helper does not implement distributed reset or production supervision.
+
+The arm-raise scenario and its launch tooling live under `tests/manual`, separate
+from the reusable `robot_safety` package.
+
+Hardware identification reference: [Unitree G1 machine-type mapping](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/README.md).
+Type 5 is the regular revision-1.0 model, type 6 its locked-waist counterpart.
+The SDK reading is an observed configuration, not a setting changed by this code.
