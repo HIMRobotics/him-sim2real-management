@@ -10,7 +10,7 @@ policy -> runner joint commands -> /safety/precheck
 controller_stop -> /safety/abort -> checker and motor gate
 ```
 
-The current motor gate publishes **only `/safety/dry_run_output`**, not a Unitree motor topic. The position/velocity/gain/torque frame belongs before the Unitree controller. No code is inserted between its internal controller and actuators.
+The default motor gate publishes **only `/safety/dry_run_output`**. An explicitly selected `hardware_gate` now provides SDK output, pending physical validation. See [hardware adapter setup and boundaries](HARDWARE_ADAPTER.md). The position/velocity/gain/torque frame belongs before the Unitree controller. No code is inserted between its internal controller and actuators.
 
 ## Node responsibilities
 
@@ -55,8 +55,11 @@ In other terminals with the same setup/domain, use roles `motor_gate` and `contr
 Run ROS graph tests after building and sourcing the overlay:
 
 ```bash
-ROS_DOMAIN_ID=97 ROS_LOCALHOST_ONLY=1 /usr/bin/python3 -m unittest discover -s tests/ros2 -v
+ROS_DOMAIN_ID=191 ROS_LOCALHOST_ONLY=1 /usr/bin/python3 -m unittest discover -s tests/ros2 -v
 ```
+
+Automated tests require localhost domain 191 and reject other domains. Domain 97
+is reserved for the manual test launcher, including physical output.
 
 The tests verify typed postcheck delivery, invalid-command abort delivery and independent gate damping when the checker stops executing. Ordinary safety tests do not require ROS:
 
@@ -66,7 +69,7 @@ python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
 
 ## Next review checkpoint
 
-The feedback adapter and manual slow-arm-raise producer are implemented. Next, design coordinated arm/reset and the commissioned hardware adapter. Per-joint hardware profiles, ROS publisher access isolation, real motor publication, service watchdogs and frontend integration remain pending. This checkpoint makes no claim of physical stop capability or hard-real-time timing.
+The feedback adapter, manual policies, per-joint profile and opt-in hardware gate are implemented. Coordinated reset, publisher access isolation, managed watchdogs and frontend integration remain pending. Physical stop acceptance is unresolved after the reported joint shutdown. See [ESTOP_PLAN.md](../ESTOP_PLAN.md) for next-session work.
 
 ---
 
@@ -80,7 +83,7 @@ The feedback adapter and manual slow-arm-raise producer are implemented. Next, d
 
 `Supervisor.state(observation, start_button_pressed, cur_time_secs, *, stop_requested=False)` now receives the physical Start state. It runs the detector and latches its event. The optional `stop_requested` argument accepts an independent event even with Start released. Physical Start blocks reset/arm, while the latch persists after release. Explicit reset clears gesture history and returns to inhibited, with separate arming required.
 
-The old `stop_pressed` argument/status field is replaced by `start_button_pressed`. Callers that previously passed a stop event positionally must migrate to `stop_requested=`. There is still no motor publisher or commissioned hardware runtime.
+The old `stop_pressed` argument/status field is replaced by `start_button_pressed`. Callers that previously passed a stop event positionally must migrate to `stop_requested=`. Motor publication requires the explicitly enabled hardware gate.
 
 ## Test with the actual controller
 
@@ -203,3 +206,11 @@ is still pending.
 The one-off trajectory, producer, launch file and launcher live in
 [`tests/manual`](../tests/manual/README.md). They are not installed as reusable
 safety nodes. See that guide for the single-command dry-run test.
+
+## Opt-in hardware output
+
+See [HARDWARE_ADAPTER.md](HARDWARE_ADAPTER.md) for the implemented arm SDK adapter,
+required profile and whole-body damping request path. Dry-run launch behavior is
+unchanged. The operator has exercised the small elbow test and reported a joint
+shutdown during a T-pose stop. Stop behavior is not accepted for deployment.
+See [the next-session plan](../ESTOP_PLAN.md#next-session--september-25-custom-e-stop-damping).

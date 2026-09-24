@@ -13,8 +13,14 @@ export ROS_LOCALHOST_ONLY=1
 export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"
 
 # Use one overlay for launch and the separate explicit start request.
-if [[ "${1:-}" == "--start" ]]; then
+if [[ "${1:-}" == "--start" || "${1:-}" == "--check-ready" || "${1:-}" == "--joint-deltas" ]]; then
     source /tmp/him-safety-ros-install/setup.bash
+    if [[ "$1" == "--joint-deltas" ]]; then
+        exec ros2 topic echo /safety/joint_diagnostics std_msgs/msg/String
+    fi
+    if [[ "$1" == "--check-ready" ]]; then
+        exec ros2 service call /safety/motor_gate/ready std_srvs/srv/Trigger '{}'
+    fi
     exec ros2 service call /safety/arm_raise/start std_srvs/srv/Trigger '{}'
 fi
 

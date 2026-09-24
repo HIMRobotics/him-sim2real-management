@@ -1,14 +1,14 @@
 # G1 safety pipeline: robot side first, frontend later
 
-Updated September 23, 2026. **Stage 1 is partially complete. All output remains dry-run.**
+Updated September 24, 2026. **Default launch remains dry-run. Arm SDK output and physical test policies are implemented. Stop behavior is not accepted for deployment.**
 
 ## Architecture and current checkpoint
 
 ```text
 policy -> runner -> precheck -> safety checker -> postcheck -> motor gate
                                                               |
-                                                    dry_run_output (today)
-                                                    Unitree controller (future)
+                                                    dry_run_output
+                                                    Unitree arm SDK
                                                               |
                                                            actuators
 
@@ -143,3 +143,51 @@ from the reusable `robot_safety` package.
 Hardware identification reference: [Unitree G1 machine-type mapping](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/README.md).
 Type 5 is the regular revision-1.0 model, type 6 its locked-waist counterpart.
 The SDK reading is an observed configuration, not a setting changed by this code.
+
+## Current hardware implementation
+
+- Type-5 G1 EDU profile with official model position/velocity limits, SDK example
+  gains, confirmed ready FSM 4 and local tracking/startup tolerances.
+- Arm SDK motor gate with ownership ramp, fresh feedback, command expiry and
+  direct controller double-Start detection.
+- Read-only readiness query before checker arming, with one timeout retry.
+  Intermittent first-query timeouts remain unexplained.
+- Captured-pose handover before the full SDK arm sequence or small elbow test.
+- Shoulder/elbow tracking allowance of 0.30 rad and waist/wrist allowance of
+  0.05 rad. Joint extrema support further measurement-based tuning.
+- Whole-body stock damping on abort and completion, followed by arm ownership
+  release. No automatic rearm.
+- Explicit manual launch/start commands in [tests/manual](tests/manual/README.md).
+
+## Physical observations
+
+The operator reported that the small elbow test worked. Larger arm tests exposed
+tracking errors during and after handover, leading to separate handover timing
+and the revised local tracking allowance.
+
+A double-Start stop from a T-pose was reported to be jerky and caused a joint
+shutdown requiring a robot restart. The affected joint's fault code and cause
+have not been established. Successful stop RPCs are not physical stop acceptance.
+
+## Next session — September 25: custom E-stop damping
+
+Requested: stronger custom damping with a controlled transition that avoids the
+reported jerk and joint shutdown.
+
+Current implementation still calls Unitree's stock `SetFsmId(1)`. No custom
+E-stop damping controller exists yet. The profile's `kd` controls normal arm
+tracking and does not tune the stock damping mode.
+
+Next work:
+
+1. Identify the affected joint and fault details from the T-pose stop.
+2. Determine the supported SDK control path for adjustable damping and its
+   ownership interaction with stock balance and whole-body control.
+3. Design the stop transition with explicit torque, velocity and timing bounds.
+   Increasing damping alone can increase braking torque.
+4. Define gain configuration and supported physical validation, keeping immediate
+   fault handling and double-Start latching intact.
+
+This is deferred design work. No stop gains or behavior were changed during
+cleanup. Managed process watchdogs, policy isolation and frontend integration
+remain outstanding as described above.

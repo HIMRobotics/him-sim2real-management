@@ -3,6 +3,10 @@
 import time
 import unittest
 
+from tests.ros2.environment import require_test_domain
+
+setUpModule = require_test_domain
+
 try:
     import rclpy
     from him_safety_interfaces.msg import JointCommand, RobotFeedback
@@ -185,15 +189,22 @@ class FeedbackBridgeTests(unittest.TestCase):
 
 
 class ArmRaiseGraphTests(unittest.TestCase):
+    test_policy = "slow_raise"
+
     def test_service_start_controller_double_press_and_all_joint_damping(self):
         from robot_safety import ros_topics
         from robot_safety.ros_nodes import ControllerStopNode
         from tests.manual.arm_raise_node import ArmRaiseNode, ArmRaisePhase
 
-        rclpy.init()
+        rclpy.init(args=["--ros-args", "-p", f"test_policy:={self.test_policy}"])
         checker = SafetyCheckerNode()
         gate = MotorGateNode()
         producer = ArmRaiseNode()
+        from dataclasses import replace
+
+        # This test measures message flow, not OS scheduling. Stall handling has
+        # its own deterministic test using the production 20 ms threshold.
+        producer.settings = replace(producer.settings, max_publish_gap_secs=0.2)
         controller = ControllerStopNode()
         executor = SingleThreadedExecutor()
         nodes = (checker, gate, producer, controller)
@@ -236,7 +247,10 @@ class ArmRaiseGraphTests(unittest.TestCase):
             spin_until(lambda: start_future.done())
             self.assertTrue(start_future.result().success)
             spin_until(
-                lambda: gate.motor_gate.supervisor_phase == SupervisorPhase.RUNNING
+                lambda: (
+                    gate.motor_gate.supervisor_phase == SupervisorPhase.RUNNING
+                    and producer.phase == ArmRaisePhase.RUNNING
+                )
             )
             self.assertEqual(producer.phase, ArmRaisePhase.RUNNING)
             spin_until(
@@ -272,7 +286,37 @@ class ArmRaiseGraphTests(unittest.TestCase):
             rclpy.shutdown()
 
 
+class UnitreeArmGraphTests(ArmRaiseGraphTests):
+    test_policy = "unitree_arm7"
+
+
 class ArmRaiseStopTests(unittest.TestCase):
+    def test_slow_readiness_wait_does_not_open_checker_session(self):
+        from unittest.mock import Mock
+
+        from rclpy.task import Future
+
+        from tests.manual.arm_raise_node import ArmRaiseNode, ArmRaisePhase
+
+        rclpy.init()
+        node = ArmRaiseNode()
+        try:
+            node.phase = ArmRaisePhase.CHECKING_GATE
+            node.time_arm_requested_secs = 10.0
+            node.pending_arm_request = Future()
+            node.checker_arm_client = Mock()
+            node.advance_arming(11.5)
+            self.assertEqual(node.phase, ArmRaisePhase.CHECKING_GATE)
+            node.checker_arm_client.call_async.assert_not_called()
+            self.assertEqual(node.command_sequence, 0)
+            node.advance_arming(15.0)
+            self.assertEqual(node.phase, ArmRaisePhase.STOPPED)
+            self.assertEqual(node.abort_reason, "arm_raise_arming_timeout")
+            node.checker_arm_client.call_async.assert_not_called()
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
+
     def test_stall_completion_and_stale_feedback_stop_without_publishing(self):
         from unittest.mock import patch
 

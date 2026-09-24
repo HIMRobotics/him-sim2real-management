@@ -1,0 +1,429 @@
+"""Exercise hardware output with fake SDK calls, never a robot connection."""
+
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+from robot_safety.feedback import G1_29_JOINT_NAMES
+from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_profile import UPPER_BODY_INDICES, HardwareProfile
+from robot_safety.unitree_transport import UnitreeArmTransport
+
+
+def profile_data():
+    # Artificial test bounds and gains. These are not a deployable hardware profile.
+    return {
+        "expected_machine_type": 5,
+        "allowed_start_fsm_ids": [4],
+        "handover_secs": 2.0,
+        "max_publish_gap_secs": 0.02,
+        "initial_position_tolerance_rad": 0.005,
+        "initial_velocity_tolerance_rad_secs": 0.01,
+        "joints": {
+            G1_29_JOINT_NAMES[i]: {
+                "position_min_rad": -1.0,
+                "position_max_rad": 1.0,
+                "kp": 2.0,
+                "kd": 0.5,
+                "max_velocity_rad_secs": 0.1,
+                "max_acceleration_rad_secs2": 0.2,
+                "max_tracking_error_rad": 0.1,
+            }
+            for i in UPPER_BODY_INDICES
+        },
+    }
+
+
+def load_profile(data):
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "profile.json"
+        path.write_text(json.dumps(data))
+        return HardwareProfile.load(path)
+
+
+class FakeTransport:
+    def __init__(self):
+        self.writes = []
+        self.stop_calls = 0
+        self.mode = 4
+        self.write_success = True
+        self.rpc_success = True
+
+    def read_ready_fsm(self):
+        return 0, self.mode
+
+    def read_fsm(self):
+        return 0, self.mode
+
+    def request_damping(self):
+        self.stop_calls += 1
+        if not self.rpc_success:
+            raise TimeoutError()
+        self.mode = 1
+        return 0
+
+    def write_arm(self, targets, weight):
+        self.writes.append((targets, weight))
+        return self.write_success
+
+
+class HardwareAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 10.0
+        self.adapter = G1ArmAdapter(load_profile(profile_data()), lambda: self.now)
+        self.transport = FakeTransport()
+        self.adapter.transport = self.transport
+        self.state()
+        self.assertTrue(self.adapter.check_ready_mode())
+        self.command = {name: [0.0] * 29 for name in ("q", "dq", "kp", "kd", "tau")}
+
+    def state(self, pressed=False, machine=5):
+        remote = [0] * 40
+        remote[2] = 4 if pressed else 0
+        self.adapter.receive_state(
+            SimpleNamespace(
+                motor_state=[SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)],
+                mode_machine=machine,
+                wireless_remote=remote,
+            )
+        )
+
+    def run_first(self):
+        self.assertTrue(self.adapter.check_ready_mode())
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+
+    def test_only_confirmed_ready_mode_can_arm(self):
+        self.transport.mode = 500
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.assertFalse(self.adapter.arm())
+        self.transport.mode = 4
+        self.assertTrue(self.adapter.check_ready_mode())
+        self.assertTrue(self.adapter.arm())
+        self.assertEqual(self.transport.writes, [])
+
+    def test_readiness_failure_reports_measurement_and_limit(self):
+        cases = (
+            ("mode", "ready mode: measured=500"),
+            ("machine", "machine type: measured=6"),
+            ("feedback", "feedback age:"),
+            ("button", "Start button must be released"),
+            ("position", "left_shoulder_roll position: measured=2.000000 rad"),
+            ("speed", "left_shoulder_roll speed: measured=0.020000 rad/s"),
+            ("rpc", "ready-mode query failed: rpc_code=3104"),
+        )
+        for case, expected in cases:
+            with self.subTest(case=case):
+                self.setUp()
+                if case == "mode":
+                    self.transport.mode = 500
+                elif case == "machine":
+                    self.state(machine=6)
+                elif case == "feedback":
+                    self.now += 0.3
+                elif case == "button":
+                    self.state(pressed=True)
+                elif case in ("position", "speed"):
+                    field = "q" if case == "position" else "dq"
+                    values = list(getattr(self.adapter.feedback, field))
+                    values[16] = 2.0 if case == "position" else 0.02
+                    self.adapter.feedback = replace(
+                        self.adapter.feedback, **{field: tuple(values)}
+                    )
+                else:
+                    self.transport.read_ready_fsm = lambda: (3104, None)
+                if case in ("mode", "rpc"):
+                    self.assertFalse(self.adapter.check_ready_mode())
+                else:
+                    self.assertTrue(self.adapter.check_ready_mode())
+                    self.assertFalse(self.adapter.arm())
+                self.assertIn(expected, self.adapter.arm_rejection_reason)
+                if case == "speed":
+                    self.assertIn(
+                        "maximum absolute=0.01 rad/s", self.adapter.arm_rejection_reason
+                    )
+                self.assertEqual(self.transport.writes, [])
+                # Rejecting startup does not take control of the stock robot.
+                self.adapter.abort("hardware_arm_rejected")
+                self.assertFalse(self.adapter.stop_requested.is_set())
+
+    def test_no_writes_or_damping_before_explicit_arm(self):
+        self.adapter.step()
+        self.adapter.abort("unarmed_abort")
+        self.assertEqual(self.transport.writes, [])
+        self.assertFalse(self.adapter.stop_requested.is_set())
+
+    def test_ready_confirmation_expires_without_commanding_robot(self):
+        self.now += 0.21
+        self.state()
+        self.assertFalse(self.adapter.arm())
+        self.assertIn("older than", self.adapter.arm_rejection_reason)
+        self.adapter.abort("hardware_arm_rejected")
+        self.adapter.step()
+        self.assertFalse(self.adapter.stop_requested.is_set())
+        self.assertEqual(self.transport.writes, [])
+
+    def test_abort_during_readiness_query_cannot_grant_control(self):
+        def interrupted_query():
+            self.adapter.abort("controller_feedback_timeout")
+            return 0, 4
+
+        self.transport.read_ready_fsm = interrupted_query
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.assertFalse(self.adapter.arm())
+        self.assertFalse(self.adapter.armed)
+        self.assertEqual(self.transport.writes, [])
+
+    def test_double_start_before_arming_still_requests_damping(self):
+        self.state(pressed=True)
+        self.now += 0.05
+        self.state()
+        self.now += 0.05
+        self.state(pressed=True)
+        self.assertTrue(self.adapter.stop_requested.is_set())
+        self.assertFalse(self.adapter.arm())
+
+    def test_rejected_readiness_shutdown_sends_no_motor_commands(self):
+        self.transport.read_ready_fsm = lambda: (3104, None)
+        self.transport.close = lambda: None
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.adapter.abort("hardware_readiness_rejected")
+        self.adapter.close()
+        self.assertEqual(self.transport.writes, [])
+        self.assertEqual(self.transport.stop_calls, 0)
+
+    def test_initial_measured_pose_and_gradual_ownership(self):
+        self.run_first()
+        targets, weight = self.transport.writes[-1]
+        self.assertEqual(set(targets), set(UPPER_BODY_INDICES))
+        self.assertEqual(weight, 0.0)
+        self.assertTrue(all(target["q"] == 0.0 for target in targets.values()))
+        self.assertEqual(targets[16]["kp"], 2.0)
+        self.now += 0.005
+        self.adapter.step()
+        self.assertGreater(self.transport.writes[-1][1], 0)
+        self.assertLess(self.transport.writes[-1][1], 0.001)
+
+    def test_abort_permanently_blocks_motion_and_requests_whole_body_damping(self):
+        self.run_first()
+        count = len(self.transport.writes)
+        self.adapter.abort("manual_stop")
+        self.assertTrue(self.adapter.stop_requested.is_set())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(len(self.transport.writes), count)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.assertEqual(self.transport.writes[-1], ({}, 0.0))
+        self.assertEqual(self.adapter.reported_fsm_id, 1)
+        self.assertFalse(self.adapter.arm())
+
+    def test_expiry_does_not_extend_when_the_same_command_is_resubmitted(self):
+        self.run_first()
+        expiry = self.adapter.command_expires_secs
+        self.now = expiry + 0.001
+        self.state()
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.assertEqual(self.adapter.abort_reason, "hardware_command_expired")
+
+    def test_loop_stall_aborts_instead_of_catching_up(self):
+        self.run_first()
+        self.now += 0.03
+        self.state()
+        self.adapter.step()
+        self.assertEqual(self.adapter.abort_reason, "hardware_output_loop_stall")
+        self.assertEqual(len(self.transport.writes), 1)
+
+    def test_stale_feedback_and_wrong_machine_refuse_output(self):
+        self.state(machine=6)
+        self.assertFalse(self.adapter.arm())
+        self.state()
+        self.run_first()
+        self.now += 0.3
+        self.adapter.step()
+        self.assertEqual(self.adapter.abort_reason, "hardware_feedback_timeout")
+
+    def test_direct_sdk_double_start_bypasses_ros(self):
+        self.run_first()
+        for pressed in (True, False, True):
+            self.now += 0.01
+            self.state(pressed)
+        self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_start")
+        self.assertTrue(self.adapter.stop_requested.is_set())
+
+    def test_first_target_jump_is_rejected(self):
+        self.command["q"][16] = 0.05
+        self.run_first()
+        self.assertIsNotNone(self.adapter.abort_reason)
+        self.assertEqual(self.transport.writes, [])
+
+    def test_tracking_limits_and_velocity_discontinuities_are_rejected(self):
+        self.run_first()
+        self.now += 0.005
+        self.command["dq"][16] = 0.05
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIsNotNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 1)
+
+    def test_output_rejection_preserves_joint_and_tracking_measurements(self):
+        self.run_first()
+        self.now += 0.005
+        self.command["q"][16] = 0.2
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        reason = self.adapter.abort_reason
+        self.assertIn("left_shoulder_roll: tracking error=0.200000", reason)
+        self.assertIn("limit=0.1", reason)
+        self.assertIn("target=0.200000, measured=0.000000", reason)
+        self.assertEqual(len(self.transport.writes), 1)
+        self.assertTrue(self.adapter.stop_requested.is_set())
+
+    def test_sdk_value_error_preserves_original_message(self):
+        def invalid_write(*_args):
+            raise ValueError("fake SDK encoding failure")
+
+        self.transport.write_arm = invalid_write
+        self.run_first()
+        self.assertIn("fake SDK encoding failure", self.adapter.abort_reason)
+        self.assertTrue(self.adapter.stop_requested.is_set())
+
+    def test_failed_write_latches_stop(self):
+        self.transport.write_success = False
+        self.run_first()
+        self.assertEqual(self.adapter.abort_reason, "hardware_write_failed")
+
+    def test_failed_damping_rpc_still_attempts_release_and_can_retry(self):
+        self.run_first()
+        self.adapter.abort("stop")
+        self.transport.rpc_success = False
+        self.adapter.stop_once()
+        self.assertIsNone(self.adapter.damping_rpc_code)
+        self.assertEqual(self.transport.writes[-1], ({}, 0.0))
+        self.transport.rpc_success = True
+        self.adapter.stop_once()
+        self.assertEqual(self.adapter.damping_rpc_code, 0)
+
+    def test_abort_rpc_does_not_wait_for_blocked_motion_write(self):
+        from threading import Event, Thread
+
+        entered_write = Event()
+        release_write = Event()
+        original_write = self.transport.write_arm
+
+        def blocked_write(targets, weight):
+            if targets:
+                entered_write.set()
+                release_write.wait(2.0)
+            return original_write(targets, weight)
+
+        self.transport.write_arm = blocked_write
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        writer = Thread(target=self.adapter.step, daemon=True)
+        writer.start()
+        try:
+            self.assertTrue(entered_write.wait(1.0))
+            self.adapter.abort("abort_during_write")
+            self.adapter.stop_once()
+            self.assertEqual(self.transport.stop_calls, 1)
+            self.assertTrue(self.adapter.stop_requested.is_set())
+        finally:
+            release_write.set()
+            writer.join(timeout=1.0)
+        count = len(self.transport.writes)
+        self.adapter.step()
+        self.assertEqual(len(self.transport.writes), count)
+
+    def test_template_profile_loads_and_contains_example_targets(self):
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "robot_safety/profiles/g1_type5.template.json"
+        )
+        profile = HardwareProfile.load(path)
+        self.assertEqual(profile.allowed_start_fsm_ids, (4,))
+        self.assertGreater(profile.max_publish_gap_secs, 0.02)
+        targets = {
+            16: 1.5707963267948966,
+            23: -1.5707963267948966,
+            18: 1.5707963267948966,
+            25: 1.5707963267948966,
+        }
+        for index, limits in zip(UPPER_BODY_INDICES, profile.joints):
+            for position in (0.0, targets.get(index, 0.0)):
+                self.assertLess(limits.position_min_rad, position)
+                self.assertGreater(limits.position_max_rad, position)
+            self.assertEqual((limits.kp, limits.kd), (60.0, 1.5))
+
+    def test_profile_requires_complete_finite_settings(self):
+        for field, value in (
+            ("handover_secs", float("nan")),
+            ("expected_machine_type", 6),
+            ("allowed_start_fsm_ids", [1]),
+            ("joints", {}),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                data = profile_data()
+                data[field] = value
+                load_profile(data)
+
+
+class TransportEncodingTests(unittest.TestCase):
+    def test_readiness_and_stop_queries_use_separate_clients(self):
+        transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+        transport.readiness_client = SimpleNamespace(GetFsmId=lambda: (0, 4))
+        transport.locomotion = SimpleNamespace(GetFsmId=lambda: (0, 1))
+        self.assertEqual(transport.read_ready_fsm(), (0, 4))
+        self.assertEqual(transport.read_fsm(), (0, 1))
+
+    def test_readiness_retries_only_timeout_and_requires_a_reply(self):
+        from unittest.mock import Mock
+
+        for replies, expected_calls, expected in (
+            ([(3104, None), (0, 4)], 2, (0, 4)),
+            ([(3104, None), (3104, None)], 2, (3104, None)),
+            ([(0, 1)], 1, (0, 1)),
+            ([(3102, None)], 1, (3102, None)),
+        ):
+            with self.subTest(replies=replies):
+                transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+                transport.readiness_client = Mock()
+                transport.readiness_client.GetFsmId.side_effect = replies
+                self.assertEqual(transport.read_ready_fsm(), expected)
+                self.assertEqual(
+                    transport.readiness_client.GetFsmId.call_count, expected_calls
+                )
+                self.assertEqual(len(transport.readiness_query_results), expected_calls)
+
+    def test_only_upper_body_and_weight_slots_are_written_with_crc(self):
+        transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+
+        def make_command():
+            return SimpleNamespace(
+                motor_cmd=[
+                    SimpleNamespace(q=0.0, dq=0.0, kp=0.0, kd=0.0, tau=0.0)
+                    for _ in range(35)
+                ],
+                crc=0,
+            )
+
+        transport.make_command = make_command
+        transport.crc = SimpleNamespace(Crc=lambda message: 12345)
+        written = []
+        transport.publisher = SimpleNamespace(
+            Write=lambda message: written.append(message) or True
+        )
+        self.assertTrue(
+            transport.write_arm(
+                {16: {"q": 0.1, "dq": 0.0, "kp": 2.0, "kd": 0.5, "tau": 0.0}}, 0.2
+            )
+        )
+        message = written[0]
+        self.assertEqual(message.motor_cmd[16].q, 0.1)
+        self.assertEqual(message.motor_cmd[29].q, 0.2)
+        self.assertTrue(all(message.motor_cmd[i].kp == 0 for i in range(12)))
+        self.assertEqual(message.crc, 12345)

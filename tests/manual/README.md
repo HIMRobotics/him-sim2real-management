@@ -1,129 +1,125 @@
-# Slow arm raise with diagnostic output
+# Manual G1 safety tests
 
-## Recorded robot configuration
+The scripts build and launch five processes: telemetry, command checker, motor
+gate, controller-stop monitor and test policy. ROS uses localhost domain 97.
+The Unitree SDK uses domain 0 and interface `eth0` by default.
 
-- G1 EDU, 29 body joints, seven joints per arm, no dexterous hand attachments.
-- Live SDK `rt/lowstate.mode_machine` was **5** on September 23, 2026.
-- Unitree identifies type 5 as `g1_29dof_rev_1_0`, distinct from locked-waist type 6.
-- Operator confirms both waist fixing pieces are absent. The expected waist
-  configuration is unlocked yaw/roll/pitch, at SDK indices 12/13/14.
-- Operator reports a 1,200-pound rated gantry/hoist with suitable harness, feet
-  bearing weight and clearance for the arms.
+**Current limitation:** the operator reported a jerky T-pose stop followed by a
+joint shutdown. Custom damping is next-session work in [ESTOP_PLAN.md](../../ESTOP_PLAN.md).
+The current stop requests Unitree's stock whole-body damping.
 
-[Official model mapping](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/README.md).
-The existing 29-slot mapping already matches this configuration. Identification
-was read-only and does not validate calibration, gains or physical damping.
-The test continues to request diagnostic whole-body damping on abort. No physical
-motor output is enabled by recording these settings.
+## Full arm sequence
 
-## Run the diagnostic test
-
-
-`arm_raise.py` generates one left shoulder-roll excursion of 0.15 rad (about
-8.6 degrees) over 10 seconds. It captures all 29 measured positions when arming
-finishes, then changes only the left shoulder-roll target. Quintic interpolation
-starts and ends with zero velocity and acceleration. Peak target speed is about
-0.0281 rad/s. Other target positions remain at their captured values, not zero.
-This relative excursion does not prove physical clearance from an arbitrary pose.
-
-`arm_raise_node.py` publishes these proposals to precheck. It subscribes to
-checker-assigned observations and abort, and exposes `/safety/arm_raise/start`.
-An explicit start call checks controller readiness, then arms the checker and gate asynchronously for the same
-session. Service discovery and fresh released-Start feedback are required first.
-This is a one-shot dry-run helper, not the future distributed reset coordinator.
-There is no retry or automatic restart. A successful start response means arming
-was requested, not that both nodes are already armed.
-
-Start the complete graph from one terminal:
+With the supported gantry setup and robot in locked standing/ready mode:
 
 ```bash
-cd /home/unitree/him-sim2real-management
-./tests/manual/run_arm_raise_dry_run.sh
+./tests/manual/run_unitree_arm_test.sh --hardware
 ```
 
-The script builds the packages, sources ROS Foxy and the overlay, selects the
-installed SDK library, and launches all five processes on local ROS domain 97.
-All logs appear in this terminal. No automatic arm or restart occurs. Ctrl+C
-stops the group. If any process exits, launch shuts down the remaining group.
-This shutdown policy is for the diagnostic graph, not a hardware stop mechanism.
-
-Wait for `Ready for explicit start request`. Then, from a second terminal, run:
+Once ready, request one run from another terminal:
 
 ```bash
-cd /home/unitree/him-sim2real-management
+./tests/manual/run_unitree_arm_test.sh --start
+```
+
+Omit `--hardware` for diagnostic motor output. Do not run another test graph or
+the original SDK motor publisher concurrently.
+
+The policy holds captured arm/waist positions until the adapter confirms a
+full-weight SDK write for its session. The profile's ownership ramp lasts
+3 seconds from the first SDK write. Then the 18-second trajectory starts at zero:
+
+- 0–3 seconds: targets move toward zero.
+- 3–9 seconds: both arms raise using the SDK example's targets.
+- 9–18 seconds: targets return toward zero.
+- Completion: latch stop and request whole-body damping.
+
+The trajectory retains the SDK example's feedback-based position formulas.
+This is not the small, extra-slow elbow test. The stock controller owns the legs
+during arm control. A full-weight write is not proof of physical takeover.
+
+Double press Start within 0.5 seconds to request whole-body damping. Tracking,
+freshness and command-gap checks remain active during handover and movement.
+Faults and completion also request damping. The graph stays stopped until Ctrl+C
+and restart. Damping can remove standing support.
+
+## Small elbow test
+
+```bash
+./tests/manual/run_unitree_arm_test.sh --small-step --hardware
+# Once ready, in a second terminal:
+./tests/manual/run_unitree_arm_test.sh --start
+```
+
+After the same captured-pose handover, only the left elbow target decreases by
+0.05 rad (2.9 degrees) over 10 seconds. A quintic curve gives zero endpoint
+velocity and acceleration, with peak requested speed 0.009375 rad/s.
+
+The final target is held for 2 seconds. The measured elbow must finish within
+0.02 rad of that target. The result is `small_elbow_complete` or
+`small_elbow_did_not_follow`. Both results request whole-body damping.
+The operator reported this test worked.
+
+## Readiness and configuration
+
+```bash
+./tests/manual/run_unitree_arm_test.sh --check-ready
+```
+
+This queries stock mode without arming or moving. A fresh launcher is required
+after a latched failure. Startup requires FSM 4, fresh released-Start telemetry,
+machine type 5 and near-stationary joints. Readiness has two SDK attempts of
+2 seconds each within a 5-second producer deadline. A startup rejection before
+arming sends no damping or arm-release commands. Explicit double Start remains
+active. `--start` repeats readiness before granting control.
+
+The robot is a 29-DOF G1 EDU with seven joints per arm, no dexterous hands and
+no waist fixing pieces. Locked standing refers to the operating mode, not a
+mechanically locked waist.
+
+Settings are in [g1_type5.template.json](../../robot_safety/profiles/g1_type5.template.json).
+Use `hardware_profile_path:=/absolute/path/to/settings.json` to select another
+reviewed profile. Interface/domain overrides are `sdk_interface:=eth0` and
+`sdk_domain:=0`.
+
+Current local settings include kp=60, kd=1.5, a 100 ms output-gap limit, a
+0.03 rad initial position tolerance and a 0.05 rad/s startup-speed tolerance.
+Tracking allowance is 0.30 rad for shoulders/elbows and 0.05 rad for wrists/waist.
+See [profile documentation](../../robot_safety/profiles/README.md) for all limits
+and their sources. Profile kd does not configure stock emergency-stop damping.
+
+## Joint extrema
+
+```bash
+./tests/manual/run_unitree_arm_test.sh --joint-deltas
+```
+
+The topic `/safety/joint_diagnostics` publishes signed min/max, maximum absolute
+value and sample count for each controlled joint:
+
+- `tracking_error_rad`: proposed q minus measured q.
+- `target_step_rad`: proposed q minus the previous successful SDK-write q.
+- `measured_velocity_rad_secs`: measured SDK dq at the output check.
+
+All 17 joints are sampled before validation, including a rejected frame.
+These are checked proposals, not proof of execution. Samples include handover
+and movement, stop when output stops and reset on process restart. Nonfinite
+values are excluded from extrema but still fail validation.
+
+The launcher prints the largest tracking-error range once a second and all
+joint ranges on stop. Final lines are retained in the ROS launch log.
+No limits are automatically adjusted from observed extrema.
+
+## Original dry-run test
+
+```bash
+./tests/manual/run_arm_raise_dry_run.sh
+# Once ready, in another terminal:
 ./tests/manual/run_arm_raise_dry_run.sh --start
 ```
 
-The start helper configures its own environment. No five-terminal setup or manual
-service sequencing is required. The launch terminal prints when the raise starts
-and when an abort latches. The controller readiness service verifies fresh,
-released-Start input before the producer requests checker/gate arming.
+This uses real telemetry, the checker, controller monitoring and a diagnostic
+motor gate. It proposes a 0.15 rad shoulder raise over 10 seconds without SDK
+motor writes. It does not validate physical tracking or stopping.
 
-The controller detector allows five seconds for its first sample in this launch,
-then enforces the normal 200 ms deadline. It cannot report ready before receiving
-feedback. An expired startup deadline stays latched even if telemetry later arrives.
-Service presence alone does not establish controller readiness. Distributed run
-identity, reset coordination and publisher isolation are still pending.
-
-For a different robot interface:
-
-```bash
-./tests/manual/run_arm_raise_dry_run.sh sdk_interface:=eth0
-```
-
-With an existing ROS/SDK environment, the underlying command is
-`ros2 launch tests/manual/arm_raise_dry_run.launch.py`.
-
-Double-press Start during the ten-second raise. Expect `damping: true`, with zero
-position stiffness, target velocity and feedforward torque across **all 29 slots**,
-including legs and waist. Positive `kd` represents velocity damping, not posture
-holding. Zero `q` in this output has no position effect because `kp` is zero.
-The producer stops proposals and cannot be started again in that process.
-Stock firmware can independently react to Start even though this software sends
-no motor commands. The operator's supported test arrangement still applies.
-
-Completion also aborts, so missing the gesture does not leave an indefinite hold.
-Stale observations, arming failures and publishing gaps of 20 ms or more abort.
-The gap limit avoids a trajectory catch-up step and may trip under CPU load.
-The independent gate retains its 200 ms watchdog. These are software deadlines,
-not guarantees of hardware response time.
-
-For a slower or smaller dry-run, set `raise_duration_secs` and
-`raise_angle_rad` as ROS parameters on the producer. `ArmRaiseSettings` contains
-the placeholder test gains and publishing gap limit. Whole-body damping currently
-uses `Config.damping` (1.0), also a placeholder. These settings are not commissioned
-hardware gains or motion limits. Do not connect this producer to a real motor
-adapter without hardware validation. No physical damping can be assessed here.
-
-To repeat after abort, stop the entire isolated test graph and start it again
-inhibited, then explicitly request a new run. Do not restart only one node to
-clear an abort. Retained abort coordination and run identity remain pending.
-
-Automated ROS testing covers service arming, proposed-command delivery, simulated
-Start press-release-press, all-joint diagnostic damping and refusal to restart.
-A manual controller test with this producer remains to be performed by the operator.
-
-## Checked trajectory rates
-
-The default 0.15 rad excursion over 10 seconds has peak target velocity
-0.028125 rad/s (1.61 degrees/s) and peak target acceleration approximately
-0.0086603 rad/s² (0.496 degrees/s²). A nominal 5 ms step changes the target
-by at most 0.000140625 rad (0.0081 degrees). Position, velocity and acceleration
-are continuous at the trajectory endpoints. Quintic jerk is finite but is not
-continuous when entering or leaving a stationary hold.
-
-Settings reject excursions above 0.15 rad and durations below 10 seconds, so a
-parameter override cannot make this test faster or larger. These restrictions
-bound this diagnostic trajectory, not the physical robot's safety envelope.
-Automated checks cover acceleration, command increments and parameter rejection.
-Actual motion still depends on control handover, measured initial velocity,
-tracking, gains and load. Whole-body abort damping is a separate transition and
-is not governed by the arm-raise curve.
-
-## Operator controller test — September 23, 2026
-
-The operator supplied logs showing the trajectory starting, followed about
-8.94 seconds later by `controller_double_start`. The checker, producer and motor
-gate latched abort. The gate's abort log appeared approximately 18.6 ms after
-the controller detector's log. This is a software log interval for one run,
-not a hardware stopping-time measurement. No physical motion or damping occurred.
+Automated ROS tests use localhost domain 191 and reject manual domain 97.
