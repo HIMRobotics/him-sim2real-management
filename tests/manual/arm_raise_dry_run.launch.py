@@ -1,5 +1,5 @@
 # ruff: noqa: N999
-"""Start five isolated safety processes, with no motor publisher or automatic arm."""
+"""Launch the arm test with diagnostic output unless hardware is explicitly enabled."""
 
 from pathlib import Path
 
@@ -8,6 +8,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
     ExecuteProcess,
+    OpaqueFunction,
     RegisterEventHandler,
 )
 from launch.event_handlers import OnProcessExit
@@ -16,14 +17,31 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
-    """Allow initial DDS discovery, then enforce normal feedback deadlines."""
+def start_processes(context):
+    """Select one motor gate and validate hardware settings before starting nodes."""
+    hardware = LaunchConfiguration("enable_hardware_output").perform(context)
+    if hardware not in ("true", "false"):
+        raise ValueError("enable_hardware_output must be true or false")
+    gate_role = "hardware_gate" if hardware == "true" else "motor_gate"
+    profile_path = LaunchConfiguration("hardware_profile_path").perform(context)
+    handover_timeout_secs = 5.0
+    if hardware == "true":
+        from robot_safety.hardware_profile import HardwareProfile
+
+        profile = HardwareProfile.load(profile_path)
+        handover_timeout_secs = profile.handover_secs + 1.0
     interface = LaunchConfiguration("sdk_interface")
     sdk_domain = LaunchConfiguration("sdk_domain")
     discovery_timeout = LaunchConfiguration("startup_timeout_secs")
-    roles = ("feedback", "checker", "motor_gate", "controller_stop", "arm_raise")
+    roles = ("feedback", "checker", gate_role, "controller_stop", "arm_raise")
     parameters = {
         "feedback": {"sdk_interface": interface, "sdk_domain": sdk_domain},
+        "hardware_gate": {
+            "enable_hardware_output": True,
+            "hardware_profile_path": profile_path,
+            "sdk_interface": interface,
+            "sdk_domain": sdk_domain,
+        },
         "controller_stop": {"startup_timeout_secs": discovery_timeout},
     }
     processes = [
@@ -39,7 +57,16 @@ def generate_launch_description():
     ]
     processes.append(
         ExecuteProcess(
-            cmd=["/usr/bin/python3", "-m", "tests.manual.arm_raise_node"],
+            cmd=[
+                "/usr/bin/python3",
+                "-m",
+                "tests.manual.arm_raise_node",
+                "--ros-args",
+                "-p",
+                ["test_policy:=", LaunchConfiguration("test_policy")],
+                "-p",
+                f"handover_timeout_secs:={handover_timeout_secs}",
+            ],
             cwd=str(Path(__file__).resolve().parents[2]),
             output="screen",
             respawn=False,
@@ -57,12 +84,19 @@ def generate_launch_description():
         )
         for role, process in zip(roles, processes)
     ]
+    return [*exit_handlers, *processes]
+
+
+def generate_launch_description():
+    """Expose explicit output selection without automatically arming the robot."""
     return LaunchDescription(
         [
             DeclareLaunchArgument("sdk_interface", default_value="eth0"),
+            DeclareLaunchArgument("test_policy", default_value="slow_raise"),
             DeclareLaunchArgument("sdk_domain", default_value="0"),
             DeclareLaunchArgument("startup_timeout_secs", default_value="5.0"),
-            *exit_handlers,
-            *processes,
+            DeclareLaunchArgument("enable_hardware_output", default_value="false"),
+            DeclareLaunchArgument("hardware_profile_path", default_value=""),
+            OpaqueFunction(function=start_processes),
         ]
     )

@@ -1,4 +1,4 @@
-"""ROS 2 adapters for a precheck/postcheck pipeline with fake motor output."""
+"""ROS 2 command checking, controller-stop detection and motor-gate roles."""
 
 import argparse
 import math
@@ -192,8 +192,32 @@ class MotorGateNode(SafetyNode):
             self.command_qos,
         )
         self.create_subscription(Abort, topics.ABORT, self.on_abort, self.abort_qos)
+        self.create_service(Trigger, topics.GATE_READY, self.on_ready)
         self.create_service(ArmGate, topics.GATE_ARM, self.on_arm)
+        self.create_service(ArmGate, topics.HANDOVER_READY, self.on_handover_ready)
         self.create_timer(self.config.period, self.publish_output)
+
+    def on_handover_ready(self, request, response):
+        """A diagnostic gate has no physical ownership ramp to wait for."""
+        response.success = (
+            bool(request.session_id)
+            and request.session_id == self.motor_gate.policy_session_id
+            and self.motor_gate.abort_reason is None
+            and self.motor_gate.supervisor_phase == SupervisorPhase.RUNNING
+        )
+        response.message = "ready" if response.success else "not ready"
+        return response
+
+    def on_ready(self, _request, response):
+        """Confirm the diagnostic gate is unused without opening a session."""
+        response.success = (
+            self.motor_gate.abort_reason is None
+            and self.motor_gate.policy_session_id is None
+        )
+        response.message = (
+            "ready" if response.success else "gate already armed or stopped"
+        )
+        return response
 
     def on_postcheck(self, message):
         self.motor_gate.receive(
@@ -304,17 +328,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "role",
-        choices=("checker", "motor_gate", "controller_stop", "feedback"),
+        choices=(
+            "checker",
+            "motor_gate",
+            "controller_stop",
+            "feedback",
+            "hardware_gate",
+        ),
     )
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
     from .feedback_node import RobotFeedbackNode
+    from .hardware_node import HardwareMotorGateNode
 
     node = {
         "checker": SafetyCheckerNode,
         "motor_gate": MotorGateNode,
         "controller_stop": ControllerStopNode,
         "feedback": RobotFeedbackNode,
+        "hardware_gate": HardwareMotorGateNode,
     }[args.role]()
     try:
         if args.role == "feedback":
