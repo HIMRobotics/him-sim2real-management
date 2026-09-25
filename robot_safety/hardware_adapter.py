@@ -5,12 +5,14 @@ import time
 from copy import deepcopy
 from threading import Event, Lock, RLock, Thread
 
+from .balance_policy import LEG_KD, LEG_KP, MODEL_PATH, BalancePolicy
 from .config import Config
-from .controller import StartDoublePressDetector
+from .controller import StartDoublePressDetector, decode_f3_pressed
 from .feedback import G1_29_JOINT_NAMES, feedback_from_sdk
 from .hardware_profile import (
     DAMPING_FSM_ID,
     DAMPING_RETRY_SECS,
+    SDK_RPC_SEND_CODE,
     HARDWARE_FEEDBACK_TIMEOUT_SECS,
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
@@ -47,12 +49,34 @@ class G1ArmAdapter:
         self.stop_requested = Event()
         self.shutdown_requested = Event()
         self.damping_rpc_code = None
+        self.walk_rpc_code = None
+        self.velocity_rpc_code = None
+        self.last_walk_secs = None
+        self.walk_stop = False
+        self.balance_policy = None
+        self.balance_load_reported = False
+        self.balance_released = False
+        self.arm_hold_q = None
+        self.quat = (1.0, 0.0, 0.0, 0.0)
+        self.gyro = (0.0, 0.0, 0.0)
+        self.f3_pressed = False
         self.reported_fsm_id = None
         self.arm_release_written = False
+        self.ownership_taken = False
+        self.hold_failed = False
+        self.release_damp_when_confirmed = False
+        self.damp_settled = False
+        self.hold_targets = None
+        self.pose_snapshot = None
+        self.pose_snapshot_secs = None
         self.joint_diagnostics = JointDeltaDiagnostics()
         self.workers = []
+        window = Config().double_press_window_secs
         self.button_detector = StartDoublePressDetector(
-            Config().double_press_window_secs, HARDWARE_FEEDBACK_TIMEOUT_SECS
+            window, HARDWARE_FEEDBACK_TIMEOUT_SECS
+        )
+        self.f3_detector = StartDoublePressDetector(
+            window, HARDWARE_FEEDBACK_TIMEOUT_SECS
         )
 
     def receive_state(self, message):
@@ -64,9 +88,32 @@ class G1ArmAdapter:
                 stop = self.button_detector.update(
                     sample.start_button_pressed, sample.received_at_secs
                 )
+                self.f3_pressed = decode_f3_pressed(message.wireless_remote)
+                soft = self.f3_detector.update(
+                    self.f3_pressed, sample.received_at_secs
+                )
                 self.feedback = sample
+                imu = getattr(message, "imu_state", None)
+                if imu is not None:
+                    self.quat = tuple(float(value) for value in imu.quaternion)
+                    self.gyro = tuple(float(value) for value in imu.gyroscope)
+                with self.stop_lock:
+                    self.pose_snapshot = tuple(
+                        sample.q[index] for index in UPPER_BODY_INDICES
+                    )
+                    self.pose_snapshot_secs = sample.received_at_secs
+                    if stop:
+                        self.hold_failed = True
+                        self.walk_stop = False
+                        self.release_damp_when_confirmed = True
+                    elif soft and not self.hold_failed:
+                        self.walk_stop = True
                 if stop:
-                    self.abort("hardware_controller_double_start", request_damping=True)
+                    self.abort(
+                        "hardware_controller_double_start", request_damping=True
+                    )
+                elif soft:
+                    self.abort("hardware_controller_double_f3")
                 if (
                     self.armed
                     and self.machine_type != self.profile.expected_machine_type
@@ -137,8 +184,8 @@ class G1ArmAdapter:
                     f"feedback age: measured={age} secs, "
                     f"required=0 <= age < {HARDWARE_FEEDBACK_TIMEOUT_SECS} secs"
                 )
-            if self.feedback.start_button_pressed:
-                return self.reject_arm("Start button must be released")
+            if self.feedback.start_button_pressed or self.f3_pressed:
+                return self.reject_arm("Start and F3 must be released")
             for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
                 joint_name = G1_29_JOINT_NAMES[index]
                 position = self.feedback.q[index]
@@ -173,7 +220,7 @@ class G1ArmAdapter:
             if self.abort_reason is None:
                 self.abort_reason = reason
             self.command = None
-            if self.armed or request_damping:
+            if self.armed or request_damping or self.walk_stop or self.hold_failed:
                 self.stop_requested.set()
 
     def submit(self, command, expires_at_secs):
@@ -241,6 +288,9 @@ class G1ArmAdapter:
                     self.abort("hardware_write_failed")
                     return
                 self.last_written_ownership_weight = weight
+                if weight > 0:
+                    with self.stop_lock:
+                        self.ownership_taken = True
                 if self.first_output_secs is None:
                     self.first_output_secs = now
                 self.last_output_secs = now
@@ -333,25 +383,158 @@ class G1ArmAdapter:
         return targets
 
     def stop_once(self):
-        """Request full-body damping, then disable arm ownership and inspect stock FSM."""
-        # RPC calls never hold the arm-write lock, so a timeout cannot delay latching.
+        """Damp on double Start, balance on double F3, otherwise hold the arms."""
+        # SDK calls stay off the arm-write lock so a stuck motion write cannot delay the stop.
+        with self.stop_lock:
+            if not self.stop_requested.is_set():
+                return
+            hard = self.hold_failed
+            walk = self.walk_stop and not hard
+            owned = self.ownership_taken
+        if hard:
+            self._request_stock_damping()
+            return
+        if walk:
+            self._publish_balance()
+            return
+        if not owned:
+            return
+        if not self._publish_pose_hold():
+            with self.stop_lock:
+                self.hold_failed = True
+            self._request_stock_damping()
+
+    def _publish_balance(self):
+        """Hold the GR00T standing network on the legs. Arms stay at the captured pose."""
+        if not self.balance_released:
+            try:
+                self.walk_rpc_code = self.transport.release_motion()
+            except Exception:  # noqa: BLE001
+                self.walk_rpc_code = None
+                return
+            if self.walk_rpc_code != 0:
+                return
+            self.balance_released = True
+        if self.feedback is None:
+            return
+        q = self.feedback.q
+        if self.arm_hold_q is None:
+            self.arm_hold_q = q[15:29]
+        if not self._ensure_balance_policy():
+            return
+        try:
+            lower = self.balance_policy.update(q, self.feedback.dq, self.quat, self.gyro)
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            self.transport.write_lower_body(
+                lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0
+            )
+        except Exception:  # noqa: BLE001
+            return
+
+    def _ensure_balance_policy(self):
+        """Load the network once. The first F3 must not wait on this."""
+        if self.balance_policy is not None:
+            return True
+        try:
+            self.balance_policy = BalancePolicy(str(MODEL_PATH))
+        except Exception as exc:  # noqa: BLE001
+            if not self.balance_load_reported:
+                print(
+                    f"balance network failed to load from {MODEL_PATH}: {exc}",
+                    flush=True,
+                )
+                self.balance_load_reported = True
+            return False
+        return True
+
+    def _publish_pose_hold(self):
+        """Command the pose captured at the stop, using profile gains and full ownership."""
+        with self.stop_lock:
+            now = self.clock()
+            snapshot = self.pose_snapshot
+            snapshot_secs = self.pose_snapshot_secs
+            if (
+                snapshot is None
+                or snapshot_secs is None
+                or not 0 <= now - snapshot_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS
+            ):
+                return False
+            if self.hold_targets is None:
+                if not all(math.isfinite(q) for q in snapshot):
+                    return False
+                self.hold_targets = {
+                    index: {
+                        "q": q,
+                        "dq": 0.0,
+                        "kp": limits.kp,
+                        "kd": limits.kd,
+                        "tau": 0.0,
+                    }
+                    for index, q, limits in zip(
+                        UPPER_BODY_INDICES, snapshot, self.profile.joints
+                    )
+                }
+            targets = self.hold_targets
+        try:
+            written = bool(self.transport.write_arm(targets, 1.0))
+        except Exception:  # noqa: BLE001
+            written = False
+        if written:
+            self.last_written_ownership_weight = 1.0
+        return written
+
+    def _request_stock_damping(self):
+        """Enter stock whole-body damping when the pose hold can no longer be published."""
+        if self.balance_released:
+            try:
+                restored = self.transport.restore_motion()
+            except Exception:  # noqa: BLE001
+                return
+            if restored != 0:
+                self.damping_rpc_code = restored
+                return
+            self.balance_released = False
         try:
             self.damping_rpc_code = self.transport.request_damping()
         except Exception:  # noqa: BLE001
             self.damping_rpc_code = None
         try:
-            # Empty motor targets and zero ownership weight are a release, not damping.
             self.arm_release_written = bool(self.transport.write_arm({}, 0.0))
         except Exception:  # noqa: BLE001
             self.arm_release_written = False
+        if self.damping_rpc_code != 0:
+            return
         try:
             code, fsm = self.transport.read_fsm()
             self.reported_fsm_id = fsm if code == 0 else None
         except Exception:  # noqa: BLE001
             self.reported_fsm_id = None
+        if (
+            self.release_damp_when_confirmed
+            and self.damping_rpc_code == 0
+            and self.reported_fsm_id == DAMPING_FSM_ID
+        ):
+            self._release_after_confirmed_damp()
+
+    def _release_after_confirmed_damp(self):
+        """Stop resending damp so a later stand from the remote is left alone."""
+        with self.stop_lock:
+            self.hold_failed = False
+            self.walk_stop = False
+            self.armed = False
+            self.command = None
+            self.abort_reason = None
+            self.release_damp_when_confirmed = False
+            self.damp_settled = True
+            self.stop_requested.clear()
+        self.button_detector.reset()
+        self.f3_detector.reset()
 
     def start_workers(self):
         """Run output deadlines and stop RPC retries independently of ROS callbacks."""
+        self._ensure_balance_policy()
 
         def output_loop():
             while not self.shutdown_requested.wait(HARDWARE_PERIOD_SECS):
@@ -370,10 +553,23 @@ class G1ArmAdapter:
                     and now - last_progress >= self.profile.max_publish_gap_secs
                 ):
                     self.abort("hardware_output_worker_stalled")
-                if self.stop_requested.is_set() and (
-                    last_request_secs is None
-                    or now - last_request_secs >= DAMPING_RETRY_SECS
-                ):
+                if not self.stop_requested.is_set():
+                    continue
+                with self.stop_lock:
+                    hard = self.hold_failed
+                    walk = self.walk_stop and not hard
+                    holding = self.ownership_taken and not hard and not walk
+                if hard:
+                    interval = (
+                        1.0
+                        if self.damping_rpc_code == SDK_RPC_SEND_CODE
+                        else DAMPING_RETRY_SECS
+                    )
+                elif walk or holding:
+                    interval = HARDWARE_PERIOD_SECS
+                else:
+                    continue
+                if last_request_secs is None or now - last_request_secs >= interval:
                     self.stop_once()
                     last_request_secs = self.clock()
 
@@ -385,10 +581,17 @@ class G1ArmAdapter:
             worker.start()
 
     def close(self):
-        """Attempt damping on orderly exit, without claiming protection against SIGKILL."""
+        """Damp on exit only after this process has taken arm ownership."""
         self.abort("hardware_shutdown")
+        with self.stop_lock:
+            soft = self.walk_stop and not self.hold_failed and not self.balance_released
+            exiting_a_hold = (self.ownership_taken and not soft) or self.balance_released
+            if exiting_a_hold:
+                self.hold_failed = True
+        if exiting_a_hold:
+            self._request_stock_damping()
         deadline = time.monotonic() + SHUTDOWN_WAIT_SECS
-        while self.stop_requested.is_set() and time.monotonic() < deadline:
+        while exiting_a_hold and time.monotonic() < deadline:
             if (
                 self.damping_rpc_code == 0
                 and self.reported_fsm_id == DAMPING_FSM_ID
@@ -396,6 +599,7 @@ class G1ArmAdapter:
             ):
                 break
             time.sleep(HARDWARE_PERIOD_SECS)
+            self._request_stock_damping()
         self.shutdown_requested.set()
         for worker in self.workers:
             worker.join(timeout=SHUTDOWN_WAIT_SECS)

@@ -47,7 +47,12 @@ def load_profile(data):
 class FakeTransport:
     def __init__(self):
         self.writes = []
+        self.lowcmds = []
         self.stop_calls = 0
+        self.walk_calls = 0
+        self.zero_velocity_calls = 0
+        self.release_calls = 0
+        self.restore_calls = 0
         self.mode = 4
         self.write_success = True
         self.rpc_success = True
@@ -65,9 +70,32 @@ class FakeTransport:
         self.mode = 1
         return 0
 
+    def request_walk(self):
+        self.walk_calls += 1
+        if not self.rpc_success:
+            raise TimeoutError()
+        self.mode = 500
+        return 0
+
+    def request_zero_velocity(self):
+        self.zero_velocity_calls += 1
+        return 0
+
     def write_arm(self, targets, weight):
         self.writes.append((targets, weight))
         return self.write_success
+
+    def release_motion(self):
+        self.release_calls += 1
+        return 0
+
+    def restore_motion(self):
+        self.restore_calls += 1
+        return 0
+
+    def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
+        self.lowcmds.append((list(lower_q), list(arm_q), machine))
+        return True
 
 
 class HardwareAdapterTests(unittest.TestCase):
@@ -80,9 +108,9 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertTrue(self.adapter.check_ready_mode())
         self.command = {name: [0.0] * 29 for name in ("q", "dq", "kp", "kd", "tau")}
 
-    def state(self, pressed=False, machine=5):
+    def state(self, pressed=False, f3=False, machine=5):
         remote = [0] * 40
-        remote[2] = 4 if pressed else 0
+        remote[2] = (4 if pressed else 0) | (128 if f3 else 0)
         self.adapter.receive_state(
             SimpleNamespace(
                 motor_state=[SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)],
@@ -111,7 +139,7 @@ class HardwareAdapterTests(unittest.TestCase):
             ("mode", "ready mode: measured=500"),
             ("machine", "machine type: measured=6"),
             ("feedback", "feedback age:"),
-            ("button", "Start button must be released"),
+            ("button", "Start and F3 must be released"),
             ("position", "left_shoulder_roll position: measured=2.000000 rad"),
             ("speed", "left_shoulder_roll speed: measured=0.020000 rad/s"),
             ("rpc", "ready-mode query failed: rpc_code=3104"),
@@ -185,7 +213,57 @@ class HardwareAdapterTests(unittest.TestCase):
         self.now += 0.05
         self.state(pressed=True)
         self.assertTrue(self.adapter.stop_requested.is_set())
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.assertEqual(self.transport.mode, 1)
+        self.assertEqual(self.transport.walk_calls, 0)
         self.assertFalse(self.adapter.arm())
+
+    def press_f3_twice(self):
+        self.state(f3=True)
+        self.now += 0.05
+        self.state()
+        self.now += 0.05
+        self.state(f3=True)
+
+    def test_double_f3_runs_the_balance_network(self):
+        self.take_ownership()
+        self.adapter.balance_policy = type(
+            "HoldLegs",
+            (),
+            {"update": staticmethod(lambda q, dq, quat, gyro: list(q[:15]))},
+        )()
+        self.press_f3_twice()
+        self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_f3")
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.release_calls, 1)
+        self.assertEqual(self.transport.walk_calls, 0)
+        self.assertEqual(self.transport.stop_calls, 0)
+        lower, arms, machine = self.transport.lowcmds[-1]
+        self.assertEqual(len(lower), 15)
+        self.assertEqual(len(arms), 14)
+        self.assertEqual(machine, 5)
+        self.state(pressed=True)
+        self.now += 0.05
+        self.state()
+        self.now += 0.05
+        self.state(pressed=True)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.restore_calls, 1)
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.assertEqual(self.transport.mode, 1)
+        self.assertFalse(self.adapter.stop_requested.is_set())
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.state()
+        self.now += 0.05
+        self.state(pressed=True)
+        self.now += 0.05
+        self.state()
+        self.now += 0.05
+        self.state(pressed=True)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 2)
 
     def test_rejected_readiness_shutdown_sends_no_motor_commands(self):
         self.transport.read_ready_fsm = lambda: (3104, None)
@@ -208,8 +286,15 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertGreater(self.transport.writes[-1][1], 0)
         self.assertLess(self.transport.writes[-1][1], 0.001)
 
-    def test_abort_permanently_blocks_motion_and_requests_whole_body_damping(self):
+    def take_ownership(self):
         self.run_first()
+        self.now += 0.005
+        self.state()
+        self.adapter.step()
+        self.assertGreater(self.transport.writes[-1][1], 0)
+
+    def test_abort_holds_owned_pose_and_blocks_further_motion(self):
+        self.take_ownership()
         count = len(self.transport.writes)
         self.adapter.abort("manual_stop")
         self.assertTrue(self.adapter.stop_requested.is_set())
@@ -217,10 +302,36 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.step()
         self.assertEqual(len(self.transport.writes), count)
         self.adapter.stop_once()
+        targets, weight = self.transport.writes[-1]
+        self.assertEqual(weight, 1.0)
+        self.assertEqual(targets[16]["q"], 0.0)
+        self.assertEqual(targets[16]["dq"], 0.0)
+        self.assertEqual((targets[16]["kp"], targets[16]["kd"]), (2.0, 0.5))
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.assertIsNone(self.adapter.reported_fsm_id)
+        self.assertFalse(self.adapter.arm())
+
+    def test_hold_keeps_the_pose_from_the_stop_and_damps_when_feedback_is_stale(self):
+        self.take_ownership()
+        self.adapter.abort("manual_stop")
+        self.adapter.stop_once()
+        self.now += 0.01
+        remote = [0] * 40
+        motors = [SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)]
+        motors[16] = SimpleNamespace(q=0.04, dq=0.2)
+        self.adapter.receive_state(
+            SimpleNamespace(
+                motor_state=motors, mode_machine=5, wireless_remote=remote
+            )
+        )
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.writes[-1][0][16]["q"], 0.0)
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.now += 0.3
+        self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 1)
         self.assertEqual(self.transport.writes[-1], ({}, 0.0))
         self.assertEqual(self.adapter.reported_fsm_id, 1)
-        self.assertFalse(self.adapter.arm())
 
     def test_expiry_does_not_extend_when_the_same_command_is_resubmitted(self):
         self.run_first()
@@ -297,16 +408,31 @@ class HardwareAdapterTests(unittest.TestCase):
         self.run_first()
         self.assertEqual(self.adapter.abort_reason, "hardware_write_failed")
 
-    def test_failed_damping_rpc_still_attempts_release_and_can_retry(self):
-        self.run_first()
+    def test_failed_hold_write_and_failed_damping_rpc_still_release(self):
+        self.take_ownership()
         self.adapter.abort("stop")
+        self.transport.write_success = False
         self.transport.rpc_success = False
         self.adapter.stop_once()
         self.assertIsNone(self.adapter.damping_rpc_code)
         self.assertEqual(self.transport.writes[-1], ({}, 0.0))
+        self.assertEqual(self.transport.stop_calls, 1)
         self.transport.rpc_success = True
         self.adapter.stop_once()
         self.assertEqual(self.adapter.damping_rpc_code, 0)
+
+    def test_exit_before_ownership_does_not_damp_and_exit_after_does(self):
+        self.run_first()
+        self.transport.close = lambda: None
+        self.adapter.close()
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.setUp()
+        self.take_ownership()
+        self.transport.close = lambda: None
+        self.adapter.close()
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.assertEqual(self.transport.writes[-1], ({}, 0.0))
+        self.assertEqual(self.adapter.reported_fsm_id, 1)
 
     def test_abort_rpc_does_not_wait_for_blocked_motion_write(self):
         from threading import Event, Thread
@@ -330,7 +456,7 @@ class HardwareAdapterTests(unittest.TestCase):
             self.assertTrue(entered_write.wait(1.0))
             self.adapter.abort("abort_during_write")
             self.adapter.stop_once()
-            self.assertEqual(self.transport.stop_calls, 1)
+            self.assertEqual(self.transport.stop_calls, 0)
             self.assertTrue(self.adapter.stop_requested.is_set())
         finally:
             release_write.set()
@@ -427,3 +553,46 @@ class TransportEncodingTests(unittest.TestCase):
         self.assertEqual(message.motor_cmd[29].q, 0.2)
         self.assertTrue(all(message.motor_cmd[i].kp == 0 for i in range(12)))
         self.assertEqual(message.crc, 12345)
+
+    def test_soft_reset_mutes_developer_mode_then_speaks(self):
+        from robot_safety.unitree_transport import SOFT_RESET_PHRASE, UnitreeArmTransport
+
+        events = []
+
+        class Switcher:
+            def CheckMode(self):
+                return 0, {"name": "ai"}
+
+            def ReleaseMode(self):
+                events.append("release")
+                return 0, None
+
+            def SetTimeout(self, timeout):
+                return None
+
+            def _Call(self, api_id, parameter):
+                events.append(("silent", parameter))
+                return 0, None
+
+        class Audio:
+            def __init__(self):
+                self.tts_index = 0
+
+            def TtsMaker(self, text, speaker_id):
+                events.append((text, speaker_id, self.tts_index))
+
+        transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+        transport.switcher = Switcher()
+        transport.audio = Audio()
+        transport.saved_motion_name = None
+        transport.motion_restored = False
+        self.assertEqual(transport.release_motion(), 0)
+        transport._speech_thread.join(timeout=1.0)
+        self.assertEqual(
+            events,
+            [
+                ("silent", '{"silent": true}'),
+                "release",
+                (SOFT_RESET_PHRASE, 1, 1),
+            ],
+        )

@@ -1,0 +1,109 @@
+{
+  "source_url": "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/master/robots/g1_description/g1_29dof_rev_1_0.urdf",
+  "retrieved_date": "2026-09-24",
+  "source_sha256": "c0ae739c640c3e2c00d1bdd8810b5d6e59601487bd1a3995859f9543269ee5c8",
+  "joints": {
+    "waist_yaw": {
+      "lower": -26.18,
+      "upper": 26.18,
+      "velocity": 320.0,
+      "effort": 880.0
+    },
+    "waist_roll": {
+      "lower": -5.2,
+      "upper": 5.2,
+      "velocity": 300.0,
+      "effort": 350.0
+    },
+    "waist_pitch": {
+      "lower": -5.2,
+      "upper": 5.2,
+      "velocity": 300.0,
+      "effort": 350.0
+    },
+    "left_shoulder_pitch": {
+      "lower": -30.892,
+      "upper": 26.704,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "left_shoulder_roll": {
+      "lower": -15.882,
+      "upper": 22.515,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "left_shoulder_yaw": {
+      "lower": -26.18,
+      "upper": 26.18,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "left_elbow": {
+      "lower": -10.472,
+      "upper": 20.944,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "left_wrist_roll": {
+      "lower": -19.722221,
+      "upper": 19.722221,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "left_wrist_pitch": {
+      "lower": -16.144296,
+      "upper": 16.144296,
+      "velocity": 220.0,
+      "effort": 50.0
+    },
+    "left_wrist_yaw": {
+      "lower": -16.144296,
+      "upper": 16.144296,
+      "velocity": 220.0,
+      "effort": 50.0
+    },
+    "right_shoulder_pitch": {
+      "lower": -30.892,
+      "upper": 26.704,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "right_shoulder_roll": {
+      "lower": -22.515,
+      "upper": 15.882,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "right_shoulder_yaw": {
+      "lower": -26.18,
+      "upper": 26.18,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "right_elbow": {
+      "lower": -10.472,
+      "upper": 20.944,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "right_wrist_roll": {
+      "lower": -19.722221,
+      "upper": 19.722221,
+      "velocity": 370.0,
+      "effort": 250.0
+    },
+    "right_wrist_pitch": {
+      "lower": -16.144296,
+      "upper": 16.144296,
+      "velocity": 220.0,
+      "effort": 50.0
+    },
+    "right_wrist_yaw": {
+      "lower": -16.144296,
+      "upper": 16.144296,
+      "velocity": 220.0,
+      "effort": 50.0
+    }
+  }
+}

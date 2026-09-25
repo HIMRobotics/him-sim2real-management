@@ -2,16 +2,31 @@
 
 import math
 
-from .config import START_BUTTON_BYTE, START_BUTTON_MASK, WIRELESS_REMOTE_SIZE
+from .config import (
+    F3_BUTTON_MASK,
+    START_BUTTON_BYTE,
+    START_BUTTON_MASK,
+    WIRELESS_REMOTE_SIZE,
+)
 
 
-def decode_start_pressed(wireless_remote):
-    """Return Start's physical state from the SDK's 40-byte remote payload."""
+def decode_remote_button(wireless_remote, mask):
+    """Return one button bit from the SDK's 40-byte remote payload."""
     if len(wireless_remote) != WIRELESS_REMOTE_SIZE:
         raise ValueError("expected a 40-byte wireless_remote payload")
     if not all(type(value) is int and 0 <= value <= 255 for value in wireless_remote):
         raise ValueError("remote payload must contain bytes")
-    return bool(wireless_remote[START_BUTTON_BYTE] & START_BUTTON_MASK)
+    return bool(wireless_remote[START_BUTTON_BYTE] & mask)
+
+
+def decode_start_pressed(wireless_remote):
+    """Return Start's physical state from the SDK's 40-byte remote payload."""
+    return decode_remote_button(wireless_remote, START_BUTTON_MASK)
+
+
+def decode_f3_pressed(wireless_remote):
+    """Return F3's physical state. F3 sits beside Start on the G1 remote."""
+    return decode_remote_button(wireless_remote, F3_BUTTON_MASK)
 
 
 class StartDoublePressDetector:

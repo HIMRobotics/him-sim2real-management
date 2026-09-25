@@ -117,9 +117,9 @@ class HardwareNodeTests(unittest.TestCase):
             abort.reason = "controller_double_start"
             node.on_abort(abort)
             node.adapter.stop_once()
-            self.assertEqual(transport.stop_calls, 1)
+            self.assertEqual(transport.stop_calls, 0)
             self.assertEqual(node.adapter.abort_reason, "controller_double_start")
-            self.assertEqual(transport.writes[-1], ({}, 0.0))
+            self.assertEqual(transport.writes[-1][1], 0.0)
         finally:
             if node is not None:
                 node.destroy_node()

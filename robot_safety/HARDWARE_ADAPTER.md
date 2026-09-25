@@ -13,7 +13,8 @@ still starts only the diagnostic gate. Never run both gates together.
 precheck -> checker -> postcheck -> hardware gate -> rt/arm_sdk
 controller abort ----------------------|                  |
                                       |             upper-body targets
-                                      -> SetFsmId(1) -> stock whole-body damping
+                                      |             stop: hold measured pose, weight 1
+                                      -> SetFsmId(1) only if that hold cannot continue
 ```
 
 `hardware_node.py` connects the existing session/sequence/expiry gate to
@@ -34,12 +35,16 @@ feedforward torque, rather than forwarding the dry-run producer's placeholder
 gains. Nonzero upper-body feedforward torque is rejected. This gain selection is
 an explicit output policy, not an assertion that arbitrary proposals are safe.
 
-An abort stops subsequent motion writes. The independent stop worker first calls
-`SetFsmId(1)` (the underlying operation used by `LocoClient.Damp()`), then writes a
-zero-weight arm release and queries the stock FSM. Requests repeat while the
-process is alive. RPC failures do not suppress the release attempt. A zero-weight
-release alone is not whole-body damping. In-flight DDS writes cannot be recalled.
-Firmware priority between damping requests and arm traffic is still unverified.
+An abort stops subsequent motion writes. If this process has taken arm ownership
+and feedback is fresh, the stop worker keeps publishing the measured upper-body
+pose from the moment of the stop: target speed 0, profile `kp` and `kd`, zero
+feedforward torque, and ownership weight 1. The legs stay in the current standing
+mode. `SetFsmId(1)` runs only when that hold cannot continue: feedback goes
+stale, an arm write fails, or the process is exiting. That fallback then writes a
+zero-weight arm release and queries the stock FSM. Repeats continue while the
+process is alive. A zero-weight release alone is not whole-body damping.
+In-flight DDS writes cannot be recalled. Firmware priority between damping
+requests and arm traffic is still unverified.
 
 The SDK callback checks `mode_machine=5`, copies fresh measured state and detects
 Start double presses directly, in addition to the existing ROS controller-stop
