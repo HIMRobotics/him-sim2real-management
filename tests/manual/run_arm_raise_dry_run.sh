@@ -11,6 +11,7 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_DOMAIN_ID=97
 export ROS_LOCALHOST_ONLY=1
 export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"
+export HIM_BALANCE_ONNX="$repo_dir/.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx"
 
 # Use one overlay for launch and the separate explicit start request.
 if [[ "${1:-}" == "--start" || "${1:-}" == "--check-ready" || "${1:-}" == "--joint-deltas" ]]; then

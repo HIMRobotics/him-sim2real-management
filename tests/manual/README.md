@@ -4,9 +4,10 @@ The scripts build and launch five processes: telemetry, command checker, motor
 gate, controller-stop monitor and test policy. ROS uses localhost domain 97.
 The Unitree SDK uses domain 0 and interface `eth0` by default.
 
-**Current limitation:** the operator reported a jerky T-pose stop followed by a
-joint shutdown. Custom damping is next-session work in [ESTOP_PLAN.md](../../ESTOP_PLAN.md).
-The current stop requests Unitree's stock whole-body damping.
+**Current stop:** after arm ownership is taken, double Start, a fault, or
+completion holds the measured arm pose in locked standing. Stock whole-body
+damping (`SetFsmId(1)`) runs only if that hold cannot continue or the process
+is exiting. A stop before any ownership does not command the motors.
 
 ## Full arm sequence
 
@@ -32,16 +33,19 @@ full-weight SDK write for its session. The profile's ownership ramp lasts
 - 0–3 seconds: targets move toward zero.
 - 3–9 seconds: both arms raise using the SDK example's targets.
 - 9–18 seconds: targets return toward zero.
-- Completion: latch stop and request whole-body damping.
+- Completion: latch stop and hold the measured arm pose.
 
 The trajectory retains the SDK example's feedback-based position formulas.
 This is not the small, extra-slow elbow test. The stock controller owns the legs
 during arm control. A full-weight write is not proof of physical takeover.
 
-Double press Start within 0.5 seconds to request whole-body damping. Tracking,
-freshness and command-gap checks remain active during handover and movement.
-Faults and completion also request damping. The graph stays stopped until Ctrl+C
-and restart. Damping can remove standing support.
+Double press Start within 0.5 seconds for the hard stop: stock whole-body damping,
+which can fold the robot. Double press F3, the button beside Start, for the soft
+stop: the legs enter walk mode at zero speed, and the arms freeze at the pose
+they had at the press. The balancer may take a step. The arms stay on this
+process, at full ownership weight. Tracking, freshness and command-gap
+checks remain active during handover and movement. Other faults hold the measured
+arm pose. The graph stays stopped until restart.
 
 ## Small elbow test
 
@@ -57,7 +61,7 @@ velocity and acceleration, with peak requested speed 0.009375 rad/s.
 
 The final target is held for 2 seconds. The measured elbow must finish within
 0.02 rad of that target. The result is `small_elbow_complete` or
-`small_elbow_did_not_follow`. Both results request whole-body damping.
+`small_elbow_did_not_follow`. Both results hold the measured arm pose.
 The operator reported this test worked.
 
 ## Readiness and configuration

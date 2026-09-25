@@ -142,7 +142,11 @@ class HardwareMotorGateNode(MotorGateNode):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
             return
-        if self.adapter.abort_reason:
+        if self.adapter.damp_settled:
+            self.motor_gate.abort_reason = None
+            self.abort_reason = None
+            self.adapter.damp_settled = False
+        elif self.adapter.abort_reason:
             self.motor_gate.abort(self.adapter.abort_reason)
         command = self.motor_gate.cycle(time.monotonic())
         if self.motor_gate.abort_reason:
@@ -161,8 +165,13 @@ class HardwareMotorGateNode(MotorGateNode):
                 "arm_rejection_reason": self.adapter.arm_rejection_reason,
                 "abort_reason": self.adapter.abort_reason,
                 "damping_rpc_code": self.adapter.damping_rpc_code,
+                "walk_stop": self.adapter.walk_stop,
+                "walk_rpc_code": self.adapter.walk_rpc_code,
+                "velocity_rpc_code": self.adapter.velocity_rpc_code,
                 "reported_fsm_id": self.adapter.reported_fsm_id,
                 "arm_release_written": self.adapter.arm_release_written,
+                "pose_hold": self.adapter.hold_targets is not None
+                and not self.adapter.hold_failed,
                 "physical_damping_verified": False,
             }
         )

@@ -155,8 +155,9 @@ The SDK reading is an observed configuration, not a setting changed by this code
 - Captured-pose handover before the full SDK arm sequence or small elbow test.
 - Shoulder/elbow tracking allowance of 0.30 rad and waist/wrist allowance of
   0.05 rad. Joint extrema support further measurement-based tuning.
-- Whole-body stock damping on abort and completion, followed by arm ownership
-  release. No automatic rearm.
+- On abort and completion, hold the measured arm pose at full ownership weight
+  while feedback is fresh. Stock `SetFsmId(1)` runs only if that hold fails or
+  the process exits after taking ownership. No automatic rearm.
 - Explicit manual launch/start commands in [tests/manual](tests/manual/README.md).
 
 ## Physical observations
@@ -174,9 +175,9 @@ have not been established. Successful stop RPCs are not physical stop acceptance
 Requested: stronger custom damping with a controlled transition that avoids the
 reported jerk and joint shutdown.
 
-Current implementation still calls Unitree's stock `SetFsmId(1)`. No custom
-E-stop damping controller exists yet. The profile's `kd` controls normal arm
-tracking and does not tune the stock damping mode.
+A healthy stop now holds the measured arm pose with the profile's `kp` and `kd`
+and does not call `SetFsmId(1)`. Stock damping remains the fallback when the
+hold cannot be published. The profile's `kd` still does not tune stock damp mode.
 
 Next work:
 

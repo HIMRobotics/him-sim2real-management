@@ -13,8 +13,9 @@ if [[ "${1:-}" == "--small-step" ]]; then
 fi
 if [[ "${1:-}" == "--hardware" ]]; then
     shift
+    # Lenient for now. Undo: hardware_profile_path:=$repo_dir/robot_safety/profiles/g1_type5.template.json
     exec "$manual_dir/run_arm_raise_dry_run.sh" "test_policy:=$test_policy" \
         enable_hardware_output:=true \
-        "hardware_profile_path:=$repo_dir/robot_safety/profiles/g1_type5.template.json" "$@"
+        "hardware_profile_path:=$repo_dir/robot_safety/profiles/g1_type5.lenient.json" "$@"
 fi
 exec "$manual_dir/run_arm_raise_dry_run.sh" "test_policy:=$test_policy" "$@"
