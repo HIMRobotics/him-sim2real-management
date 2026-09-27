@@ -12,6 +12,49 @@ controller_stop -> /safety/abort -> checker and motor gate
 
 The default motor gate publishes **only `/safety/dry_run_output`**. An explicitly selected `hardware_gate` now provides SDK output, pending physical validation. See [hardware adapter setup and boundaries](HARDWARE_ADAPTER.md). The position/velocity/gain/torque frame belongs before the Unitree controller. No code is inserted between its internal controller and actuators.
 
+## Background safety watchdog
+
+Run `./install_safety_stops.sh install` from the repository root on the robot
+host to install, enable and immediately start the user systemd service
+`g1-safety-stops.service`. With no argument, the script offers installation or
+removal. It writes the unit under `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`
+with paths to this clone, reloads systemd and enables user lingering so the
+service can start at boot and survive logout. If enabling linger fails, the
+script prints the required administrator command. Re-run installation after
+moving the clone to update its paths.
+
+The service runs [run_safety_stops.sh](../tests/manual/run_safety_stops.sh), which
+builds the ROS overlay under `~/.him-safety` and starts a hardware motor gate.
+It does not start an arm trajectory or arm a policy. The gate reads the robot's
+controller telemetry directly and watches for press–release–press gestures
+within 0.5 seconds: **double F3 requests balance with the arms held**, and
+**double Start requests stock whole-body damping**. F3 uses the local GR00T
+balance network, not the stock walking controller. The service can issue these
+commands even without a test policy running. While armed, it also checks command
+and feedback freshness. Systemd restarts the process on failure, subject to the
+unit's retry limits. An active service alone does not establish physical stop
+performance.
+
+The launcher uses ROS localhost domain 97, SDK domain 0, interface `eth0` and
+[g1_type5.lenient.json](profiles/g1_type5.lenient.json) by default. It requires
+ROS 2 Foxy, colcon, the system Python's Unitree SDK/native libraries and balance
+runtime, and `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx` in this
+clone. Installation does not provision those dependencies. Service environment
+variables `HIM_SAFETY_PROFILE` and `HIM_SAFETY_ROS_INSTALL` override the profile and
+overlay path. Set them through a systemd user-service override if needed.
+
+```bash
+systemctl --user status g1-safety-stops.service
+journalctl --user -u g1-safety-stops.service -f
+./install_safety_stops.sh uninstall
+```
+
+Uninstall stops and disables the service and removes its unit. It leaves the
+build files and user lingering in place. Stopping an active gate can request
+damping, so finish hardware tests with the robot supported before removal.
+See the [manual arm-raise guide](../tests/manual/README.md) to verify this
+background gate through a policy run without starting a second motor gate.
+
 ## Node responsibilities
 
 - `SafetyCheckerNode`: callback-driven validation of whole precheck frames using the existing core. One invalid joint latches the fuse, prevents all later relaying, and publishes abort immediately then every 100 ms. Each valid frame is relayed once, never replayed as a heartbeat.
@@ -69,7 +112,7 @@ python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
 
 ## Next review checkpoint
 
-The feedback adapter, manual policies, per-joint profile and opt-in hardware gate are implemented. Coordinated reset, publisher access isolation, managed watchdogs and frontend integration remain pending. Physical stop acceptance is unresolved after the reported joint shutdown. See [ESTOP_PLAN.md](../ESTOP_PLAN.md) for next-session work.
+The feedback adapter, manual policies, per-joint profile and opt-in hardware gate are implemented. A systemd-managed hardware watchdog is available below. Coordinated reset, publisher access isolation and frontend integration remain pending. Physical stop acceptance is unresolved after the reported joint shutdown. See [ESTOP_PLAN.md](../ESTOP_PLAN.md) for next-session work.
 
 ---
 

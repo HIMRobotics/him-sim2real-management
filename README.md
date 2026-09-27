@@ -86,3 +86,13 @@ For live recording, keep using the existing validated Unitree SDK Python environ
 Existing project references: `g1_table_tennis_rally/DEPLOYMENT_DATA.md` describes the older controller-specific RGB-D recorder. `him-sports-eval` provides formal task-specific evaluation and review. This kit is standalone; it does not start either controller or automatically translate its logs into formal benchmark observations.
 
 The app adds one outer `*_RETURN.zip` around the verified run archive and checksum, so operators send one file. Browser refresh does not interrupt collection. Only one app instance and one app-managed recording are allowed per kit folder. Live robot collection needs the existing SDK and a successful current connection check.
+
+## Robot safety background service
+
+The separate [safety infrastructure](robot_safety/README.md#background-safety-watchdog)
+provides a hardware watchdog for controller stops. On the robot host,
+`./install_safety_stops.sh install` installs and starts a user systemd service,
+enables boot startup through user lingering, and keeps a gate running that
+checks for double F3 (balance and arm hold) and double Start (whole-body damping).
+It does not start a policy. See the [manual safety tests](tests/manual/README.md)
+for installation checks and arm-raise verification.
