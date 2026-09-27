@@ -22,6 +22,13 @@ import threading
 import time
 import uuid
 
+from robot_safety.hardware_constants import (
+    ARM_SDK_TOPIC,
+    LOW_COMMAND_TOPIC,
+    LOW_STATE_TOPIC,
+    NUM_JOINTS,
+)
+
 VERSION = '1.2.3'
 ROOT = Path(__file__).resolve().parent
 OUTCOMES = ('success', 'partial', 'failure', 'invalid', 'aborted', 'unknown')
@@ -71,9 +78,9 @@ def fields(obj, names):
 
 def state_payload(msg):
     motors = list(msg.motor_state)
-    if len(motors) < 29:
+    if len(motors) < NUM_JOINTS:
         raise ValueError('Expected G1 HG state with at least 29 motor slots')
-    for m in motors[:29]:
+    for m in motors[:NUM_JOINTS]:
         if not math.isfinite(float(m.q)) or not math.isfinite(float(m.dq)):
             raise ValueError('Nonfinite motor position/velocity')
     return {
@@ -156,9 +163,9 @@ def connect(receiver, interface, domain, commands=True):
     ChannelFactoryInitialize(domain, None if interface == 'auto' else interface)
     subscribers = []
     warnings = []
-    specs = [('rt/lowstate', 'state', LowState_)]
+    specs = [(LOW_STATE_TOPIC, 'state', LowState_)]
     if commands:
-        specs += [('rt/lowcmd', 'command', LowCmd_), ('rt/arm_sdk', 'command', LowCmd_)]
+        specs += [(LOW_COMMAND_TOPIC, 'command', LowCmd_), (ARM_SDK_TOPIC, 'command', LowCmd_)]
     for topic, kind, message_type in specs:
         try:
             sub = ChannelSubscriber(topic, message_type)
@@ -175,8 +182,8 @@ def connect(receiver, interface, domain, commands=True):
 def demo_source(receiver, stop):
     from types import SimpleNamespace as NS
     tick = 0
-    callback = receiver.callback('rt/lowstate', 'state')
-    command = receiver.callback('rt/arm_sdk', 'command')
+    callback = receiver.callback(LOW_STATE_TOPIC, 'state')
+    command = receiver.callback(ARM_SDK_TOPIC, 'command')
     while not stop.is_set():
         tick += 20
         motors = [NS(q=math.sin(tick / 1000) * .1, dq=.1, tau_est=.2,
@@ -415,7 +422,7 @@ def report(run):
     gaps = []
     tick_resets = 0
     last_tick = None
-    motor_stats = [{} for _ in range(29)]
+    motor_stats = [{} for _ in range(NUM_JOINTS)]
     imu_max = [None, None]
     for row in json_lines(run / 'telemetry' / 'state.jsonl', issues):
         t = row['host_monotonic_s']
@@ -429,7 +436,7 @@ def report(run):
         if tick is not None and last_tick is not None and tick < last_tick:
             tick_resets += 1
         last_tick = tick
-        for i, m in enumerate(data['motors'][:29]):
+        for i, m in enumerate(data['motors'][:NUM_JOINTS]):
             for key in ('q', 'dq', 'tau_est', 'temperature'):
                 value = m.get(key)
                 vals = numeric(value if isinstance(value, list) else [value])

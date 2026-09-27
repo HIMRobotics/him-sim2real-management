@@ -3,11 +3,9 @@
 import math
 from dataclasses import dataclass, field
 
+from .hardware_constants import NUM_JOINTS
+
 MAX_CONFIGURED_JOINTS = 35  # Existing software cap, not a robot capability claim.
-START_BUTTON_BYTE = 2
-START_BUTTON_MASK = 1 << 2
-F3_BUTTON_MASK = 1 << 7  # Bit 7 of the same byte, from the G1 wireless example.
-WIRELESS_REMOTE_SIZE = 40
 EXPIRY_ROUNDING_TOLERANCE_SECS = 1e-9  # Allow floating-point subtraction roundoff.
 COMMAND_FIELDS = ("q", "dq", "kp", "kd", "tau")
 
@@ -58,7 +56,7 @@ class JointCommandLimits:
 class Config:
     """Supervisor settings with time values in seconds and test-only gains."""
 
-    joints: int = 29
+    joints: int = NUM_JOINTS
     period: float = 0.005
     action_timeout: float = 0.2
     observation_timeout: float = 0.2

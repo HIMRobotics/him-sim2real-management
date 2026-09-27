@@ -6,6 +6,7 @@ import time
 from threading import Event
 
 from robot_safety.config import Config
+from robot_safety.hardware_constants import LOW_STATE_TOPIC
 from robot_safety.controller import StartDoublePressDetector, decode_start_pressed
 
 
@@ -14,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interface", required=True)
     parser.add_argument("--domain", type=int, default=0)
-    parser.add_argument("--topic", default="rt/lowstate")
+    parser.add_argument("--topic", default=LOW_STATE_TOPIC)
     parser.add_argument(
         "--window-secs", type=float, default=Config().double_press_window_secs
     )

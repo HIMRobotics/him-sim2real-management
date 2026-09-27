@@ -2,7 +2,7 @@
 
 import math
 
-from .config import (
+from .hardware_constants import (
     F3_BUTTON_MASK,
     START_BUTTON_BYTE,
     START_BUTTON_MASK,

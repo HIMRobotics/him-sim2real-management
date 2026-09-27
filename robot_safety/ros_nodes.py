@@ -338,6 +338,12 @@ def main():
     )
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
+
+    def _stop_on_term(_signum, _frame):
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    signal.signal(signal.SIGTERM, _stop_on_term)
     from .feedback_node import RobotFeedbackNode
     from .hardware_node import HardwareMotorGateNode
 
@@ -357,6 +363,7 @@ def main():
     finally:
         # Terminal SIGINT and launch shutdown can both arrive during cleanup.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

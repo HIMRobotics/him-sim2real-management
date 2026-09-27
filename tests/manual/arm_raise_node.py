@@ -11,12 +11,12 @@ from him_safety_interfaces.srv import ArmGate
 from std_srvs.srv import Trigger
 
 from robot_safety import ros_topics as topics
-from robot_safety.feedback import G1_29_JOINT_NAMES
+from robot_safety.hardware_constants import LEFT_ELBOW_INDEX, NUM_JOINTS
 from robot_safety.hardware_profile import READINESS_CHECK_TIMEOUT_SECS
 from robot_safety.ros_nodes import SafetyNode, command_to_ros
 
 from .arm_raise import ArmRaiseSettings, SlowArmRaise
-from .small_elbow_step import LEFT_ELBOW_INDEX, SmallElbowSettings, SmallElbowStep
+from .small_elbow_step import SmallElbowSettings, SmallElbowStep
 from .unitree_arm_sequence import UnitreeArmSequence, UnitreeArmSettings
 
 ARM_RAISE_START = "/safety/arm_raise/start"
@@ -40,7 +40,7 @@ class ArmRaiseNode(SafetyNode):
 
     def __init__(self):
         super().__init__("dry_run_arm_raise")
-        if self.config.joints != len(G1_29_JOINT_NAMES):
+        if self.config.joints != NUM_JOINTS:
             raise ValueError("arm raise requires 29 joints")
         self.test_policy = self.declare_parameter("test_policy", "slow_raise").value
         if self.test_policy == "small_elbow":

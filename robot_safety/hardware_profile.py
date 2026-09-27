@@ -5,21 +5,18 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from .feedback import G1_29_JOINT_NAMES
+from .hardware_constants import (
+    DAMPING_FSM_ID,
+    G1_29_JOINT_NAMES,
+    G1_MACHINE_TYPE,
+    UPPER_BODY_INDICES,
+)
 
-UPPER_BODY_INDICES = tuple(range(12, 29))
-ARM_WEIGHT_INDEX = 29
-DAMPING_FSM_ID = 1
-WALK_FSM_ID = 500  # LocoClient.Start. Balances, and may step.
-WALK_REFRESH_SECS = 0.5
-ZERO_VELOCITY_DURATION_SECS = 1.0
 HARDWARE_PERIOD_SECS = 0.02  # Matches the tested Unitree arm7 example.
 HARDWARE_WATCHDOG_POLL_SECS = 0.005
 HARDWARE_FEEDBACK_TIMEOUT_SECS = 0.2
 READINESS_RPC_TIMEOUT_SECS = 2.0
 READINESS_QUERY_ATTEMPTS = 2
-SDK_RPC_TIMEOUT_CODE = 3104  # Unitree RPC_ERR_CLIENT_API_TIMEOUT.
-SDK_RPC_SEND_CODE = 3102  # Unitree RPC_ERR_CLIENT_SEND.
 READINESS_CHECK_TIMEOUT_SECS = 5.0
 DAMPING_RPC_TIMEOUT_SECS = 0.1
 DAMPING_RETRY_SECS = 0.1
@@ -74,7 +71,7 @@ class HardwareProfile:
     def load(cls, path):
         """Require all 17 arm/waist entries using the SDK joint names."""
         data = json.loads(Path(path).read_text())
-        if data["expected_machine_type"] != 5:
+        if data["expected_machine_type"] != G1_MACHINE_TYPE:
             raise ValueError(
                 "this adapter is restricted to the identified machine type 5"
             )

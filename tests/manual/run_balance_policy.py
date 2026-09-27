@@ -7,7 +7,7 @@ service, blends to those targets, and keeps publishing them until double
 Start or Ctrl+C. It then reselects the sport service and enters stock damp.
 
 Double Start during ``--apply`` does that restore immediately. Leave the
-hardware adapter running so its double Start still calls ``SetFsmId(1)`` as
+hardware adapter running so its double Start still calls ``SetFsmId(DAMPING_FSM_ID)`` as
 well.
 """
 
@@ -24,10 +24,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from robot_safety.balance_policy import (  # noqa: E402
     LEG_KD,
     LEG_KP,
-    LOWER_JOINT_NAMES,
     NUM_ACTIONS,
     NUM_JOINTS,
     BalancePolicy,
+)
+from robot_safety.hardware_constants import (  # noqa: E402
+    DAMPING_FSM_ID,
+    LOW_COMMAND_TOPIC,
+    LOW_STATE_TOPIC,
+    LOWER_JOINT_NAMES,
 )
 from robot_safety.controller import (  # noqa: E402
     StartDoublePressDetector,
@@ -94,7 +99,7 @@ def _restore(switcher, locomotion, saved_name):
     damp_code = None
     for _ in range(5):
         try:
-            damp_code = locomotion.SetFsmId(1)
+            damp_code = locomotion.SetFsmId(DAMPING_FSM_ID)
         except Exception as exc:  # noqa: BLE001
             damp_code = None
             print(f"restore_damp failed {exc}")
@@ -143,7 +148,7 @@ def main():
             latest["sample"] = _sample(message)
 
     ChannelFactoryInitialize(args.domain, args.interface)
-    subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+    subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
     subscriber.Init(on_state, 10)
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and "sample" not in latest:
@@ -186,7 +191,7 @@ def main():
             "double Start restores stock damp"
         )
 
-    publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
+    publisher = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
     publisher.Init()
     crc = CRC()
     stop = threading.Event()

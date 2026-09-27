@@ -3,8 +3,7 @@
 import math
 from dataclasses import dataclass
 
-from .feedback import G1_29_JOINT_NAMES
-from .hardware_profile import UPPER_BODY_INDICES
+from .hardware_constants import G1_29_JOINT_NAMES, UPPER_BODY_INDICES
 
 
 @dataclass

@@ -94,6 +94,12 @@ class RemoteTests(unittest.TestCase):
             self.assertTrue((Path(installed['path'])/'app.py').is_file())
             self.assertTrue((Path(installed['path'])/'ADVANCED_TERMINAL.md').is_file())
             self.assertTrue((Path(installed['path'])/'start.sh').is_file())
+            recorder = Path(installed['path']) / 'g1_session.py'
+            smoke = actual_run(
+                [sys.executable, str(recorder), '--help'],
+                cwd=installed['path'], env=self.env, capture_output=True, text=True,
+            )
+            self.assertEqual(smoke.returncode, 0, smoke.stderr)
             self.assertFalse((Path(installed['path'])/'runs').exists())
             self.assertFalse((Path(installed['path'])/'.git').exists())
             f=self.home/'model.bin';f.write_bytes(b'model bytes')

@@ -1,0 +1,18 @@
+[Unit]
+Description=G1 soft reset and hard damp
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/unitree/him-sim2real-management
+ExecStart=/home/unitree/him-sim2real-management/tests/manual/run_safety_stops.sh
+TimeoutStartSec=180
+TimeoutStopSec=15
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target

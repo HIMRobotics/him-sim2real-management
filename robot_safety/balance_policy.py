@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .hardware_constants import LOWER_BODY_INDICES, NUM_JOINTS
+
 _MODEL_RELATIVE = Path(".cache") / "groot_balance" / "GR00T-WholeBodyControl-Balance.onnx"
 
 
@@ -32,8 +34,7 @@ def resolve_model_path():
 
 MODEL_PATH = resolve_model_path()
 
-NUM_JOINTS = 29
-NUM_ACTIONS = 15
+NUM_ACTIONS = len(LOWER_BODY_INDICES)
 SINGLE_OBS_DIM = 86
 OBS_HISTORY_LEN = 6
 NUM_OBS = SINGLE_OBS_DIM * OBS_HISTORY_LEN
@@ -42,7 +43,6 @@ ANG_VEL_SCALE = 0.5
 DOF_POS_SCALE = 1.0
 DOF_VEL_SCALE = 0.05
 ACTION_SCALE = 0.25
-CMD_SCALE = np.array([2.0, 2.0, 0.5], dtype=np.float32)
 HEIGHT_CMD = np.float32(0.74)
 
 DEFAULT_ANGLES = np.array(
@@ -80,23 +80,6 @@ JOINT_LIMITS = np.array(
         [-0.52, 0.52],
     ],
     dtype=np.float32,
-)
-LOWER_JOINT_NAMES = (
-    "left_hip_pitch",
-    "left_hip_roll",
-    "left_hip_yaw",
-    "left_knee",
-    "left_ankle_pitch",
-    "left_ankle_roll",
-    "right_hip_pitch",
-    "right_hip_roll",
-    "right_hip_yaw",
-    "right_knee",
-    "right_ankle_pitch",
-    "right_ankle_roll",
-    "waist_yaw",
-    "waist_roll",
-    "waist_pitch",
 )
 
 

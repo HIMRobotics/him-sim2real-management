@@ -7,6 +7,7 @@ from std_msgs.msg import String
 
 from . import ros_topics as topics
 from .hardware_adapter import G1ArmAdapter
+from .hardware_constants import NUM_JOINTS
 from .hardware_profile import (
     JOINT_DIAGNOSTICS_PERIOD_SECS,
     READINESS_QUERY_ATTEMPTS,
@@ -31,7 +32,7 @@ class HardwareMotorGateNode(MotorGateNode):
             raise ValueError(
                 "hardware output requires explicit enable, profile path and SDK interface"
             )
-        if self.config.joints != 29:
+        if self.config.joints != NUM_JOINTS:
             raise ValueError(
                 "hardware adapter requires the identified 29-joint configuration"
             )
@@ -167,7 +168,6 @@ class HardwareMotorGateNode(MotorGateNode):
                 "damping_rpc_code": self.adapter.damping_rpc_code,
                 "walk_stop": self.adapter.walk_stop,
                 "walk_rpc_code": self.adapter.walk_rpc_code,
-                "velocity_rpc_code": self.adapter.velocity_rpc_code,
                 "reported_fsm_id": self.adapter.reported_fsm_id,
                 "arm_release_written": self.adapter.arm_release_written,
                 "pose_hold": self.adapter.hold_targets is not None

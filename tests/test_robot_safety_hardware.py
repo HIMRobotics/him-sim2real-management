@@ -7,9 +7,10 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from robot_safety.feedback import G1_29_JOINT_NAMES
+from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 from robot_safety.hardware_adapter import G1ArmAdapter
-from robot_safety.hardware_profile import UPPER_BODY_INDICES, HardwareProfile
+from robot_safety.hardware_constants import UPPER_BODY_INDICES
+from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.unitree_transport import UnitreeArmTransport
 
 
@@ -49,8 +50,6 @@ class FakeTransport:
         self.writes = []
         self.lowcmds = []
         self.stop_calls = 0
-        self.walk_calls = 0
-        self.zero_velocity_calls = 0
         self.release_calls = 0
         self.restore_calls = 0
         self.mode = 4
@@ -68,17 +67,6 @@ class FakeTransport:
         if not self.rpc_success:
             raise TimeoutError()
         self.mode = 1
-        return 0
-
-    def request_walk(self):
-        self.walk_calls += 1
-        if not self.rpc_success:
-            raise TimeoutError()
-        self.mode = 500
-        return 0
-
-    def request_zero_velocity(self):
-        self.zero_velocity_calls += 1
         return 0
 
     def write_arm(self, targets, weight):
@@ -216,7 +204,6 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 1)
         self.assertEqual(self.transport.mode, 1)
-        self.assertEqual(self.transport.walk_calls, 0)
         self.assertFalse(self.adapter.arm())
 
     def press_f3_twice(self):
@@ -237,7 +224,6 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_f3")
         self.adapter.stop_once()
         self.assertEqual(self.transport.release_calls, 1)
-        self.assertEqual(self.transport.walk_calls, 0)
         self.assertEqual(self.transport.stop_calls, 0)
         lower, arms, machine = self.transport.lowcmds[-1]
         self.assertEqual(len(lower), 15)

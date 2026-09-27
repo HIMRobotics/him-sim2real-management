@@ -8,16 +8,20 @@ from threading import Event, Lock, RLock, Thread
 from .balance_policy import LEG_KD, LEG_KP, MODEL_PATH, BalancePolicy
 from .config import Config
 from .controller import StartDoublePressDetector, decode_f3_pressed
-from .feedback import G1_29_JOINT_NAMES, feedback_from_sdk
-from .hardware_profile import (
+from .feedback import feedback_from_sdk
+from .hardware_constants import (
+    ARM_INDICES,
     DAMPING_FSM_ID,
-    DAMPING_RETRY_SECS,
+    G1_29_JOINT_NAMES,
     SDK_RPC_SEND_CODE,
+    UPPER_BODY_INDICES,
+)
+from .hardware_profile import (
+    DAMPING_RETRY_SECS,
     HARDWARE_FEEDBACK_TIMEOUT_SECS,
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
-    UPPER_BODY_INDICES,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
 
@@ -50,8 +54,6 @@ class G1ArmAdapter:
         self.shutdown_requested = Event()
         self.damping_rpc_code = None
         self.walk_rpc_code = None
-        self.velocity_rpc_code = None
-        self.last_walk_secs = None
         self.walk_stop = False
         self.balance_policy = None
         self.balance_load_reported = False
@@ -419,7 +421,7 @@ class G1ArmAdapter:
             return
         q = self.feedback.q
         if self.arm_hold_q is None:
-            self.arm_hold_q = q[15:29]
+            self.arm_hold_q = tuple(q[index] for index in ARM_INDICES)
         if not self._ensure_balance_policy():
             return
         try:
