@@ -53,6 +53,8 @@ DEFAULT_ANGLES = np.array(
     ],
     dtype=np.float32,
 )
+DEFAULT_JOINT_POSITIONS = np.zeros(NUM_JOINTS, dtype=np.float32)
+DEFAULT_JOINT_POSITIONS[:NUM_ACTIONS] = DEFAULT_ANGLES
 LEG_KP = np.array(
     [150, 150, 150, 200, 40, 40, 150, 150, 150, 200, 40, 40, 250, 250, 250],
     dtype=np.float32,
@@ -113,13 +115,11 @@ def single_observation(q, dq, quat_wxyz, gyro, action):
         raise ValueError("expected 29 joint positions and velocities")
     if action.shape != (NUM_ACTIONS,):
         raise ValueError("expected 15 previous actions")
-    defaults = np.zeros(NUM_JOINTS, dtype=np.float32)
-    defaults[:NUM_ACTIONS] = DEFAULT_ANGLES
     obs = np.zeros(SINGLE_OBS_DIM, dtype=np.float32)
     obs[3] = HEIGHT_CMD
     obs[7:10] = np.asarray(gyro, dtype=np.float32) * ANG_VEL_SCALE
     obs[10:13] = gravity_orientation(quat_wxyz)
-    obs[13:42] = (q - defaults) * DOF_POS_SCALE
+    obs[13:42] = (q - DEFAULT_JOINT_POSITIONS) * DOF_POS_SCALE
     obs[42:71] = dq * DOF_VEL_SCALE
     obs[71:86] = action
     return obs

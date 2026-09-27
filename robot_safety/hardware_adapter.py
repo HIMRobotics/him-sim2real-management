@@ -41,37 +41,25 @@ class G1ArmAdapter:
         self.armed = False
         self.time_ready_mode_confirmed_secs = None
         self.arm_rejection_reason = None
-        self.command = None
-        self.command_expires_secs = None
+        self._reset_session()
         self.last_submission_secs = None
-        self.previous_targets = None
-        self.previous_velocities = None
-        self.last_written_ownership_weight = 0.0
-        self.first_output_secs = None
-        self.last_output_secs = None
-        self.last_worker_cycle_secs = None
         self.stop_requested = Event()
         self.shutdown_requested = Event()
         self.damping_rpc_code = None
         self.walk_rpc_code = None
         self.walk_stop = False
         self.balance_policy = None
-        self.balance_load_reported = False
         self.balance_released = False
-        self.arm_hold_q = None
         self.quat = (1.0, 0.0, 0.0, 0.0)
         self.gyro = (0.0, 0.0, 0.0)
         self.f3_pressed = False
         self.reported_fsm_id = None
         self.arm_release_written = False
-        self.ownership_taken = False
         self.hold_failed = False
         self.release_damp_when_confirmed = False
         self.damp_settled = False
-        self.hold_targets = None
         self.pose_snapshot = None
         self.pose_snapshot_secs = None
-        self.joint_diagnostics = JointDeltaDiagnostics()
         self.workers = []
         window = Config().double_press_window_secs
         self.button_detector = StartDoublePressDetector(
@@ -206,18 +194,22 @@ class G1ArmAdapter:
             with self.stop_lock:
                 if self.abort_reason:
                     return self.reject_arm(f"already stopped: {self.abort_reason}")
-                self.command = None
-                self.command_expires_secs = None
-                self.previous_targets = self.previous_velocities = None
-                self.first_output_secs = self.last_output_secs = None
-                self.last_worker_cycle_secs = None
-                self.last_written_ownership_weight = 0.0
-                self.ownership_taken = False
-                self.hold_targets = self.arm_hold_q = None
-                self.joint_diagnostics = JointDeltaDiagnostics()
+                self._reset_session()
                 self.last_submission_secs = now
                 self.armed = True
             return True
+
+    def _reset_session(self):
+        """Initialize output history before workers start or under both adapter locks."""
+        self.command = None
+        self.command_expires_secs = None
+        self.previous_targets = self.previous_velocities = None
+        self.first_output_secs = self.last_output_secs = None
+        self.last_worker_cycle_secs = None
+        self.last_written_ownership_weight = 0.0
+        self.ownership_taken = False
+        self.hold_targets = self.arm_hold_q = None
+        self.joint_diagnostics = JointDeltaDiagnostics()
 
     def reject_arm(self, reason):
         """Record the failed readiness check without changing motor settings."""
@@ -453,13 +445,11 @@ class G1ArmAdapter:
             policy.warmup()
             self.balance_policy = policy
         except Exception as exc:  # noqa: BLE001
-            if not self.balance_load_reported:
-                print(
-                    f"balance preparation failed at {MODEL_PATH}: {exc}. "
-                    "F3 balancing unavailable until restart.",
-                    flush=True,
-                )
-                self.balance_load_reported = True
+            print(
+                f"balance preparation failed at {MODEL_PATH}: {exc}. "
+                "F3 balancing unavailable until restart.",
+                flush=True,
+            )
             return False
         return True
 

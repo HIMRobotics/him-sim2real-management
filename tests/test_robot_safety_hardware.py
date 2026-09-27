@@ -541,7 +541,7 @@ class TransportEncodingTests(unittest.TestCase):
         }
         with patch.dict("sys.modules", modules):
             transport = UnitreeArmTransport("fake", 0, Mock())
-            self.assertIs(transport._switcher(), sdk.MotionSwitcherClient.return_value)
+            self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
             self.assertIs(transport._audio(), sdk.AudioClient.return_value)
         sdk.MotionSwitcherClient.assert_called_once()
         sdk.AudioClient.assert_called_once()

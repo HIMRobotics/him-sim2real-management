@@ -127,11 +127,9 @@ class HardwareMotorGateNode(MotorGateNode):
             response.message = "ready"
         else:
             detail = self.adapter.arm_rejection_reason
-            self.get_logger().error(f"Hardware readiness rejected: {detail}")
-            self.adapter.abort("hardware_readiness_rejected")
-            self.motor_gate.abort("hardware_readiness_rejected")
-            self.latch_abort("hardware_readiness_rejected")
-            response.message = f"Hardware readiness rejected: {detail}"
+            return self._reject_request(
+                response, "hardware_readiness_rejected", f"Hardware readiness rejected: {detail}"
+            )
         return response
 
     def on_arm(self, request, response):
@@ -155,14 +153,20 @@ class HardwareMotorGateNode(MotorGateNode):
             detail = (
                 self.adapter.arm_rejection_reason or "unspecified readiness failure"
             )
-            self.get_logger().error(f"Hardware arming rejected: {detail}")
-            self.adapter.abort("hardware_arm_rejected")
-            self.motor_gate.abort("hardware_arm_rejected")
-            self.latch_abort("hardware_arm_rejected")
-            response.success = False
-            response.message = f"Hardware arming rejected: {detail}"
-            return response
+            return self._reject_request(
+                response, "hardware_arm_rejected", f"Hardware arming rejected: {detail}"
+            )
         return super().on_arm(request, response)
+
+    def _reject_request(self, response, reason, message):
+        """Latch a failed hardware check across the adapter, gate and ROS publisher."""
+        self.get_logger().error(message)
+        self.adapter.abort(reason)
+        self.motor_gate.abort(reason)
+        self.latch_abort(reason)
+        response.success = False
+        response.message = message
+        return response
 
     def on_abort(self, message):
         if message.source != self.get_name():

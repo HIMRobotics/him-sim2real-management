@@ -88,6 +88,9 @@ class HardwareNodeTests(unittest.TestCase):
             get_logger=Mock(return_value=Mock()),
             latch_abort=Mock(),
         )
+        node._reject_request = lambda *args: HardwareMotorGateNode._reject_request(
+            node, *args
+        )
         response = HardwareMotorGateNode.on_ready(
             node, Trigger.Request(), Trigger.Response()
         )

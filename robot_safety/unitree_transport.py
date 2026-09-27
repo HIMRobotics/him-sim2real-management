@@ -30,6 +30,9 @@ class UnitreeArmTransport:
     """Own arm_sdk publication and a separate locomotion RPC client."""
 
     def __init__(self, interface, domain, on_state):
+        from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
+            MotionSwitcherClient,
+        )
         from unitree_sdk2py.core.channel import (
             ChannelFactoryInitialize,
             ChannelPublisher,
@@ -47,7 +50,6 @@ class UnitreeArmTransport:
         self.publisher.Init()
         self.lowcmd = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
         self.lowcmd.Init()
-        self.switcher = None
         self.audio = None
         self.saved_motion_name = None
         self.motion_restored = False
@@ -60,7 +62,9 @@ class UnitreeArmTransport:
         self.readiness_client.Init()
         self.readiness_query_results = []
         # Each SDK client constructor includes a 0.5 s discovery wait.
-        self._switcher()
+        self.switcher = MotionSwitcherClient()
+        self.switcher.SetTimeout(5.0)
+        self.switcher.Init()
         try:
             self._audio()
         except Exception as error:  # noqa: BLE001
@@ -82,7 +86,7 @@ class UnitreeArmTransport:
 
     def release_motion(self):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
-        switcher = self._switcher()
+        switcher = self.switcher
         code, mode = switcher.CheckMode()
         if isinstance(mode, dict) and mode.get("name"):
             self.saved_motion_name = mode["name"]
@@ -102,7 +106,7 @@ class UnitreeArmTransport:
         if self.motion_restored:
             return 0
         self._set_motion_silent(False)
-        switcher = self._switcher()
+        switcher = self.switcher
         switcher.SetTimeout(5.0)
         name = self.saved_motion_name or "ai"
         code, _ = switcher.SelectMode(name)
@@ -134,7 +138,7 @@ class UnitreeArmTransport:
     def _set_motion_silent(self, silent):
         """Mute the firmware mode announcement. ReleaseMode otherwise says developer mode."""
         try:
-            switcher = self._switcher()
+            switcher = self.switcher
             switcher.SetTimeout(0.2)
             switcher._Call(MOTION_SWITCHER_SET_SILENT, json.dumps({"silent": bool(silent)}))
             switcher.SetTimeout(5.0)
@@ -159,17 +163,6 @@ class UnitreeArmTransport:
             self.audio.SetTimeout(3.0)
             self.audio.Init()
         return self.audio
-
-    def _switcher(self):
-        if self.switcher is None:
-            from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
-                MotionSwitcherClient,
-            )
-
-            self.switcher = MotionSwitcherClient()
-            self.switcher.SetTimeout(5.0)
-            self.switcher.Init()
-        return self.switcher
 
     def request_damping(self):
         """Use Damp's underlying RPC because Damp() discards its return code."""
