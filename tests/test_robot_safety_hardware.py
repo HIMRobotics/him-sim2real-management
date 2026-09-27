@@ -323,6 +323,25 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIsNone(self.adapter.reported_fsm_id)
         self.assertFalse(self.adapter.arm())
 
+    def test_confirmed_damping_requires_arm_release_and_rearm_starts_fresh(self):
+        self.take_ownership()
+        self.adapter.abort("controller_double_start", request_damping=True)
+        self.adapter.release_damp_when_confirmed = True
+        self.transport.write_success = False
+        self.adapter._request_stock_damping()
+        self.assertEqual(self.adapter.abort_reason, "controller_double_start")
+        self.assertFalse(self.adapter.damp_settled)
+        self.transport.write_success = True
+        self.adapter._request_stock_damping()
+        self.assertTrue(self.adapter.damp_settled)
+        self.assertFalse(self.adapter.armed)
+        self.now += 1.0
+        self.state()
+        self.transport.mode = 4
+        self.run_first()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(self.transport.writes[-1][1], 0.0)
+
     def test_hold_keeps_the_pose_from_the_stop_and_damps_when_feedback_is_stale(self):
         self.take_ownership()
         self.adapter.abort("manual_stop")

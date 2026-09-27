@@ -6,6 +6,7 @@ import socket
 import time
 
 from std_msgs.msg import String
+from him_safety_interfaces.msg import Abort
 
 from . import ros_topics as topics
 from .hardware_adapter import G1ArmAdapter
@@ -17,6 +18,7 @@ from .hardware_profile import (
     HardwareProfile,
 )
 from .ros_nodes import MotorGateNode
+from .motor_gate import MotorCommandGate
 from .unitree_transport import UnitreeArmTransport
 
 
@@ -162,16 +164,27 @@ class HardwareMotorGateNode(MotorGateNode):
             return response
         return super().on_arm(request, response)
 
+    def on_abort(self, message):
+        if message.source != self.get_name():
+            self.adapter.abort(message.reason or "external_abort")
+        super().on_abort(message)
+
     def publish_output(self):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
             return
         self.notify_startup_ready()
         if self.adapter.damp_settled:
-            self.motor_gate.abort_reason = None
-            self.abort_reason = None
-            self.adapter.damp_settled = False
-        elif self.adapter.abort_reason:
+            with self.adapter.stop_lock:
+                self.adapter.damp_settled = False
+                if not self.adapter.abort_reason and not self.adapter.stop_requested.is_set():
+                    self.motor_gate = MotorCommandGate(self.host_boot_id, self.config)
+                    self.abort_reason = None
+                    # Recreate the writer to discard its retained stop for future tests.
+                    self.destroy_publisher(self.abort_publisher)
+                    self.abort_publisher = self.create_publisher(Abort, topics.ABORT, self.abort_qos)
+                    self.final_diagnostics_logged = False
+        if self.adapter.abort_reason:
             self.motor_gate.abort(self.adapter.abort_reason)
         command = self.motor_gate.cycle(time.monotonic())
         if self.motor_gate.abort_reason:

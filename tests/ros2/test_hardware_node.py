@@ -166,6 +166,46 @@ class HardwareNodeTests(unittest.TestCase):
             self.assertEqual(transport.stop_calls, 0)
             self.assertEqual(node.adapter.abort_reason, "controller_double_start")
             self.assertEqual(transport.writes[-1][1], 0.0)
+            observer = rclpy.create_node("abort_history_observer")
+            received = []
+            from robot_safety import ros_topics as topics
+            from robot_safety.core import SupervisorPhase
+
+            def observe_for(seconds):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    rclpy.spin_once(observer, timeout_sec=0.02)
+
+            try:
+                subscription = observer.create_subscription(
+                    Abort, topics.ABORT, received.append, node.abort_qos
+                )
+                observe_for(0.5)
+                self.assertTrue(received)
+                self.assertEqual(received[-1].reason, "controller_double_start")
+                observer.destroy_subscription(subscription)
+
+                node.adapter.release_damp_when_confirmed = True
+                node.adapter._request_stock_damping()
+                node.publish_output()
+                self.assertIsNone(node.abort_reason)
+                self.assertIsNone(node.motor_gate.policy_session_id)
+                self.assertEqual(node.motor_gate.supervisor_phase, SupervisorPhase.INHIBITED)
+                self.assertFalse(node.adapter.armed)
+                received.clear()
+                observer.create_subscription(
+                    Abort, topics.ABORT, received.append, node.abort_qos
+                )
+                observe_for(0.5)
+                self.assertEqual(received, [])
+
+                node.adapter.damp_settled = True
+                abort.reason = "new_stop"
+                node.on_abort(abort)
+                self.assertEqual(node.motor_gate.abort_reason, "new_stop")
+                self.assertEqual(node.abort_reason, "new_stop")
+            finally:
+                observer.destroy_node()
         finally:
             if node is not None:
                 node.destroy_node()

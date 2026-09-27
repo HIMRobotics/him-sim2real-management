@@ -206,6 +206,15 @@ class G1ArmAdapter:
             with self.stop_lock:
                 if self.abort_reason:
                     return self.reject_arm(f"already stopped: {self.abort_reason}")
+                self.command = None
+                self.command_expires_secs = None
+                self.previous_targets = self.previous_velocities = None
+                self.first_output_secs = self.last_output_secs = None
+                self.last_worker_cycle_secs = None
+                self.last_written_ownership_weight = 0.0
+                self.ownership_taken = False
+                self.hold_targets = self.arm_hold_q = None
+                self.joint_diagnostics = JointDeltaDiagnostics()
                 self.last_submission_secs = now
                 self.armed = True
             return True
@@ -520,6 +529,7 @@ class G1ArmAdapter:
             self.release_damp_when_confirmed
             and self.damping_rpc_code == 0
             and self.reported_fsm_id == DAMPING_FSM_ID
+            and self.arm_release_written
         ):
             self._release_after_confirmed_damp()
 

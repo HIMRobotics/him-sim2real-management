@@ -53,57 +53,36 @@ repeat these checks after a planned reboot before starting a test.
 
 ## Run an arm test through the systemd gate
 
-The convenience launcher `run_unitree_arm_test.sh --hardware` starts its own
-hardware gate. **Do not run it alongside the service.** To test the installed
-watchdog, leave the service running and start only the other four processes as
-shown below. Do not run another test graph or SDK motor publisher concurrently.
+The hardware test uses the existing `g1-safety-stops.service`. It checks that
+this **user service** is active before starting any test nodes. It does not
+start a second hardware gate or stop/restart the service. The service owns the
+hardware profile and performs its own warmup.
 
-In each test terminal, prepare the same environment, using the service's overlay
-path if you have overridden it:
+If a previous run stopped or completed, follow [Recovery between trials](#recovery-between-trials)
+before launching again. Restarting the test alone does not clear a latched stop.
 
 ```bash
 cd /home/unitree/him-sim2real-management
-source /opt/ros/foxy/setup.bash
-source "$HOME/.him-safety/ros-install/setup.bash"
-export ROS_DOMAIN_ID=97 ROS_LOCALHOST_ONLY=1
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
-export LD_LIBRARY_PATH="$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+systemctl --user is-active g1-safety-stops.service
+./tests/manual/run_unitree_arm_test.sh --hardware
 ```
 
-Start telemetry in the first terminal:
+If the service is inactive, start it first and wait for warmup:
+`systemctl --user start g1-safety-stops.service`.
+Do not run another test graph or SDK motor publisher concurrently.
+
+Wait for `Ready for explicit start request`. In another terminal:
 
 ```bash
-ros2 run him_safety_nodes safety_node feedback --ros-args -p sdk_interface:=eth0 -p sdk_domain:=0
+cd /home/unitree/him-sim2real-management
+./tests/manual/run_unitree_arm_test.sh --check-ready
+./tests/manual/run_unitree_arm_test.sh --start
 ```
 
-Once telemetry is flowing, start the checker in a second terminal and the
-controller monitor in a third:
-
-```bash
-# Terminal 2
-ros2 run him_safety_nodes safety_node checker
-```
-
-```bash
-# Terminal 3
-ros2 run him_safety_nodes safety_node controller_stop --ros-args -p startup_timeout_secs:=5.0
-```
-
-Start the arm producer in a fourth terminal:
-
-```bash
-/usr/bin/python3 -m tests.manual.arm_raise_node --ros-args -p test_policy:=unitree_arm7 -p handover_timeout_secs:=5.0
-```
-
-Wait for `Ready for explicit start request`. In another prepared terminal,
-check readiness and request one run:
-
-```bash
-ros2 service call /safety/motor_gate/ready std_srvs/srv/Trigger '{}'
-ros2 service call /safety/arm_raise/start std_srvs/srv/Trigger '{}'
-```
+The foreground launch contains telemetry, checker, controller monitor and arm
+producer only. Ctrl+C closes these processes and leaves the service running.
+The handover deadline defaults to five seconds. For a longer service ownership
+ramp, pass `handover_timeout_secs:=SECONDS` with at least one second of margin.
 
 Readiness must succeed. The start request repeats readiness and coordinates
 arming. The producer holds captured arm/waist positions during the default
@@ -139,34 +118,53 @@ handler. Seeing the stop in the systemd service's journal while it is the only
 hardware gate establishes that this test exercised the background process.
 An `active` service or a completed arm trajectory alone is insufficient.
 
-After a stop or completion, the test graph remains latched. With the robot
-supported, exit all four foreground processes, restart the service with
-`systemctl --user restart g1-safety-stops.service`, restore ready mode, and
-start fresh processes for the next trial. Restarting only the gate leaves
-retained aborts in the other nodes. Gate shutdown may request damping. After
-the final test, use the same coordinated cleanup and leave the service running
-without the test processes for normal background monitoring.
+## Recovery between trials
+
+An immediate `Abort latched: hardware_controller_double_f3` on a new test can
+come from a previous F3 stop, without a new button press. While latched, the
+service repeats the abort on `/safety/abort`. This topic also retains the last
+message for new subscribers (`TRANSIENT_LOCAL` durability). Stopping and
+relaunching only the test therefore does not clear the stop.
+
+**Double-Start damping is the normal recovery path while keeping the service
+running.** F3 balance remains a stopped state and does not permit another arm
+test. After a stop or completion:
+
+1. Support the robot and exit all foreground test processes with Ctrl+C.
+   Old test nodes can rebroadcast their own latched aborts if left running.
+2. Double-press Start. Verify physical damping and check the service journal
+   for `damping_rpc_code: 0`, `reported_fsm_id: 1`, and `arm_release_written: true`.
+   The service clears its old session and retained abort only after those
+   software checks succeed. If damping or arm release fails, the stop remains
+   latched. Software status alone does not prove physical damping.
+3. Restore ready mode, launch a fresh test, and explicitly run `--check-ready`
+   and `--start` as above. Clearing the stop does not automatically rearm.
+
+A service restart also removes its in-memory state, but is not the normal
+between-trial procedure and leaves a gap in monitoring. Leave the service
+running after the final test.
 
 ## Diagnostics and standalone tests
 
-In a prepared terminal, inspect `/safety/hardware_status` or joint extrema:
+Source ROS and the test overlay, then inspect status or joint extrema:
 
 ```bash
+source /opt/ros/foxy/setup.bash
+source /tmp/him-safety-ros-install/setup.bash
+export ROS_DOMAIN_ID=97 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ros2 topic echo /safety/hardware_status std_msgs/msg/String
 ros2 topic echo /safety/joint_diagnostics std_msgs/msg/String
 ```
 
 Joint diagnostics report tracking error, target step and measured velocity for
 the 17 controlled joints, including rejected proposals. They reset on process
-restart and are not proof of executed motion. The gate logs final extrema on
+rearm and are not proof of executed motion. The gate logs final extrema on
 abort, which places them in the service journal for the procedure above.
 
-For standalone testing, first stop the service with the robot supported. Then
-`./tests/manual/run_unitree_arm_test.sh --hardware` launches the complete graph,
-and `./tests/manual/run_unitree_arm_test.sh --start` requests a run from another
-terminal. Add `--small-step` before `--hardware` for the elbow test. This tests
-the foreground gate, not the systemd process. Exit the complete graph before
-restarting the service.
+Use `./tests/manual/run_unitree_arm_test.sh --small-step --hardware` for the
+elbow test through the same service, followed by `--start` in another terminal.
+The launcher does not clear an existing abort or reset a used session. The
+coordinated recovery described above is still required after a stopped run.
 
 With the service stopped, `./tests/manual/run_arm_raise_dry_run.sh` and its
 `--start` command exercise a diagnostic 0.15 rad shoulder raise over 10 seconds
