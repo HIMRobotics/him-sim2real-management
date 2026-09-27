@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>him_safety_nodes</name>
+  <version>0.1.0</version>
+  <description>Dry-run ROS 2 G1 safety checker, motor gate and controller stop nodes.</description>
+  <maintainer email="maintainers@example.invalid">HIM Robotics maintainers</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <depend>him_safety_interfaces</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

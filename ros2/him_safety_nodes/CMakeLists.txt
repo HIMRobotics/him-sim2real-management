@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.5)
+project(him_safety_nodes)
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+ament_python_install_package(robot_safety PACKAGE_DIR "../../robot_safety")
+install(PROGRAMS scripts/safety_node DESTINATION lib/${PROJECT_NAME})
+ament_package()
