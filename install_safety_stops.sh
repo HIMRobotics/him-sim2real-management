@@ -22,9 +22,12 @@ install_stops() {
 [Unit]
 Description=G1 soft reset and hard damp
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 WorkingDirectory=$repo_dir
 ExecStart=$launcher
 TimeoutStartSec=180
@@ -32,8 +35,6 @@ TimeoutStopSec=15
 KillSignal=SIGTERM
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 [Install]
 WantedBy=default.target

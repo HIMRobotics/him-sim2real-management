@@ -35,6 +35,21 @@ and feedback freshness. Systemd restarts the process on failure, subject to the
 unit's retry limits. An active service alone does not establish physical stop
 performance.
 
+Startup initializes the motion-switcher and optional speech clients, loads the
+balance model, and runs one dummy inference without changing policy history or
+writing motor commands. These objects are retained for subsequent button presses.
+The unit uses `Type=notify`: it stays `activating` until the model is warmed,
+both workers are alive, and fresh telemetry shows Start and F3 released.
+Look for `Safety monitor ready` in the log. Missing model/telemetry prevents
+readiness and eventually reaches the 180-second startup timeout. This is a
+startup check, not continuous health monitoring or a motor-response guarantee.
+Controller release/restore and damping still require SDK RPC replies.
+
+To deploy this startup change, run `./install_safety_stops.sh install` with the
+robot supported and foreground hardware tests closed. This updates the unit and
+restarts the service, temporarily interrupting monitoring. Merely editing the
+source does not update an already running process.
+
 The launcher uses ROS localhost domain 97, SDK domain 0, interface `eth0` and
 [g1_type5.lenient.json](profiles/g1_type5.lenient.json) by default. It requires
 ROS 2 Foxy, colcon, the system Python's Unitree SDK/native libraries and balance

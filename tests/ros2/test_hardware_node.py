@@ -1,6 +1,7 @@
 """Verify the ROS gate-to-SDK boundary using a fake transport only."""
 
 import time
+import os
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -27,6 +28,51 @@ from tests.test_robot_safety_hardware import FakeTransport, load_profile, profil
 
 
 class HardwareNodeTests(unittest.TestCase):
+    def test_startup_ready_requires_warmup_telemetry_and_live_workers(self):
+        adapter = SimpleNamespace(
+            balance_policy=None, feedback_fresh=Mock(return_value=True),
+            feedback=SimpleNamespace(start_button_pressed=False), f3_pressed=False,
+            abort_reason=None, workers=[Mock(is_alive=Mock(return_value=True))],
+        )
+        node = SimpleNamespace(
+            adapter=adapter, startup_ready=False,
+            motor_gate=SimpleNamespace(abort_reason=None), get_logger=Mock(),
+        )
+        with patch.dict(os.environ, {"NOTIFY_SOCKET": "@test-safety-notify"}), patch(
+            "robot_safety.hardware_node.socket.socket"
+        ) as socket:
+            notify = lambda: HardwareMotorGateNode.notify_startup_ready(node)
+            notify()
+            socket.assert_not_called()
+            adapter.balance_policy = object()
+            adapter.feedback_fresh.return_value = False
+            notify()
+            socket.assert_not_called()
+            adapter.feedback_fresh.return_value = True
+            adapter.feedback.start_button_pressed = True
+            notify()
+            socket.assert_not_called()
+            adapter.feedback.start_button_pressed = False
+            adapter.workers[0].is_alive.return_value = False
+            notify()
+            socket.assert_not_called()
+            adapter.workers[0].is_alive.return_value = True
+            adapter.f3_pressed = True
+            notify()
+            socket.assert_not_called()
+            adapter.f3_pressed = False
+            adapter.abort_reason = "fault"
+            notify()
+            socket.assert_not_called()
+            adapter.abort_reason = None
+            notify()
+            notify()
+            sent = socket.return_value.__enter__.return_value.sendto
+            sent.assert_called_once()
+            self.assertIn(b"READY=1", sent.call_args[0][0])
+            self.assertEqual(sent.call_args[0][1], "\0test-safety-notify")
+            self.assertTrue(node.startup_ready)
+
     def test_readiness_timeout_rejects_without_damping(self):
         from robot_safety.hardware_adapter import G1ArmAdapter
 

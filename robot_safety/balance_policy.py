@@ -147,6 +147,15 @@ class BalancePolicy:
             maxlen=OBS_HISTORY_LEN,
         )
 
+    def warmup(self):
+        """Prime inference without modifying history or sending motor targets."""
+        raw = self.session.run(
+            None, {self.input_name: np.zeros((1, NUM_OBS), dtype=np.float32)}
+        )[0]
+        action = np.asarray(raw, dtype=np.float32).reshape(NUM_ACTIONS)
+        if not np.all(np.isfinite(action)):
+            raise ValueError("balance warmup returned a non-finite action")
+
     def update(self, q, dq, quat_wxyz, gyro):
         """Append one frame and return clipped lower-body position targets."""
         frame = single_observation(q, dq, quat_wxyz, gyro, self.action)

@@ -40,6 +40,10 @@ class BalancePolicyTests(unittest.TestCase):
         from robot_safety.balance_policy import BalancePolicy
 
         policy = BalancePolicy(str(model))
+        policy.warmup()
+        np.testing.assert_array_equal(policy.action, np.zeros(NUM_ACTIONS))
+        for frame in policy.history:
+            np.testing.assert_array_equal(frame, np.zeros(SINGLE_OBS_DIM))
         targets = policy.update(
             np.zeros(NUM_JOINTS),
             np.zeros(NUM_JOINTS),

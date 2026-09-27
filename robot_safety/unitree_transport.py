@@ -59,6 +59,12 @@ class UnitreeArmTransport:
         self.readiness_client.SetTimeout(READINESS_RPC_TIMEOUT_SECS)
         self.readiness_client.Init()
         self.readiness_query_results = []
+        # Each SDK client constructor includes a 0.5 s discovery wait.
+        self._switcher()
+        try:
+            self._audio()
+        except Exception as error:  # noqa: BLE001
+            print(f"Optional speech initialization failed: {error}", flush=True)
         self.subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
         # No SDK queue that could conceal old samples behind new receipt timestamps.
         self.subscriber.Init(on_state)

@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 from robot_safety.hardware_adapter import G1ArmAdapter
@@ -212,6 +213,31 @@ class HardwareAdapterTests(unittest.TestCase):
         self.state()
         self.now += 0.05
         self.state(f3=True)
+
+    def test_balance_preparation_is_cached_before_f3(self):
+        policy = Mock()
+        policy.update.return_value = [0.0] * 15
+        with patch("robot_safety.hardware_adapter.BalancePolicy", return_value=policy) as load:
+            self.assertTrue(self.adapter._ensure_balance_policy())
+            self.assertTrue(self.adapter._ensure_balance_policy())
+            self.press_f3_twice()
+            self.adapter.stop_once()
+            self.adapter.stop_once()
+        load.assert_called_once()
+        policy.warmup.assert_called_once()
+        self.assertEqual(len(self.transport.lowcmds), 2)
+
+    def test_failed_warmup_keeps_stock_control_and_does_not_reload_on_f3(self):
+        policy = Mock()
+        policy.warmup.side_effect = ValueError("warmup failed")
+        with patch("robot_safety.hardware_adapter.BalancePolicy", return_value=policy) as load:
+            self.assertFalse(self.adapter._ensure_balance_policy())
+            self.press_f3_twice()
+            self.adapter.stop_once()
+        load.assert_called_once()
+        self.assertIsNone(self.adapter.balance_policy)
+        self.assertEqual(self.transport.release_calls, 0)
+        self.assertEqual(self.transport.lowcmds, [])
 
     def test_double_f3_runs_the_balance_network(self):
         self.take_ownership()
@@ -485,6 +511,27 @@ class HardwareAdapterTests(unittest.TestCase):
 
 
 class TransportEncodingTests(unittest.TestCase):
+    def test_startup_initializes_clients_without_control_rpcs(self):
+        sdk = Mock()
+        modules = {
+            "unitree_sdk2py." + name: sdk for name in (
+                "core.channel", "g1.loco.g1_loco_client", "idl.default",
+                "idl.unitree_hg.msg.dds_", "utils.crc",
+                "comm.motion_switcher.motion_switcher_client", "g1.audio.g1_audio_client",
+            )
+        }
+        with patch.dict("sys.modules", modules):
+            transport = UnitreeArmTransport("fake", 0, Mock())
+            self.assertIs(transport._switcher(), sdk.MotionSwitcherClient.return_value)
+            self.assertIs(transport._audio(), sdk.AudioClient.return_value)
+        sdk.MotionSwitcherClient.assert_called_once()
+        sdk.AudioClient.assert_called_once()
+        sdk.MotionSwitcherClient.return_value.ReleaseMode.assert_not_called()
+        sdk.MotionSwitcherClient.return_value.SelectMode.assert_not_called()
+        sdk.LocoClient.return_value.SetFsmId.assert_not_called()
+        sdk.AudioClient.return_value.TtsMaker.assert_not_called()
+        sdk.ChannelPublisher.return_value.Write.assert_not_called()
+
     def test_readiness_and_stop_queries_use_separate_clients(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
         transport.readiness_client = SimpleNamespace(GetFsmId=lambda: (0, 4))

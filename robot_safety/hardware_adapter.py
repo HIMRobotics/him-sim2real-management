@@ -408,6 +408,8 @@ class G1ArmAdapter:
 
     def _publish_balance(self):
         """Hold the GR00T standing network on the legs. Arms stay at the captured pose."""
+        if self.balance_policy is None:
+            return
         if not self.balance_released:
             try:
                 self.walk_rpc_code = self.transport.release_motion()
@@ -422,8 +424,6 @@ class G1ArmAdapter:
         q = self.feedback.q
         if self.arm_hold_q is None:
             self.arm_hold_q = tuple(q[index] for index in ARM_INDICES)
-        if not self._ensure_balance_policy():
-            return
         try:
             lower = self.balance_policy.update(q, self.feedback.dq, self.quat, self.gyro)
         except Exception:  # noqa: BLE001
@@ -436,15 +436,18 @@ class G1ArmAdapter:
             return
 
     def _ensure_balance_policy(self):
-        """Load the network once. The first F3 must not wait on this."""
+        """Load and prime inference at startup, then retain the prepared policy."""
         if self.balance_policy is not None:
             return True
         try:
-            self.balance_policy = BalancePolicy(str(MODEL_PATH))
+            policy = BalancePolicy(str(MODEL_PATH))
+            policy.warmup()
+            self.balance_policy = policy
         except Exception as exc:  # noqa: BLE001
             if not self.balance_load_reported:
                 print(
-                    f"balance network failed to load from {MODEL_PATH}: {exc}",
+                    f"balance preparation failed at {MODEL_PATH}: {exc}. "
+                    "F3 balancing unavailable until restart.",
                     flush=True,
                 )
                 self.balance_load_reported = True

@@ -1,6 +1,8 @@
 """Opt-in motor gate that writes Unitree upper-body targets and requests body damping."""
 
 import json
+import os
+import socket
 import time
 
 from std_msgs.msg import String
@@ -46,6 +48,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.final_diagnostics_logged = False
         self.create_timer(JOINT_DIAGNOSTICS_PERIOD_SECS, self.publish_joint_diagnostics)
         self.last_status = None
+        self.startup_ready = False
         self.adapter = G1ArmAdapter(profile)
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state
@@ -54,6 +57,26 @@ class HardwareMotorGateNode(MotorGateNode):
         self.get_logger().warn(
             "Hardware output enabled. Arming may command the robot. No automatic rearm."
         )
+
+    def notify_startup_ready(self):
+        """Report startup readiness only after warmup and fresh released buttons."""
+        adapter = self.adapter
+        if (
+            self.startup_ready or adapter.balance_policy is None
+            or not adapter.feedback_fresh(time.monotonic())
+            or adapter.feedback.start_button_pressed or adapter.f3_pressed
+            or adapter.abort_reason or self.motor_gate.abort_reason
+            or not adapter.workers or not all(worker.is_alive() for worker in adapter.workers)
+        ):
+            return
+        address = os.environ.get("NOTIFY_SOCKET")
+        if address:
+            if address.startswith("@"):
+                address = "\0" + address[1:]
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notifier:
+                notifier.sendto(b"READY=1\nSTATUS=Policy warmed, workers running, telemetry fresh", address)
+        self.startup_ready = True
+        self.get_logger().info("Safety monitor ready: policy warmed, workers running, telemetry fresh")
 
     def on_handover_ready(self, request, response):
         """Confirm a full-weight SDK write for this session, not physical takeover."""
@@ -143,6 +166,7 @@ class HardwareMotorGateNode(MotorGateNode):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
             return
+        self.notify_startup_ready()
         if self.adapter.damp_settled:
             self.motor_gate.abort_reason = None
             self.abort_reason = None
