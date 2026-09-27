@@ -277,6 +277,20 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 2)
 
+        # The previous session's arm pose is cleared, so the new F3 session captures the new pose.
+        self.assertIsNone(self.adapter.arm_hold_q)
+        self.state()
+        self.press_f3_twice()
+        self.adapter.receive_state(
+            SimpleNamespace(
+                motor_state=[SimpleNamespace(q=0.4, dq=0.0) for _ in range(35)],
+                mode_machine=5,
+                wireless_remote=[0] * 40,
+            )
+        )
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.lowcmds[-1][1], [0.4] * 14)
+
     def test_rejected_readiness_shutdown_sends_no_motor_commands(self):
         self.transport.read_ready_fsm = lambda: (3104, None)
         self.transport.close = lambda: None

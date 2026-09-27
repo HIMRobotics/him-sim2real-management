@@ -526,6 +526,7 @@ class G1ArmAdapter:
     def _release_after_confirmed_damp(self):
         """Stop resending damp so a later stand from the remote is left alone."""
         with self.stop_lock:
+            self.arm_hold_q = None
             self.hold_failed = False
             self.walk_stop = False
             self.armed = False
