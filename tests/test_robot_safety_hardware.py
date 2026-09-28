@@ -33,8 +33,9 @@ def profile_data():
                 "max_velocity_rad_secs": 0.1,
                 "max_acceleration_rad_secs2": 0.2,
                 "max_tracking_error_rad": 0.1,
+                "max_torque_nm": 100.0,
             }
-            for i in UPPER_BODY_INDICES
+            for i in range(29)
         },
     }
 
@@ -222,10 +223,41 @@ class HardwareAdapterTests(unittest.TestCase):
             self.assertTrue(self.adapter._ensure_balance_policy())
             self.press_f3_twice()
             self.adapter.stop_once()
+            self.now += 0.02
             self.adapter.stop_once()
         load.assert_called_once()
         policy.warmup.assert_called_once()
         self.assertEqual(len(self.transport.lowcmds), 2)
+
+    def test_soft_reset_balance_bypasses_submission_limits(self):
+        data = profile_data()
+        data["joints"]["left_hip_pitch"]["max_torque_nm"] = 0.1
+        self.adapter.profile = load_profile(data)
+        policy = Mock()
+        policy.update.return_value = [0.0] * 15
+        self.adapter.balance_policy = policy
+        self.press_f3_twice()
+        with patch("robot_safety.hardware_adapter.check_command") as command_check, patch(
+            "robot_safety.hardware_adapter.check_torque"
+        ) as torque_check:
+            self.adapter.stop_once()
+            self.now += 0.02
+            policy.update.return_value = [0.2] + [0.0] * 14
+            self.adapter.stop_once()
+        command_check.assert_not_called()
+        torque_check.assert_not_called()
+        self.assertEqual(len(self.transport.lowcmds), 2)
+        self.assertEqual(self.transport.lowcmds[-1][0][0], 0.2)
+        self.assertEqual(self.transport.stop_calls, 0)
+
+    def test_balance_inference_failure_requests_damping(self):
+        policy = Mock()
+        policy.update.side_effect = ValueError("inference failed")
+        self.adapter.balance_policy = policy
+        self.press_f3_twice()
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.lowcmds, [])
+        self.assertEqual(self.transport.stop_calls, 1)
 
     def test_failed_warmup_keeps_stock_control_and_does_not_reload_on_f3(self):
         policy = Mock()
@@ -433,9 +465,9 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         reason = self.adapter.abort_reason
-        self.assertIn("left_shoulder_roll: tracking error=0.200000", reason)
+        self.assertIn("left_shoulder_roll: joint_tracking_error_limit", reason)
         self.assertIn("limit=0.1", reason)
-        self.assertIn("target=0.200000, measured=0.000000", reason)
+        self.assertIn("value=0.2", reason)
         self.assertEqual(len(self.transport.writes), 1)
         self.assertTrue(self.adapter.stop_requested.is_set())
 

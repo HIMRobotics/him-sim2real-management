@@ -16,8 +16,10 @@ test = ["pytest>=8"]
 [project.scripts]
 policy-safety = "policy_safety.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = ["policy_safety", "policy_safety.profiles"]
+py-modules = ["joint_checks"]
+package-dir = {"" = "../../robot_safety", "policy_safety" = "src/policy_safety"}
 
 [tool.setuptools.package-data]
 policy_safety = ["profiles/*.json"]

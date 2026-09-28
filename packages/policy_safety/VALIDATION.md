@@ -1,6 +1,31 @@
 # Validation — September 28, 2026
 
-## Per-joint enforcement update
+## Shared checks and leg coverage
+
+The hardware adapter and simulator now call the same stdlib-only command checks.
+The standard and lenient profiles include all 29 joints and torque bounds. Leg
+tracking tolerances now use a provisional quarter-effort budget derived from
+NVIDIA G1 action scaling and this profile's model effort/reference gains. This
+is a local adaptation, not an upstream tracking safety threshold. Commanded
+acceleration limits remain local settings.
+
+- Regression suite after the soft-reset scope correction: 150 tests and 70 subtests passed. Tests cover all-joint tracking, commanded velocity
+  changes, both signs of torque, leg target deltas, and rejection before actuation.
+- Hardware tests use fake transport. Soft-reset GR00T balancing bypasses submission
+  command and torque checks. Inference failures still request damping.
+- PD demand is checked before each physics step, independently of actuator clamping.
+  Applied torque is also checked. Hardware checks estimated demand, not measured torque.
+- A standalone wheel installed and ran from `/tmp` without ROS or repository imports.
+  Its report exactly matched the repository wrapper, including the shared-code hash.
+- The real sample's default suite reported 12 violations, zero errors and 162
+  unavailable checkpoint branches, returning exit 2. All 29 joints were covered.
+  Standing failed its first leg target mismatch (left hip yaw, 0.072946 rad versus
+  the 0.03 rad startup allowance), before any physics step.
+
+This supersedes the 17-joint coverage described below. No hardware services were
+restarted and no motor commands were sent. These are not calibrated walking limits.
+
+## Earlier arm/waist enforcement update
 
 The evaluator now loads the packaged standard hardware template by default and
 enforces its 17 arm/waist command and tracking rules. This supersedes the earlier

@@ -159,14 +159,27 @@ ownership handover and replacement of the first hardware output with measured
 positions are not simulated. Policy-specific gains are retained rather than
 replaced with the hardware profile's gains.
 
-The standard profile covers **17 arm/waist joints**. Its movement and tracking
-limits do **not** cover the 12 leg joints. All joints retain the original model
-range, finite-value, and applicable global checks. Reports list the covered and
-uncovered joint names. Coverage gaps prevent a success exit code of 0 even with
-a globally calibrated profile. Extend an explicitly supplied joint profile with
-reviewed leg limits to cover those joints. Missing arm/waist entries or unknown
-joint names are errors. Per-joint acceleration and tracking limits remain local
-settings, not a calibrated whole-body safety envelope.
+The standard profile covers **all 29 joints**, including the legs. Hardware and
+simulation call the same dependency-free `robot_safety/joint_checks.py` functions.
+The standalone wheel includes that source as `joint_checks` without ROS or SDK imports.
+These limits screen submitted policies. Hardware F3 soft-reset GR00T balancing
+does not apply them. The hardware gate remains restricted to arm/waist submissions.
+Missing joint entries are errors, including older 17-joint custom profiles.
+
+Leg position, target velocity and torque bounds use the Unitree model values.
+Local commanded-velocity-change limits are 1 rad/s² for all legs. Tracking
+allowances are 0.146667 rad for hip pitch/yaw, 0.231667 rad for hip roll,
+0.173750 rad for knees and 0.218750 rad for ankles. They derive from
+`0.25 * model_effort / reference_kp`, adapting NVIDIA's G1 action-scaling rule
+as a provisional tracking-error budget. This adaptation is our screening choice,
+not a published tracking safety threshold. The simulator retains its actual gains
+for the independent full PD-torque check. See the
+[profile documentation](../../robot_safety/profiles/README.md) for sources and derivation.
+
+The evaluator checks PD torque demand before each physics step and applied joint
+torque afterward. Both must satisfy the shared profile's Nm bounds. The existing
+MuJoCo model bounds are also retained. Torque demand uses the simulator's actual
+actuator gains, so clamping cannot conceal an excessive demand.
 
 To select the current repository template explicitly, add:
 
@@ -248,9 +261,8 @@ so far. The provisional global profile has no scalar thresholds for measured joi
 velocity/acceleration, target rate, tracking error, base speeds, or contact force.
 The separate joint profile nevertheless enforces command deltas and tracking for
 its covered joints. `acceptance_checks` lists global gaps and
-`joint_movement_checks` lists per-joint coverage. MuJoCo already clamps actuator force to the
-model limits, so checking the resulting torque is not a test of unsaturated
-torque demand. The independent decoded-target check prevents target clipping from
+`joint_movement_checks` lists per-joint coverage. The evaluator checks unsaturated PD torque demand as well as the resulting
+applied torque. The independent decoded-target check prevents target clipping from
 hiding out-of-range requests. Counterfactuals run after the nominal and branch
 tests for each seed, so they may not yet be represented in intermediate counts.
 

@@ -1,4 +1,4 @@
-"""Load explicitly supplied G1 upper-body gains and operating limits."""
+"""Load explicitly supplied G1 gains and operating limits."""
 
 import json
 import math
@@ -11,6 +11,7 @@ from .hardware_constants import (
     G1_MACHINE_TYPE,
     UPPER_BODY_INDICES,
 )
+from .joint_checks import JointHardwareLimits
 
 HARDWARE_PERIOD_SECS = 0.02  # Matches the tested Unitree arm7 example.
 HARDWARE_WATCHDOG_POLL_SECS = 0.005
@@ -25,37 +26,6 @@ JOINT_DIAGNOSTICS_PERIOD_SECS = 1.0
 
 
 @dataclass(frozen=True)
-class JointHardwareLimits:
-    """One joint's configured bounds and PD gains, in radians, seconds and Nm."""
-
-    position_min_rad: float
-    position_max_rad: float
-    kp: float
-    kd: float
-    max_velocity_rad_secs: float
-    max_acceleration_rad_secs2: float
-    max_tracking_error_rad: float
-
-    def __post_init__(self):
-        if not all(
-            type(value) in (int, float) and math.isfinite(value)
-            for value in self.__dict__.values()
-        ):
-            raise ValueError("joint limits must be finite numbers")
-        if self.position_min_rad >= self.position_max_rad:
-            raise ValueError("joint position bounds must be ordered")
-        for name in (
-            "kp",
-            "kd",
-            "max_velocity_rad_secs",
-            "max_acceleration_rad_secs2",
-            "max_tracking_error_rad",
-        ):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be positive")
-
-
-@dataclass(frozen=True)
 class HardwareProfile:
     """Required physical settings, with no inferred or default hardware gains."""
 
@@ -66,10 +36,11 @@ class HardwareProfile:
     initial_position_tolerance_rad: float
     initial_velocity_tolerance_rad_secs: float
     joints: tuple
+    legs: tuple
 
     @classmethod
     def load(cls, path):
-        """Require all 17 arm/waist entries using the SDK joint names."""
+        """Require all 29 entries using the SDK joint names."""
         data = json.loads(Path(path).read_text())
         if data["expected_machine_type"] != G1_MACHINE_TYPE:
             raise ValueError(
@@ -98,8 +69,11 @@ class HardwareProfile:
         if data["max_publish_gap_secs"] > HARDWARE_FEEDBACK_TIMEOUT_SECS:
             raise ValueError("publish gap must not exceed the feedback deadline")
         names = [G1_29_JOINT_NAMES[index] for index in UPPER_BODY_INDICES]
-        if set(data["joints"]) != set(names):
-            raise ValueError("profile must specify exactly the 17 arm and waist joints")
+        if set(data["joints"]) != set(G1_29_JOINT_NAMES):
+            raise ValueError("profile must specify all 29 joints")
+        data["legs"] = tuple(
+            JointHardwareLimits(**data["joints"][n]) for n in G1_29_JOINT_NAMES[:12]
+        )
         data["joints"] = tuple(
             JointHardwareLimits(**data["joints"][name]) for name in names
         )

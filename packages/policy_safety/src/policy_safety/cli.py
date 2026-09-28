@@ -92,6 +92,9 @@ def run_worker(request, timeout):
     # The source-tree wrapper must also work without an editable installation.
     source_root = str(Path(__file__).resolve().parent.parent)
     env["PYTHONPATH"] = source_root + os.pathsep + env.get("PYTHONPATH", "")
+    import joint_checks
+
+    env["PYTHONPATH"] += os.pathsep + str(Path(joint_checks.__file__).parent)
     started = time.monotonic()
     print(f"Starting evaluation | timeout={timeout:g}s | output={output}", flush=True)
     print(

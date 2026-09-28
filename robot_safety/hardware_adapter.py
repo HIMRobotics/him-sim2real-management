@@ -23,6 +23,7 @@ from .hardware_profile import (
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
 )
+from .joint_checks import check_command, check_torque
 from .joint_diagnostics import JointDeltaDiagnostics
 
 
@@ -325,57 +326,15 @@ class G1ArmAdapter:
             tau = self.command["tau"][index]
             joint = G1_29_JOINT_NAMES[index]
             measured = self.feedback.q[index]
-            tracking_error = abs(q - measured)
-            if not all(math.isfinite(value) for value in (q, dq, tau)):
-                raise ValueError(f"{joint}: nonfinite target q={q}, dq={dq}, tau={tau}")
-            if not limits.position_min_rad <= q <= limits.position_max_rad:
-                raise ValueError(
-                    f"{joint}: target q={q:.6f} rad outside "
-                    f"[{limits.position_min_rad}, {limits.position_max_rad}]"
-                )
-            if abs(dq) > limits.max_velocity_rad_secs:
-                raise ValueError(
-                    f"{joint}: target dq={dq:.6f} rad/s exceeds "
-                    f"absolute limit={limits.max_velocity_rad_secs}"
-                )
-            if tau != 0:
-                raise ValueError(f"{joint}: feedforward tau={tau} Nm must be zero")
-            if tracking_error > limits.max_tracking_error_rad:
-                raise ValueError(
-                    f"{joint}: tracking error={tracking_error:.6f} rad exceeds "
-                    f"limit={limits.max_tracking_error_rad}, "
-                    f"target={q:.6f}, measured={measured:.6f}"
-                )
-            if self.previous_targets is None:
-                if tracking_error > self.profile.initial_position_tolerance_rad:
-                    raise ValueError(
-                        f"{joint}: initial position error={tracking_error:.6f} rad "
-                        f"exceeds limit={self.profile.initial_position_tolerance_rad}"
-                    )
-                if abs(dq) > self.profile.initial_velocity_tolerance_rad_secs:
-                    raise ValueError(
-                        f"{joint}: initial target dq={dq:.6f} rad/s exceeds "
-                        f"absolute limit={self.profile.initial_velocity_tolerance_rad_secs}"
-                    )
-                # First SDK write uses exactly the measured position with zero weight.
+            previous = None if self.previous_targets is None else (
+                self.previous_targets[index], self.previous_velocities[index])
+            check_command(joint, limits, q, dq, tau, measured, previous, dt,
+                          self.profile.initial_position_tolerance_rad,
+                          self.profile.initial_velocity_tolerance_rad_secs)
+            check_torque(joint, limits, limits.kp * (q - measured)
+                         + limits.kd * (dq - self.feedback.dq[index]) + tau)
+            if previous is None:
                 q, dq = measured, 0.0
-            else:
-                if dt <= 0:
-                    raise ValueError(f"output time did not advance: interval={dt} secs")
-                position_change = abs(q - self.previous_targets[index])
-                if position_change > limits.max_velocity_rad_secs * dt:
-                    raise ValueError(
-                        f"{joint}: target position change={position_change:.6f} rad "
-                        f"exceeds limit={limits.max_velocity_rad_secs * dt:.6f} rad "
-                        f"over interval={dt:.6f} secs"
-                    )
-                velocity_change = abs(dq - self.previous_velocities[index])
-                if velocity_change > limits.max_acceleration_rad_secs2 * dt:
-                    raise ValueError(
-                        f"{joint}: target velocity change={velocity_change:.6f} rad/s "
-                        f"exceeds limit={limits.max_acceleration_rad_secs2 * dt:.6f} "
-                        f"over interval={dt:.6f} secs"
-                    )
             targets[index] = {
                 "q": q,
                 "dq": dq,
@@ -422,19 +381,22 @@ class G1ArmAdapter:
             self.balance_released = True
         if self.feedback is None:
             return
-        q = self.feedback.q
+        feedback = self.feedback
+        q = feedback.q
         if self.arm_hold_q is None:
             self.arm_hold_q = tuple(q[index] for index in ARM_INDICES)
         try:
-            lower = self.balance_policy.update(q, self.feedback.dq, self.quat, self.gyro)
-        except Exception:  # noqa: BLE001
-            return
-        try:
-            self.transport.write_lower_body(
-                lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0
-            )
-        except Exception:  # noqa: BLE001
-            return
+            lower = self.balance_policy.update(q, feedback.dq, self.quat, self.gyro)
+            now = self.clock()
+            if not 0 <= now - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS:
+                raise ValueError("stale balance feedback")
+            # Soft-reset balancing does not use submission movement limits.
+            if not self.transport.write_lower_body(lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0):
+                raise RuntimeError("balance write failed")
+        except Exception as exc:  # noqa: BLE001 - Balance failures enter damping.
+            self.abort_reason = "balance_output_error: " + str(exc)
+            self.hold_failed = True
+            self._request_stock_damping()
 
     def _ensure_balance_policy(self):
         """Load and prime inference at startup, then retain the prepared policy."""

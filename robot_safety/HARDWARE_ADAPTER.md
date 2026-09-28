@@ -69,7 +69,7 @@ Required fields:
 - `max_publish_gap_secs`: maximum output-worker gap, no greater than 0.2 seconds.
 - `initial_position_tolerance_rad`: allowed first target/measured-position mismatch.
 - `initial_velocity_tolerance_rad_secs`: required near-stationary start tolerance.
-- `joints`: all 17 named arm/waist joints. Each needs position bounds, positive
+- `joints`: all 29 named joints, including legs. Each needs a positive `max_torque_nm`, position bounds, positive
   `kp` and `kd`, maximum velocity and acceleration, and maximum tracking error.
 
 The adapter's feedback deadline is 200 ms. Its output cadence targets 20 ms, matching the operator-tested SDK example.

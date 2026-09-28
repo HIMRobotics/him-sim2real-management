@@ -97,7 +97,7 @@ def test_hardware_checker_acceptance_matches(rules, case, monkeypatch):
         HardwareProfile.load(root / "robot_safety/profiles/g1_type5.template.json")
     )
     hardware.command = {"q": q, "dq": dq, "tau": tau}
-    hardware.feedback = SimpleNamespace(q=measured)
+    hardware.feedback = SimpleNamespace(q=measured, dq=np.zeros(29))
     hardware.previous_targets = None if previous is None else previous["target"]
     hardware.previous_velocities = None if previous is None else previous["velocity"]
     hardware.last_output_secs = None if previous is None else 0.0
@@ -118,7 +118,7 @@ def test_hardware_checker_acceptance_matches(rules, case, monkeypatch):
 def test_all_joint_velocity_change_boundaries(rules):
     for i, name, limits in rules.entries:
         q, dq, tau, measured, previous = command_case(rules, "valid")
-        dq[i] = limits["max_acceleration_rad_secs2"] * 0.02
+        dq[i] = limits.max_acceleration_rad_secs2 * 0.02
         rules.check_command(q, dq, tau, measured, previous, 0.02)
         dq[i] += 1e-6
         with pytest.raises(
@@ -131,7 +131,7 @@ def test_all_joint_velocity_change_boundaries(rules):
 def test_tracking_boundaries_and_coverage(rules):
     for i, name, limits in rules.entries:
         q, dq, tau, measured, previous = command_case(rules, "valid")
-        q[i] = limits["max_tracking_error_rad"]
+        q[i] = limits.max_tracking_error_rad
         previous["target"] = q.copy()
         rules.check_command(q, dq, tau, measured, previous, 0.02)
         rules.check_tracking(q, measured)
@@ -142,12 +142,8 @@ def test_tracking_boundaries_and_coverage(rules):
             rules.check_tracking(q, measured)
         assert failure.value.details["joint"] == name
     coverage = rules.coverage()
-    assert len(coverage["covered_joints"]) == 17
-    assert len(coverage["uncovered_joints"]) == 12
-    assert all(
-        any(part in n for part in ("hip", "knee", "ankle"))
-        for n in coverage["uncovered_joints"]
-    )
+    assert len(coverage["covered_joints"]) == 29
+    assert len(coverage["uncovered_joints"]) == 0
 
 
 def test_packaged_profile_matches_standard_template():
@@ -165,5 +161,30 @@ def test_invalid_or_missing_joint_limits_rejected(rules, tmp_path):
     del profile["joints"]["waist_yaw"]
     path = tmp_path / "incomplete.json"
     path.write_text(json.dumps(profile))
-    with pytest.raises(ValueError, match="all 17"):
+    with pytest.raises(ValueError, match="all 29"):
         JointRules(rules.names, path)
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_all_joint_torque_boundaries(rules, sign):
+    for i, name, limits in rules.entries:
+        torque = np.zeros(29)
+        torque[i] = sign * limits.max_torque_nm
+        rules.check_torque(torque)
+        torque[i] += sign * 1e-6
+        with pytest.raises(PolicyViolation, match="joint_torque_limit") as failure:
+            rules.check_torque(torque)
+        assert failure.value.details["joint"] == name
+
+
+def test_leg_position_delta(rules):
+    for i, name, limits in rules.entries:
+        if i >= 12:
+            continue
+        q, dq, tau, measured, previous = command_case(rules, "valid")
+        q[i] = measured[i] = limits.max_velocity_rad_secs * 0.001 + 1e-6
+        with pytest.raises(
+            PolicyViolation, match="joint_position_target_change_limit"
+        ) as failure:
+            rules.check_command(q, dq, tau, measured, previous, 0.001)
+        assert failure.value.details["joint"] == name

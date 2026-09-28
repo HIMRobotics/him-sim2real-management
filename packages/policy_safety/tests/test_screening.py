@@ -452,13 +452,13 @@ def test_evaluation_enforces_profile_and_reports_coverage(
     code = evaluate(request)
     report = json.loads((output / "report.json").read_text())
     assert report["hashes"]["joint_profile"] == digest(joint_path)
-    assert len(report["joint_movement_checks"]["uncovered_joints"]) == 12
+    assert len(report["joint_movement_checks"]["uncovered_joints"]) == 0
     if custom_joint_profile:
         assert code == 1
         assert report["scenarios"][0]["first_violation"]["limit"] == 0.001
     else:
         assert report["scenarios"][0]["status"] == "completed"
-        assert code == 3
+        assert code == 0
 
 
 def test_missing_checkpoints_remain_incomplete(bundle, tmp_path, monkeypatch):
@@ -567,3 +567,14 @@ def test_failing_worker_returns_error_report(tmp_path):
     report = run_worker({"output": str(tmp_path)}, 30)
     assert report["exit_code"] == 2
     assert "KeyError" in report["worker_error"]
+
+
+def test_unclamped_leg_torque_rejected(setup, tmp_path):
+    sim, adapter, profile = setup
+    # A large measured speed produces demand even with an unchanged target.
+    sim.data.qvel[sim.vadr[0]] = 100.0
+    result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "torque.npz")
+    assert result["status"] == "violation"
+    assert result["first_violation"]["reason"] == "joint_torque_limit"
+    assert result["first_violation"]["joint"] == "left_hip_pitch"
+    assert result["first_violation"]["time_seconds"] == 0

@@ -4,6 +4,7 @@ import json
 import platform
 from pathlib import Path
 
+import joint_checks
 import mujoco
 import numpy as np
 import onnxruntime
@@ -146,12 +147,19 @@ def run_scenario(
                 sim.command_history,
                 sim.dt,
             )
+            kp = sim.model.actuator_gainprm[sim.actuators, 0]
+            kd = -sim.model.actuator_biasprm[sim.actuators, 2]
             sim.data.ctrl[sim.actuators] = applied
             sim.command_history = {"target": target.copy(), "velocity": velocity.copy()}
             for substep in range(sim.substeps):
                 elapsed = (step * sim.substeps + substep) * sim.physics_dt
                 sim.apply_push(scenario.get("push"), elapsed)
                 warning_count = sim.data.warning.number.copy()
+                joint_rules.check_torque(
+                    sim.model.actuator_biasprm[sim.actuators, 0]
+                    + kp * (target - sim.data.qpos[sim.qadr])
+                    - kd * sim.data.qvel[sim.vadr]
+                )
                 mujoco.mj_step(sim.model, sim.data)
                 metrics, acceleration, torque, reason = monitor.sample(
                     target, applied, target_rate, scenario["upright"]
@@ -182,6 +190,7 @@ def run_scenario(
                 if reason:
                     raise PolicyViolation(reason)
                 joint_rules.check_tracking(target, sim.data.qpos[sim.qadr])
+                joint_rules.check_torque(torque)
             if step + 1 in checkpoint_steps:
                 snapshots[step + 1] = sim.snapshot(adapter, command)
     except PolicyViolation as exc:
@@ -286,6 +295,7 @@ def evaluate(request):
     for body in suite["push_bodies"] if suite["perturbations"] else []:
         sim.model.body(body)
     package_files = sorted(Path(__file__).parent.glob("*.py"))
+    package_files.append(Path(joint_checks.__file__))
     provenance = {
         "model": {
             str(p.relative_to(Path(request["model"]).resolve().parent)): digest(p)
@@ -318,9 +328,10 @@ def evaluate(request):
                 "decoded_target_range",
                 "joint_position_range",
                 "model_torque_range",
+                "profile_torque_demand_and_applied_bounds",
             ],
             "upright_scenarios_only": ["fall_height", "fall_orientation"],
-            "note": "MuJoCo clamps actuator force to model limits. This does not test unsaturated torque demand. Out-of-range decoded targets are rejected before clipping can hide them.",
+            "note": "PD torque demand is checked before every physics step against the joint profile, in addition to the applied torque checks. Out-of-range decoded targets are rejected before clipping can hide them.",
         },
         "suite": suite,
         "robot": sim.robot,
