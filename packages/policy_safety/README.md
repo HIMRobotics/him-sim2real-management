@@ -46,6 +46,31 @@ You can copy the bundle and install this package on another device. No repositor
 ROS installation, robot network, or Unitree SDK is required to evaluate it.
 MuJoCo and ONNX Runtime must have compatible wheels for that device.
 
+To distribute the evaluator without a repository checkout, build a wheel from
+this repository and copy it with the prepared bundle:
+
+```bash
+uv build --wheel ./packages/policy_safety --out-dir dist
+```
+
+On the receiving device, create a Python 3.12 environment and install the wheel:
+
+```bash
+python3.12 -m venv .venv-policy-safety
+source .venv-policy-safety/bin/activate
+python -m pip install /path/to/him_policy_safety-0.1.0-py3-none-any.whl
+policy-safety evaluate \
+  --model /path/to/g1-screening-bundle/walker.onnx \
+  --adapter g1-walker-99-v1 \
+  --robot-config /path/to/g1-screening-bundle/robot.json \
+  --output ./screening-result
+```
+
+The wheel includes the shared checker and default joint profile. Copy the entire
+bundle, including ONNX external weights and robot assets. Copying only the repository
+wrapper script is insufficient. Detailed hardware leg validation is separate follow-up
+work and is not required to run this offline pipeline.
+
 The repository entry point accepts exactly the same arguments. Run it with the
 safety environment activated as above:
 
