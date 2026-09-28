@@ -1,5 +1,11 @@
 # ROS 2 safety pipeline — dry-run checkpoint
 
+Offline preflight screening is available through the [portable policy checker](../packages/policy_safety/README.md)
+and `python tools/check_policy_safety.py evaluate ...`. Its JSON reports and exit
+codes support operator review alongside this live safety pipeline. It does not
+arm the gate, publish motor commands, or change watchdog services. Its whole-body
+simulation results do not expand the hardware adapter's arm/waist command scope.
+
 The intended flow is:
 
 ```text

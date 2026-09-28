@@ -2,6 +2,8 @@
 
 New to G1 policies? Read [which files to get and how to run the author’s deployment](POLICY_GUIDE.md), also linked inside the app.
 
+For offline ONNX screening, see the [portable MuJoCo policy checker](packages/policy_safety/README.md). It provides a standalone `policy-safety` command and `tools/check_policy_safety.py` repository entry point, with reports for preflight review.
+
 **Operators: start with [START_HERE.md](START_HERE.md). Run `bash OPEN_APP.sh` to open the local control panel.**
 
 ## Get started for the session

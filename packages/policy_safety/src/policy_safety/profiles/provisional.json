@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "g1-model-limits-provisional",
+  "calibrated": false,
+  "joint_position_tolerance_rad": 0.05,
+  "fall_height_m": 0.28,
+  "fall_upright_min": 0.3,
+  "maxima": {},
+  "uncalibrated_metrics": ["joint_velocity", "joint_acceleration", "tracking_error", "target_rate", "base_linear_speed", "base_angular_speed", "contact_force", "clipping"]
+}
