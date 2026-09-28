@@ -161,7 +161,7 @@ def main(argv=None):
         "--joint-profile",
         type=Path,
         default=DEFAULT_JOINT_PROFILE,
-        help="per-joint movement rules, defaults to the standard arm/waist template",
+        help="per-joint movement rules, defaults to the standard 29-joint template",
     )
     evaluate.add_argument(
         "--profile",
