@@ -1,5 +1,24 @@
 # Validation — September 28, 2026
 
+## Startup alignment separated from policy motion
+
+The simulator validates the initialized hold with the shared startup checks before
+inference. It then seeds command history with that hold, so the first policy
+output uses the same delta/tracking/torque rules as later outputs. Hardware arm
+handover behavior and the soft-reset exemption are unchanged.
+
+- 152 tests and 70 subtests passed, including a 0.04 rad first movement for both
+  a leg and an arm, rejection of an initial hold mismatch, and checkpoint history.
+- Rebuilt and installed the wheel, then evaluated the actual sample with the
+  default 174-scenario suite. It reported 12 violations, zero errors and 162
+  unavailable branches, returning exit 2.
+- The sample no longer fails the 0.03 rad startup check. Standing instead fails
+  the ongoing left-knee tracking bound: 0.196988 rad requested error versus
+  0.173750 rad. This still occurs before the first physics step, so this run
+  provides no walking or perturbation validation. Limits were not retuned to pass it.
+
+The following results predate this startup correction.
+
 ## Shared checks and leg coverage
 
 The hardware adapter and simulator now call the same stdlib-only command checks.

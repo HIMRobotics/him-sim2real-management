@@ -150,6 +150,14 @@ Commands are checked before applying them. Tracking is checked again after every
 physics step. Checkpoints preserve the previous accepted position and velocity
 targets, so branches do not reset or bypass the delta checks.
 
+At simulator startup, the configured standing or counterfactual pose is installed
+as both measured position and held target. The shared startup check validates this
+hold before inference. The first policy target then uses the ordinary command-delta,
+tracking and torque checks against that baseline. The 0.03 rad alignment tolerance
+is not applied to the first requested movement. Checkpoint branches retain their
+previous command history and do not repeat startup. Hardware arm handover keeps its
+existing initial-command alignment check.
+
 The current position-target adapter has desired velocity and feedforward torque
 equal to zero. Its commanded-velocity-change check is therefore trivially zero.
 It does **not** bound measured acceleration or acceleration derived from target

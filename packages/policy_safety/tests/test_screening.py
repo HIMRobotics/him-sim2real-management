@@ -345,10 +345,8 @@ def test_raw_clipping_is_recorded(setup, tmp_path):
 
 def test_joint_mismatch_rejected_before_actuation(setup, tmp_path):
     sim, adapter, profile = setup
+    sim.data.ctrl[sim.actuators[15]] += 0.031
     before = sim.data.ctrl.copy()
-    target = adapter.default.astype(float).copy()
-    target[15] += 0.031
-    adapter.decode = lambda raw: target.copy()
     result, _ = run_scenario(
         sim, adapter, profile, scenario(), tmp_path / "mismatch.npz"
     )
@@ -358,6 +356,19 @@ def test_joint_mismatch_rejected_before_actuation(setup, tmp_path):
     assert result["first_violation"]["limit"] == 0.03
     assert result["simulated_seconds"] == 0
     np.testing.assert_array_equal(before, sim.data.ctrl)
+
+
+@pytest.mark.parametrize("joint", [0, 15])
+def test_first_policy_motion_uses_movement_limits(setup, tmp_path, joint):
+    sim, adapter, profile = setup
+    target = sim.data.qpos[sim.qadr].copy()
+    target[joint] += 0.04
+    adapter.decode = lambda raw: target.copy()
+    result, _ = run_scenario(
+        sim, adapter, profile, scenario(seconds=0.02), tmp_path / "first.npz"
+    )
+    assert result["status"] == "completed"
+    assert result["simulated_seconds"] == pytest.approx(0.02)
 
 
 def test_branch_restores_joint_command_history(setup, tmp_path):
@@ -445,7 +456,7 @@ def test_evaluation_enforces_profile_and_reports_coverage(
     joint_path = DEFAULT_JOINT_PROFILE
     if custom_joint_profile:
         data = json.loads(DEFAULT_JOINT_PROFILE.read_text())
-        data["initial_position_tolerance_rad"] = 0.001
+        data["joints"]["left_hip_pitch"]["max_tracking_error_rad"] = 0.001
         joint_path = tmp_path / "strict-joints.json"
         joint_path.write_text(json.dumps(data))
         request["joint_profile"] = str(joint_path)

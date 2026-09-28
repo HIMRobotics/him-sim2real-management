@@ -120,6 +120,14 @@ def run_scenario(
     target, applied, velocity, torque_command = (np.empty(0) for _ in range(4))
     measured_at_command = np.empty(0)
     try:
+        if sim.command_history is None:
+            # Validate the initial hold before treating policy outputs as motion.
+            hold = sim.data.ctrl[sim.actuators].copy()
+            zero = np.zeros(len(hold))
+            joint_rules.check_command(
+                hold, zero, zero, sim.data.qpos[sim.qadr], None, sim.dt
+            )
+            sim.command_history = {"target": hold, "velocity": zero}
         for step in range(steps):
             obs = sim.observation(adapter, command)
             raw = adapter.infer(obs)

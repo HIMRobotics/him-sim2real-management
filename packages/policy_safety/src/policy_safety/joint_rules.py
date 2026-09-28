@@ -60,7 +60,7 @@ class JointRules:
                 "zero_feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Velocity-change limits apply to commanded dq, not measured or position-derived acceleration. Profile gains and hardware ownership handover are not imported.",
+            "semantics": "Velocity-change limits apply to commanded dq, not measured or position-derived acceleration. Simulation validates the initial hold, then checks policy motion against that baseline. Profile gains and hardware ownership handover are not imported.",
         }
 
     def check_command(self, target, velocity, torque, measured, previous, dt):
