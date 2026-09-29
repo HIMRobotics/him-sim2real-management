@@ -1,7 +1,8 @@
 # G1 type-5 profile using Unitree model limits
 
-`g1_type5.template.json` uses the official position, velocity and effort limits for all
-29 joints in Unitree's `g1_29dof_rev_1_0.urdf`. The remaining local settings are distinguished below. No launcher
+`g1_type5.template.json` uses the official position and effort limits for all
+29 joints in Unitree's `g1_29dof_rev_1_0.urdf`, with a local 9 rad/s speed cap.
+The remaining local settings are distinguished below. No launcher
 selects hardware output automatically.
 
 Source: [Unitree revision-1.0 model](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/g1_29dof_rev_1_0.urdf),
@@ -33,13 +34,15 @@ velocity in radians/second and effort in Nm.
 | Wrist roll | -1.972222054 | 1.972222054 | 37 | 25 |
 | Wrist pitch/yaw | -1.614429558 | 1.614429558 | 22 | 5 |
 
-The adapter enforces the position bounds and uses the velocity value both to
-check target dq and limit position-target changes between SDK writes. This
-position-change check is our software rule, not a guarantee of actual joint speed.
-The previous 0.1/0.25/0.5 rad/s test caps are removed. Model velocities are high:
-37 rad/s is about 2,120 degrees/s. These are model limits, not requested speeds
-or recommendations for personnel-adjacent testing. The policy still sets the
-motion sequence. The profile alone no longer enforces a slow raise.
+The table records the URDF ratings. The standard template instead sets
+`max_velocity_rad_secs` to 9 rad/s for every joint. The adapter uses that field
+to check target dq, limit position-target changes between SDK writes, and monitor
+sustained measured overspeed. The target-change check is a software rule, not a
+guarantee of actual joint speed. See the
+[shared speed checks](../../packages/policy_safety/README.md#shared-speed-checks)
+for config locations, body-spin limits, and the measured-speed hold time.
+The policy still sets the motion sequence. The profile alone does not enforce
+a slow raise.
 
 `max_torque_nm` enforces the model effort bound against estimated PD demand
 using the gains of the active controller. The simulator also checks applied
@@ -48,11 +51,12 @@ checker, so this is a command estimate, not a measured-torque monitor or a
 firmware guarantee. Feedforward torque remains zero.
 
 Active arm-policy output and the offline evaluator use the same `joint_checks.py`
-functions. The evaluator checks all 29 joints. F3 soft-reset GR00T balancing is
+functions. Both validate all 29 joints, including leg commands and measured
+speeds. F3 soft-reset GR00T balancing is
 exempt from these submission movement and torque limits. Feedback freshness and
 output-error handling still apply. The hardware arm gate still rejects whole-body
-submissions, so the configured leg limits currently run in offline evaluation,
-not a live submitted leg-policy path.
+submissions and writes only waist/arm targets. Monitoring leg commands and
+feedback does not grant leg control through the arm SDK path.
 Older custom profiles must add all 12 leg entries and every joint's torque bound.
 
 ## Gains and local settings
@@ -112,9 +116,10 @@ trajectory. No hardware jerk limiter is implemented.
 
 - [Unitree's G1 runtime termination checks](https://github.com/unitreerobotics/unitree_sdk2/blob/main/include/unitree/robot/g1/common/terminations.hpp)
   default to 10 rad/s measured joint speed, 6 rad/s body angular velocity and
-  1 rad tilt. These are runtime helper defaults, not per-joint tracking tolerances.
-  The 10 rad/s value is not currently implemented by this profile's command-speed
-  field. That field checks desired dq and position-target changes instead.
+  1 rad tilt. The shared local checks use lower speed thresholds with a 50 ms
+  hold, as described in the [screening guide](../../packages/policy_safety/README.md#shared-speed-checks).
+  A rapid spike can cross the runtime thresholds before that hold elapses.
+  The URDF motor ratings remain in `g1_type5.official_limits.json`.
 - [NVIDIA's G1 joint safety monitor](https://github.com/NVlabs/GR00T-WholeBodyControl/blob/b042411fae38ee4d1af9aac82a37a1f8d14d6dd0/decoupled_wbc/control/envs/g1/utils/joint_safety.py)
   explicitly excludes legs. Its 6 rad/s arm limit cannot justify a leg setting.
 - Neither checker supplies a leg tracking-error or commanded-acceleration bound.

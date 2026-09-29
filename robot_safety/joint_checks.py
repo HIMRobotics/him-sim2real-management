@@ -47,6 +47,24 @@ def check_bound(reason, joint, value, limit, units):
         raise JointViolation(reason, joint, value, limit, units)
 
 
+# Trip before Unitree's 10 rad/s joint and 6 rad/s body passive-mode limits.
+JOINT_SPEED_LIMIT_RAD_S = 9.0
+BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4
+# A foot-strike flick is over in well under this. A real flail holds much longer.
+SPEED_HOLD_S = 0.05
+
+
+def check_measured_velocity(joint, limits, measured_dq):
+    """Reject a joint that is spinning faster than its allowed speed."""
+    check_bound(
+        "joint_velocity_limit",
+        joint,
+        abs(measured_dq),
+        limits.max_velocity_rad_secs,
+        "rad/s",
+    )
+
+
 def check_tracking(joint, limits, target, measured):
     check_bound(
         "joint_tracking_error_limit",

@@ -1,6 +1,41 @@
-# Validation — September 28, 2026
+# Policy safety validation
 
-## Startup alignment separated from policy motion
+Current setup, limits, and scenario definitions are in [README.md](README.md).
+The dated entries below preserve results from the versions tested at the time.
+
+## Regression checks — September 29, 2026
+
+- Policy-safety suite: 74 tests passed in `.venv-policy-safety`.
+- Repository unittest suite: 125 tests passed. Local HTTP tests required socket
+  access outside the execution sandbox.
+- Changed documentation's local links resolve. `git diff --check` and the
+  safety-stop launcher's shell syntax check passed.
+
+These checks did not run the full screening battery or operate robot hardware.
+
+## Recorded sample observations — September 29, 2026
+
+These observations were moved from the former `SCREENING.md`. They describe
+selected sample runs and do not establish completion of the 402-scenario suite.
+
+Standing and forward walking missed their targets without sustained flailing.
+The clearest tracking miss was at the ankles: a planted foot stayed near
+−0.4 rad while the network requested about +0.1 rad, with about 15 Nm applied.
+The recorded interpretation was insufficient policy torque to overcome the
+floor constraint. The seated start requested targets outside joint ranges and
+produced sustained high joint speed.
+
+The medium pelvis push produced a 9.5 rad/s peak lasting 12 ms. The heavy push
+produced a 13 rad/s peak lasting 18 ms, with the commanded target stationary.
+The seated run stayed above 9 rad/s for about 300 ms and peaked at 27 rad/s.
+These observations motivated the 50 ms overspeed hold: brief foot impacts do
+not count as flailing, while the seated motion does. A 100 ms hold would add
+50 ms before detection, equivalent to about 80 degrees at a constant 27 rad/s.
+This is the recorded rationale, not a measured stop-distance guarantee.
+
+## September 28, 2026
+
+### Startup alignment separated from policy motion
 
 The simulator validates the initialized hold with the shared startup checks before
 inference. It then seeds command history with that hold, so the first policy
@@ -19,7 +54,7 @@ handover behavior and the soft-reset exemption are unchanged.
 
 The following results predate this startup correction.
 
-## Shared checks and leg coverage
+### Shared checks and leg coverage
 
 The hardware adapter and simulator now call the same stdlib-only command checks.
 The standard and lenient profiles include all 29 joints and torque bounds. Leg
@@ -44,7 +79,7 @@ acceleration limits remain local settings.
 This supersedes the 17-joint coverage described below. No hardware services were
 restarted and no motor commands were sent. These are not calibrated walking limits.
 
-## Earlier arm/waist enforcement update
+### Earlier arm/waist enforcement update
 
 The evaluator now loads the packaged standard hardware template by default and
 enforces its 17 arm/waist command and tracking rules. This supersedes the earlier
@@ -68,7 +103,7 @@ The 12 leg joints remain uncovered by these per-joint movement rules. Measured
 acceleration thresholds are not inferred from commanded-velocity-change limits.
 No new physical calibration or hardware validation is claimed.
 
-## Earlier validation before joint-rule integration
+### Earlier validation before joint-rule integration
 
 Validated on Linux aarch64 with Python 3.12.14, MuJoCo 3.3.2, ONNX Runtime
 1.22.0, and NumPy 2.5.3 in an isolated Python environment.

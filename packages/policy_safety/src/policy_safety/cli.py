@@ -13,6 +13,15 @@ from .config import positive
 from .joint_rules import DEFAULT_JOINT_PROFILE
 
 
+def default_video_dir():
+    """Repo tmp/vids when this file lives in the checkout, else ./tmp/vids."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "packages" / "policy_safety").is_dir():
+            return parent / "tmp" / "vids"
+    return Path.cwd() / "tmp" / "vids"
+
+
 def atomic_report(path, report):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
@@ -43,6 +52,31 @@ def _render_progress(message):
         print(message, flush=True)
 
 
+def _ratio(count, total):
+    return f"{count}/{total}"
+
+
+def print_scenario_summary(summary):
+    """Show problems, warnings, then each overlapping class as a fraction."""
+    if not summary:
+        return
+    print(
+        f"{'scenario':<18} {'problems':>8} {'warnings':>8} | "
+        f"{'limits':>8} {'misses':>8} {'flailing':>8} {'falls':>8} "
+        f"{'other':>8} {'errors':>8} {'skipped':>8}"
+    )
+    for row in summary:
+        total = row["total"]
+        print(
+            f"{row['scenario']:<18} {_ratio(row['problems'], total):>8} "
+            f"{_ratio(row.get('warnings', 0), total):>8} | "
+            f"{_ratio(row['limits'], total):>8} {_ratio(row.get('misses', 0), total):>8} "
+            f"{_ratio(row['flailing'], total):>8} {_ratio(row['falls'], total):>8} "
+            f"{_ratio(row['other'], total):>8} {_ratio(row['errors'], total):>8} "
+            f"{_ratio(row['skipped'], total):>8}"
+        )
+
+
 def print_progress(output, elapsed):
     """Show completed coverage and the active scenario without blocking the worker."""
     try:
@@ -58,7 +92,10 @@ def print_progress(output, elapsed):
         if active.get("checkpoint_step") is not None:
             detail += f" checkpoint={active['checkpoint_step']}"
         if active.get("push"):
-            detail += f" push={active['push']['body']} {active['push']['force']} N"
+            push = active["push"]
+            detail += (
+                f" push={push.get('label', push['body'])} {push['force']} N"
+            )
     done, total = coverage.get("reported", 0), coverage.get("planned", 0)
     filled = min(10, int(10 * done / total)) if total else 0
     bar = "[" + "#" * filled + "-" * (10 - filled) + "]"
@@ -168,6 +205,11 @@ def main(argv=None):
         type=Path,
         default=Path(__file__).parent / "profiles/provisional.json",
     )
+    evaluate.add_argument(
+        "--clip-to-stops",
+        action="store_true",
+        help="command the clipped stop instead of rejecting a target past it",
+    )
     evaluate.add_argument("--output", required=True, type=Path)
     evaluate.add_argument(
         "--timeout",
@@ -175,12 +217,77 @@ def main(argv=None):
         default=1800.0,
         help="maximum worker wall time in seconds",
     )
+    render = commands.add_parser(
+        "render", help="write videos for a few scenarios, or every named one"
+    )
+    render.add_argument("--model", required=True, type=Path)
+    render.add_argument("--adapter", required=True, choices=["g1-walker-99-v1"])
+    render.add_argument("--robot-config", required=True, type=Path)
+    render.add_argument(
+        "--joint-profile",
+        type=Path,
+        default=DEFAULT_JOINT_PROFILE,
+        help="per-joint movement rules, defaults to the standard 29-joint template",
+    )
+    render.add_argument(
+        "--profile",
+        type=Path,
+        default=Path(__file__).parent / "profiles/provisional.json",
+    )
+    render.add_argument(
+        "--clip-to-stops",
+        action="store_true",
+        help="command the clipped stop instead of rejecting a target past it",
+    )
+    render.add_argument(
+        "--output",
+        type=Path,
+        default=default_video_dir(),
+        help="directory for mp4 clips, reused if it already exists",
+    )
+    render.add_argument(
+        "--scenarios",
+        default="stand,forward,seated,forward-pelvis-push",
+        help=(
+            "comma-separated commands, poses, forward-pelvis-push-small, "
+            "forward-pelvis-push-medium, forward-pelvis-push-heavy, stand-95, or stand-105"
+        ),
+    )
+    render.add_argument("--fps", type=float, default=20.0)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare-g1":
             from .bundle import prepare_g1
 
             print(prepare_g1(args.submission, args.output))
+            return 0
+        if args.command == "render":
+            os.environ.setdefault("MUJOCO_GL", "egl")
+            from .render import render_selection
+
+            from .evaluation import summarize_scenarios
+
+            positive(args.fps, "fps")
+            output = args.output.resolve()
+            output.mkdir(parents=True, exist_ok=True)
+            names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+            if not names:
+                raise ValueError("select at least one scenario")
+            _written, results = render_selection(
+                {
+                    "model": str(args.model.resolve()),
+                    "adapter": args.adapter,
+                    "robot_config": str(args.robot_config.resolve()),
+                    "profile": str(args.profile.resolve()),
+                    "joint_profile": str(args.joint_profile.resolve()),
+                    "output": str(output),
+                    "clip_to_stops": args.clip_to_stops,
+                },
+                names,
+                args.fps,
+            )
+            print_scenario_summary(summarize_scenarios(results))
+            print(f"Videos: {output}")
             return 0
         positive(args.timeout, "timeout")
         output = args.output.resolve()
@@ -193,6 +300,7 @@ def main(argv=None):
             adapter=args.adapter,
             output=str(output),
             suite=str(args.suite.resolve()) if args.suite else None,
+            clip_to_stops=args.clip_to_stops,
         )
         report = run_worker(request, args.timeout)
         coverage = report.get("coverage", {})
@@ -201,7 +309,12 @@ def main(argv=None):
             print(
                 f"Joint rules: {movement['profile_file']} | covered={len(movement['covered_joints'])} | uncovered={len(movement['uncovered_joints'])}"
             )
-        print(f"{report['status']}: exit {report['exit_code']}, coverage {coverage}")
+        clipping = "on" if report.get("clip_to_stops") else "off"
+        print(
+            f"{report['status']}: exit {report['exit_code']}, "
+            f"clip_to_stops={clipping}, coverage {coverage}"
+        )
+        print_scenario_summary(report.get("scenario_summary", []))
         failures = [
             s
             for s in report.get("scenarios", [])

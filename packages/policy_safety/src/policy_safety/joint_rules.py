@@ -7,6 +7,7 @@ from joint_checks import (
     JointHardwareLimits,
     JointViolation,
     check_command,
+    check_measured_velocity,
     check_torque,
     check_tracking,
 )
@@ -89,6 +90,13 @@ class JointRules:
                     self.profile["initial_position_tolerance_rad"],
                     self.profile["initial_velocity_tolerance_rad_secs"],
                 )
+        except JointViolation as exc:
+            raise PolicyViolation(exc.reason, exc.details) from exc
+
+    def check_measured_velocity(self, measured_dq):
+        try:
+            for i, name, limits in self.entries:
+                check_measured_velocity(name, limits, measured_dq[i])
         except JointViolation as exc:
             raise PolicyViolation(exc.reason, exc.details) from exc
 

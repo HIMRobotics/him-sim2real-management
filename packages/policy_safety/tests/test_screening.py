@@ -15,9 +15,9 @@ pytest.importorskip("onnx")
 
 from policy_safety.adapter import G1Walker, inverse_rotate
 from policy_safety.cli import print_progress, run_worker
-from policy_safety.config import profile_config, suite_config
-from policy_safety.evaluation import Monitor, run_scenario, verdict
-from policy_safety.simulation import Simulation
+from policy_safety.config import profile_config, scheduled_directions, suite_config
+from policy_safety.evaluation import Monitor, run_scenario, summarize_scenarios, verdict
+from policy_safety.simulation import Simulation, mesh_point_in_body
 
 
 class Session:
@@ -61,6 +61,78 @@ def scenario(**changes):
     }
     result.update(changes)
     return result
+
+
+def test_render_names_cover_push_strength_and_torque_scale():
+    from policy_safety.config import DEFAULT_SUITE
+    from policy_safety.render import resolve_selection
+
+    assert resolve_selection("forward-pelvis-push", DEFAULT_SUITE)["level"] == "small"
+    assert resolve_selection("forward-pelvis-push-medium", DEFAULT_SUITE)["level"] == "medium"
+    assert resolve_selection("forward-pelvis-push-heavy", DEFAULT_SUITE)["level"] == "heavy"
+    weak = resolve_selection("stand-95", DEFAULT_SUITE)
+    strong = resolve_selection("stand-105", DEFAULT_SUITE)
+    assert weak == {"mode": "torque", "command": "stand", "scale": 0.95}
+    assert strong["command"] == "stand" and strong["scale"] == 1.05
+    assert resolve_selection("seated", DEFAULT_SUITE)["mode"] == "pose"
+    assert resolve_selection("nope", DEFAULT_SUITE) is None
+
+
+def test_torque_scale_changes_motor_gains_and_restores(setup):
+    sim, _, _ = setup
+    kp = sim.model.actuator_gainprm[sim.actuators, 0].copy()
+    kd = -sim.model.actuator_biasprm[sim.actuators, 2].copy()
+    sim.set_torque_scale(0.95)
+    assert np.allclose(sim.model.actuator_gainprm[sim.actuators, 0], kp * 0.95)
+    assert np.allclose(-sim.model.actuator_biasprm[sim.actuators, 2], kd * 0.95)
+    sim.set_torque_scale(1.05)
+    assert np.allclose(sim.model.actuator_gainprm[sim.actuators, 0], kp * 1.05)
+    sim.set_torque_scale(1.0)
+    assert np.allclose(sim.model.actuator_gainprm[sim.actuators, 0], kp)
+    assert np.allclose(-sim.model.actuator_biasprm[sim.actuators, 2], kd)
+
+
+def test_summary_splits_push_strength_and_torque_scale():
+    summary = summarize_scenarios(
+        [
+            {
+                "kind": "perturbation",
+                "name": "forward",
+                "status": "violation",
+                "push": {"level": "small"},
+                "first_violation": {"reason": "joint_tracking_error_limit"},
+            },
+            {
+                "kind": "perturbation",
+                "name": "forward",
+                "status": "violation",
+                "push": {"level": "heavy"},
+                "first_violation": {"reason": "fall"},
+            },
+            {
+                "kind": "nominal",
+                "name": "stand",
+                "status": "violation",
+                "torque_scale": 0.95,
+                "first_violation": {"reason": "joint_tracking_error_limit"},
+            },
+            {
+                "kind": "nominal",
+                "name": "stand",
+                "status": "violation",
+                "torque_scale": 1.05,
+                "first_violation": {"reason": "joint_torque_limit"},
+            },
+        ]
+    )
+    by_name = {row["scenario"]: row for row in summary}
+    assert by_name["forward push small"]["warnings"] == 1
+    assert by_name["forward push small"]["misses"] == 1
+    assert by_name["forward push heavy"]["problems"] == 1
+    assert by_name["forward push heavy"]["falls"] == 1
+    assert by_name["stand 95%"]["warnings"] == 1
+    assert by_name["stand 105%"]["problems"] == 1
+    assert by_name["stand 105%"]["limits"] == 1
 
 
 def test_observation_coordinates_history_and_scaling(setup):
@@ -160,6 +232,94 @@ def test_push_integral_and_clearing(setup, tmp_path):
     assert not sim.data.xfrc_applied.any()
 
 
+def test_leg_arm_and_head_pushes(setup):
+    sim, _, _ = setup
+    suite = suite_config()
+    for body in (
+        "left_hip_yaw_link",
+        "left_knee_link",
+        "left_ankle_roll_link",
+        "right_hip_yaw_link",
+        "right_knee_link",
+        "right_ankle_roll_link",
+        "left_shoulder_roll_link",
+        "left_elbow_link",
+        "left_wrist_yaw_link",
+        "right_shoulder_roll_link",
+        "right_elbow_link",
+        "right_wrist_yaw_link",
+    ):
+        assert body in suite["push_bodies"]
+        sim.model.body(body)
+    spec = suite["push_points"][0]
+    assert spec["name"] == "head"
+    point = mesh_point_in_body(sim.model, spec["body"], spec["mesh"])
+    assert point[2] > 0.3
+    sim.apply_push(
+        {
+            "body": spec["body"],
+            "force": [10, 0, 0],
+            "point": point.tolist(),
+            "start": 0,
+            "duration": 1,
+        },
+        0,
+    )
+    torso = sim.model.body("torso_link").id
+    assert sim.data.xfrc_applied[torso, 0] == 10
+    assert sim.data.xfrc_applied[torso, 4] > 1
+    knee = sim.model.body("left_knee_link").id
+    sim.apply_push(
+        {"body": "left_knee_link", "force": [0, 10, 0], "start": 0, "duration": 1},
+        0,
+    )
+    assert sim.data.xfrc_applied[knee, 1] == 10
+    assert not sim.data.xfrc_applied[torso].any()
+    extended = suite_config(
+        Path(__file__).resolve().parents[1] / "profiles/extended-suite.json"
+    )
+    assert extended["seeds"] == [0, 1, 2]
+    assert "left_ankle_roll_link" in extended["push_bodies"]
+    assert extended["push_points"][0]["name"] == "head"
+
+    def shove_count(target):
+        return sum(
+            target == name
+            for command in suite["commands"]
+            for fraction in suite["checkpoints"]
+            for name, _axis, _sign in scheduled_directions(suite, command, fraction)
+        )
+
+    assert shove_count("pelvis") == 24
+    assert shove_count("head") == 24
+    assert shove_count("left_knee_link") == 4
+    assert shove_count("right_wrist_yaw_link") == 4
+    directions = sum(
+        len(scheduled_directions(suite, command, fraction))
+        for command in suite["commands"]
+        for fraction in suite["checkpoints"]
+    )
+    assert directions == 120
+    assert [level["force_n"] for level in suite["push_levels"]] == [10.0, 50.0, 150.0]
+    assert directions * len(suite["push_levels"]) == 360
+    assert suite["torque_scales"] == [0.95, 1.05]
+
+
+def test_push_point_names_must_differ_from_bodies(tmp_path):
+    path = tmp_path / "suite.json"
+    path.write_text(
+        json.dumps(
+            {
+                "push_points": [
+                    {"name": "pelvis", "body": "torso_link", "mesh": "head_link"}
+                ]
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="push point"):
+        suite_config(path)
+
+
 @pytest.mark.parametrize(
     "pose", ["standing", "seated", "supine", "prone", "left_side", "right_side"]
 )
@@ -210,6 +370,80 @@ def test_oscillating_targets_trigger_rate_limit(setup, tmp_path):
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "rate.npz")
     assert result["first_violation"]["reason"] == "target_rate_limit"
     assert result["first_violation"]["time_seconds"] > sim.dt
+
+
+def test_scenario_summary_separates_limits_and_flailing():
+    summary = summarize_scenarios(
+        [
+            {"kind": "nominal", "name": "stand", "status": "violation",
+             "first_violation": {"reason": "joint_torque_limit"}},
+            {"kind": "continuation", "name": "stand", "status": "completed"},
+            {"kind": "perturbation", "name": "stand", "status": "violation",
+             "first_violation": {"reason": "joint_tracking_error_limit"}},
+            {"kind": "perturbation", "name": "forward", "status": "violation",
+             "first_violation": {"reason": "joint_tracking_error_limit"},
+             "violent_motion": True},
+            {"kind": "perturbation", "name": "stand", "status": "incomplete"},
+            {"kind": "counterfactual", "name": "seated", "status": "violation",
+             "first_violation": {"reason": "fall"}},
+            {"kind": "counterfactual", "name": "prone", "status": "violation",
+             "violations": [
+                 {"reason": "decoded_target_out_of_range"},
+                 {"reason": "joint_tracking_error_limit"},
+             ],
+             "violent_motion": True},
+            {"kind": "counterfactual", "name": "supine", "status": "error",
+             "error": "simulator_warning"},
+        ]
+    )
+    by_name = {row["scenario"]: row for row in summary}
+    assert by_name["stand"]["problems"] == 1
+    assert by_name["stand"]["warnings"] == 0
+    assert by_name["stand"]["total"] == 2
+    assert by_name["stand"]["limits"] == 1
+    assert by_name["stand"]["flailing"] == 0
+    assert by_name["stand push"]["problems"] == 0
+    assert by_name["stand push"]["warnings"] == 1
+    assert by_name["stand push"]["total"] == 2
+    assert by_name["stand push"]["misses"] == 1
+    assert by_name["stand push"]["flailing"] == 0
+    assert by_name["stand push"]["skipped"] == 1
+    assert by_name["forward push"]["problems"] == 1
+    assert by_name["forward push"]["warnings"] == 1
+    assert by_name["forward push"]["flailing"] == 1
+    assert by_name["forward push"]["misses"] == 1
+    assert by_name["forward push"]["limits"] == 0
+    assert by_name["seated"]["falls"] == 1
+    assert by_name["seated"]["problems"] == 1
+    assert by_name["seated"]["warnings"] == 0
+    assert by_name["supine"]["errors"] == 1
+    assert by_name["supine"]["limits"] == 0
+    assert by_name["prone"]["problems"] == 1
+    assert by_name["prone"]["warnings"] == 1
+    assert by_name["prone"]["limits"] == 1
+    assert by_name["prone"]["misses"] == 1
+    assert by_name["prone"]["flailing"] == 1
+
+
+def test_flail_ignores_an_impact_shorter_than_50ms():
+    from policy_safety.evaluation import overspeed_held
+
+    counts = np.zeros(1, dtype=int)
+    for _ in range(24):
+        counts, held = overspeed_held(counts, [True], 25)
+        assert not held
+    counts, held = overspeed_held(counts, [True], 25)
+    assert held
+    counts, held = overspeed_held(counts, [False], 25)
+    assert not held and counts[0] == 0
+
+
+def test_flail_uses_sdk_soft_speed_limits():
+    from policy_safety.evaluation import violent_motion
+
+    assert not violent_motion([9.0], 5.4)
+    assert violent_motion([9.1], 0.0)
+    assert violent_motion([0.0], 5.5)
 
 
 def test_verdicts_and_calibration():
@@ -341,6 +575,22 @@ def test_raw_clipping_is_recorded(setup, tmp_path):
         assert trace["applied_target"].size == 0
     assert result["simulated_seconds"] == 0
     assert result["peaks"]["clipping"] > 0
+    assert result["first_violation"]["reason"] == "decoded_target_out_of_range"
+
+
+def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
+    sim, adapter, profile = setup
+    adapter.session.value = 1000
+    result, _ = run_scenario(
+        sim,
+        adapter,
+        profile,
+        scenario(),
+        tmp_path / "clipped-command.npz",
+        clip_to_stops=True,
+    )
+    assert result["first_violation"]["reason"] == "joint_tracking_error_limit"
+    assert result["status"] == "violation"
 
 
 def test_joint_mismatch_rejected_before_actuation(setup, tmp_path):
@@ -472,7 +722,7 @@ def test_evaluation_enforces_profile_and_reports_coverage(
         assert code == 0
 
 
-def test_missing_checkpoints_remain_incomplete(bundle, tmp_path, monkeypatch):
+def test_nominal_violation_still_runs_its_continuation(bundle, tmp_path, monkeypatch):
     from policy_safety.evaluation import ADAPTERS, evaluate
 
     monkeypatch.setitem(
@@ -491,6 +741,7 @@ def test_missing_checkpoints_remain_incomplete(bundle, tmp_path, monkeypatch):
                 "checkpoints": [0.5],
                 "perturbations": False,
                 "poses": [],
+                "torque_scales": [],
             }
         )
     )
@@ -510,16 +761,18 @@ def test_missing_checkpoints_remain_incomplete(bundle, tmp_path, monkeypatch):
         }
     )
     report = json.loads((output / "report.json").read_text())
-    assert code == 2
+    assert code == 1
     assert report["coverage"] == {
         "planned": 2,
         "reported": 2,
         "completed": 0,
-        "violation": 1,
+        "violation": 2,
         "error": 0,
-        "incomplete": 1,
+        "incomplete": 0,
     }
-    assert report["scenarios"][1]["error"] == "nominal_checkpoint_unavailable"
+    assert report["scenarios"][0]["status"] == "violation"
+    assert report["scenarios"][1]["status"] == "violation"
+    assert report["scenarios"][0]["simulated_seconds"] == pytest.approx(0.08)
 
 
 def test_tensor_shape_mismatch_rejected(setup):
@@ -589,3 +842,11 @@ def test_unclamped_leg_torque_rejected(setup, tmp_path):
     assert result["first_violation"]["reason"] == "joint_torque_limit"
     assert result["first_violation"]["joint"] == "left_hip_pitch"
     assert result["first_violation"]["time_seconds"] == 0
+
+
+def test_mp4_starts_with_ftyp(tmp_path):
+    from policy_safety.render import write_mp4
+
+    frames = [np.full((8, 12, 3), fill, dtype=np.uint8) for fill in (10, 200)]
+    path = write_mp4(tmp_path / "clip.mp4", frames, 20)
+    assert path.read_bytes()[4:8] == b"ftyp"

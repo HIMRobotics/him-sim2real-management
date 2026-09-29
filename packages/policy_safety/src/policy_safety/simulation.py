@@ -120,9 +120,9 @@ class Simulation:
         kp, kd = vector(robot["kp"], 29, "kp"), vector(robot["kd"], 29, "kd")
         if np.any(kp <= 0) or np.any(kd <= 0):
             raise ValueError("gains must be positive")
-        m.actuator_gainprm[self.actuators, 0] = kp
-        m.actuator_biasprm[self.actuators, 1] = -kp
-        m.actuator_biasprm[self.actuators, 2] = -kd
+        self.kp = kp
+        self.kd = kd
+        self.set_torque_scale(1.0)
         self.default = vector(robot["default_joint_positions"], 29, "default positions")
         if np.any(self.default < self.bounds[:, 0]) or np.any(
             self.default > self.bounds[:, 1]
@@ -138,6 +138,16 @@ class Simulation:
         self.state_spec = mujoco.mjtState.mjSTATE_INTEGRATION
         self.rng = np.random.default_rng(0)
         self.command_history = None
+
+    def set_torque_scale(self, scale):
+        """Deliver this fraction of the intended position-controller torque."""
+        if scale <= 0 or not np.isfinite(scale):
+            raise ValueError("torque scale must be finite and positive")
+        kp = self.kp * scale
+        kd = self.kd * scale
+        self.model.actuator_gainprm[self.actuators, 0] = kp
+        self.model.actuator_biasprm[self.actuators, 1] = -kp
+        self.model.actuator_biasprm[self.actuators, 2] = -kd
 
     def reset(self, seed, pose="standing"):
         self.command_history = None
@@ -203,10 +213,44 @@ class Simulation:
     def apply_push(self, push, elapsed):
         self.data.xfrc_applied[:] = 0
         if push and push["start"] <= elapsed < push["start"] + push["duration"] - 1e-12:
-            self.data.xfrc_applied[self.model.body(push["body"]).id, :3] = push["force"]
+            body_id = self.model.body(push["body"]).id
+            force = np.asarray(push["force"], dtype=float)
+            self.data.xfrc_applied[body_id, :3] = force
+            if push.get("point") is not None:
+                rotation = self.data.xmat[body_id].reshape(3, 3)
+                point = self.data.xpos[body_id] + rotation @ np.asarray(
+                    push["point"], dtype=float
+                )
+                self.data.xfrc_applied[body_id, 3:] = np.cross(
+                    point - self.data.xipos[body_id], force
+                )
 
     def observation(self, adapter, command):
         d = self.data
         return adapter.observation(
             d.qpos[self.qadr], d.qvel[self.vadr], d.qpos[3:7], d.qvel[:6], command
         )
+
+
+def mesh_point_in_body(model, body_name, mesh_name):
+    """Return the mesh bounding-box center in the named body's frame."""
+    mesh_id = model.mesh(mesh_name).id
+    address = model.mesh_vertadr[mesh_id]
+    vertices = model.mesh_vert[address : address + model.mesh_vertnum[mesh_id]]
+    center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2
+    body_id = model.body(body_name).id
+    matches = [
+        geom_id
+        for geom_id in range(model.ngeom)
+        if model.geom_bodyid[geom_id] == body_id
+        and model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_MESH
+        and model.geom_dataid[geom_id] == mesh_id
+    ]
+    if not matches:
+        raise ValueError(f"mesh {mesh_name} is not attached to {body_name}")
+    positions = model.geom_pos[matches]
+    if not np.allclose(positions, positions[0]):
+        raise ValueError(f"mesh {mesh_name} has conflicting placements on {body_name}")
+    rotation = np.empty(9)
+    mujoco.mju_quat2Mat(rotation, model.geom_quat[matches[0]])
+    return positions[0] + rotation.reshape(3, 3) @ center

@@ -23,7 +23,13 @@ from .hardware_profile import (
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
 )
-from .joint_checks import check_command, check_torque
+from .joint_checks import (
+    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
+    SPEED_HOLD_S,
+    check_command,
+    check_measured_velocity,
+    check_torque,
+)
 from .joint_diagnostics import JointDeltaDiagnostics
 
 
@@ -53,6 +59,8 @@ class G1ArmAdapter:
         self.balance_released = False
         self.quat = (1.0, 0.0, 0.0, 0.0)
         self.gyro = (0.0, 0.0, 0.0)
+        self._joint_over_since = {}
+        self._base_over_since = None
         self.f3_pressed = False
         self.reported_fsm_id = None
         self.arm_release_written = False
@@ -88,6 +96,8 @@ class G1ArmAdapter:
                 if imu is not None:
                     self.quat = tuple(float(value) for value in imu.quaternion)
                     self.gyro = tuple(float(value) for value in imu.gyroscope)
+                if self.armed and self.abort_reason is None:
+                    self._abort_if_motion_exceeds_limits()
                 with self.stop_lock:
                     self.pose_snapshot = tuple(
                         sample.q[index] for index in UPPER_BODY_INDICES
@@ -177,7 +187,7 @@ class G1ArmAdapter:
                 )
             if self.feedback.start_button_pressed or self.f3_pressed:
                 return self.reject_arm("Start and F3 must be released")
-            for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
+            for index, limits in self._monitored_joints():
                 joint_name = G1_29_JOINT_NAMES[index]
                 position = self.feedback.q[index]
                 velocity = self.feedback.dq[index]
@@ -299,10 +309,10 @@ class G1ArmAdapter:
                     self.first_output_secs = now
                 self.last_output_secs = now
                 self.previous_targets = {
-                    index: target["q"] for index, target in targets.items()
+                    index: values[0] for index, values in self._accepted_commands.items()
                 }
                 self.previous_velocities = {
-                    index: target["dq"] for index, target in targets.items()
+                    index: values[1] for index, values in self._accepted_commands.items()
                 }
             except Exception as error:  # noqa: BLE001
                 self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
@@ -316,11 +326,54 @@ class G1ArmAdapter:
         finally:
             self.lock.release()
 
+    def _abort_if_motion_exceeds_limits(self):
+        """Stop if a joint or the body stays over the speed line for 50 ms."""
+        now = self.feedback.received_at_secs
+        for index, limits in self._monitored_joints():
+            speed = self.feedback.dq[index]
+            if not math.isfinite(speed):
+                self.abort(f"{G1_29_JOINT_NAMES[index]}: joint_velocity_limit nonfinite")
+                return
+            if abs(speed) > limits.max_velocity_rad_secs:
+                started = self._joint_over_since.setdefault(index, now)
+                if now - started >= SPEED_HOLD_S:
+                    try:
+                        check_measured_velocity(
+                            G1_29_JOINT_NAMES[index], limits, speed
+                        )
+                    except ValueError as error:
+                        self.abort(str(error))
+                        return
+            else:
+                self._joint_over_since.pop(index, None)
+        rate = math.sqrt(sum(value * value for value in self.gyro))
+        if not math.isfinite(rate):
+            self.abort("base_angular_speed_limit nonfinite")
+            return
+        if rate > BASE_ANGULAR_SPEED_LIMIT_RAD_S:
+            if self._base_over_since is None:
+                self._base_over_since = now
+            elif now - self._base_over_since >= SPEED_HOLD_S:
+                self.abort(
+                    "base_angular_speed_limit "
+                    f"value={rate:.6g} limit={BASE_ANGULAR_SPEED_LIMIT_RAD_S} rad/s"
+                )
+        else:
+            self._base_over_since = None
+
+    def _monitored_joints(self):
+        """Legs use the same command rules as the waist and arms."""
+        return (
+            *zip(range(len(self.profile.legs)), self.profile.legs),
+            *zip(UPPER_BODY_INDICES, self.profile.joints),
+        )
+
     def checked_targets(self, now):
         """Use configured gains, zero feedforward torque and bounded position/velocity."""
         targets = {}
+        accepted = {}
         dt = 0 if self.last_output_secs is None else now - self.last_output_secs
-        for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
+        for index, limits in self._monitored_joints():
             q = self.command["q"][index]
             dq = self.command["dq"][index]
             tau = self.command["tau"][index]
@@ -335,13 +388,16 @@ class G1ArmAdapter:
                          + limits.kd * (dq - self.feedback.dq[index]) + tau)
             if previous is None:
                 q, dq = measured, 0.0
-            targets[index] = {
-                "q": q,
-                "dq": dq,
-                "kp": limits.kp,
-                "kd": limits.kd,
-                "tau": 0.0,
-            }
+            accepted[index] = (q, dq)
+            if index in UPPER_BODY_INDICES:
+                targets[index] = {
+                    "q": q,
+                    "dq": dq,
+                    "kp": limits.kp,
+                    "kd": limits.kd,
+                    "tau": 0.0,
+                }
+        self._accepted_commands = accepted
         return targets
 
     def stop_once(self):

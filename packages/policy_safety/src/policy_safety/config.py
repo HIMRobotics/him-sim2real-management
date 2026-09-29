@@ -27,10 +27,62 @@ DEFAULT_SUITE = {
     "push_bodies": [
         "pelvis",
         "torso_link",
+        "left_hip_yaw_link",
+        "left_knee_link",
+        "left_ankle_roll_link",
+        "right_hip_yaw_link",
+        "right_knee_link",
+        "right_ankle_roll_link",
+        "left_shoulder_roll_link",
+        "left_elbow_link",
+        "left_wrist_yaw_link",
+        "right_shoulder_roll_link",
+        "right_elbow_link",
+        "right_wrist_yaw_link",
     ],
-    "push_force_n": 10.0,
+    # The head mesh is fixed to the torso, so this push is applied at the mesh.
+    "push_points": [
+        {"name": "head", "body": "torso_link", "mesh": "head_link"},
+    ],
+    # Trunk targets are shoved in every gait. Limb segments are shoved only while walking forward.
+    "push_schedule": [
+        {
+            "names": ["pelvis", "torso_link", "head"],
+            "commands": ["stand", "forward", "left", "right", "turn_left", "turn_right"],
+            "checkpoints": [0.5],
+            "axes": [0, 1],
+            "signs": [-1, 1],
+        },
+        {
+            "names": [
+                "left_hip_yaw_link",
+                "left_knee_link",
+                "left_ankle_roll_link",
+                "right_hip_yaw_link",
+                "right_knee_link",
+                "right_ankle_roll_link",
+                "left_shoulder_roll_link",
+                "left_elbow_link",
+                "left_wrist_yaw_link",
+                "right_shoulder_roll_link",
+                "right_elbow_link",
+                "right_wrist_yaw_link",
+            ],
+            "commands": ["forward"],
+            "checkpoints": [0.5],
+            "axes": [0, 1],
+            "signs": [-1, 1],
+        },
+    ],
+    "push_levels": [
+        {"name": "small", "force_n": 10.0},
+        {"name": "medium", "force_n": 50.0},
+        {"name": "heavy", "force_n": 150.0},
+    ],
     "push_seconds": 0.1,
     "push_start_seconds": 1.0,
+    # Nominal gaits only. 0.95 is a weak motor. 1.05 is a high gain.
+    "torque_scales": [0.95, 1.05],
     "poses": ["standing", "seated", "supine", "prone", "left_side", "right_side"],
 }
 METRICS = {
@@ -89,10 +141,11 @@ def _validate_timing(suite):
         "nominal_seconds",
         "branch_seconds",
         "counterfactual_seconds",
-        "push_force_n",
         "push_seconds",
     ):
         positive(suite[name], name)
+    _validate_push_levels(suite)
+    _validate_torque_scales(suite)
     positive(suite["push_start_seconds"], "push_start_seconds", zero=True)
     if (
         suite["perturbations"]
@@ -118,8 +171,107 @@ def _validate_scenarios(suite):
         raise ValueError("duplicate checkpoints")
     if set(suite["poses"]) - set(DEFAULT_SUITE["poses"]):
         raise ValueError("unknown counterfactual pose")
-    if suite["perturbations"] and not suite["push_bodies"]:
+    bodies = suite["push_bodies"]
+    if suite["perturbations"] and not bodies and not suite["push_points"]:
         raise ValueError("push bodies cannot be empty")
+    if any(type(body) is not str or not body for body in bodies):
+        raise ValueError("push bodies must be nonempty strings")
+    if len(set(bodies)) != len(bodies):
+        raise ValueError("duplicate push bodies")
+    points = suite["push_points"]
+    if type(points) is not list:
+        raise ValueError("push points must be a list")
+    names = []
+    for point in points:
+        if set(point) != {"name", "body", "mesh"} or any(
+            type(point[key]) is not str or not point[key] for key in point
+        ):
+            raise ValueError("push point requires name, body, and mesh")
+        names.append(point["name"])
+    if len(set(names)) != len(names) or set(names) & set(bodies):
+        raise ValueError("push point names must be unique and distinct from bodies")
+    _validate_push_schedule(suite, set(bodies) | set(names))
+
+
+def _validate_push_levels(suite):
+    """Require a unique positive force for every named shove strength."""
+    levels = suite["push_levels"]
+    if type(levels) is not list or not levels:
+        raise ValueError("push levels must be a nonempty list")
+    names = []
+    for level in levels:
+        if set(level) != {"name", "force_n"}:
+            raise ValueError("push level requires name and force_n")
+        if type(level["name"]) is not str or not level["name"]:
+            raise ValueError("push level name must be a nonempty string")
+        positive(level["force_n"], "push force")
+        names.append(level["name"])
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate push levels")
+
+
+def _validate_torque_scales(suite):
+    """Nominal reruns use a positive gain other than the normal motor."""
+    scales = suite["torque_scales"]
+    if type(scales) is not list:
+        raise ValueError("torque scales must be a list")
+    for scale in scales:
+        positive(scale, "torque scale")
+        if scale == 1:
+            raise ValueError("torque scale of 1 duplicates the nominal run")
+    if len(set(scales)) != len(scales):
+        raise ValueError("duplicate torque scales")
+
+
+def _validate_push_schedule(suite, selected):
+    """Require an explicit, non-overlapping shove plan for every selected target."""
+    groups = suite["push_schedule"]
+    if type(groups) is not list or not groups:
+        raise ValueError("push schedule must list at least one group")
+    fields = {"names", "commands", "checkpoints", "axes", "signs"}
+    seen = []
+    for group in groups:
+        if set(group) != fields:
+            raise ValueError(
+                "push schedule group requires names, commands, checkpoints, axes, and signs"
+            )
+        if any(type(name) is not str or not name for name in group["names"]):
+            raise ValueError("push schedule names must be nonempty strings")
+        if any(type(command) is not str or not command for command in group["commands"]):
+            raise ValueError("push schedule commands must be nonempty strings")
+        if any(fraction not in suite["checkpoints"] for fraction in group["checkpoints"]):
+            if suite["perturbations"]:
+                raise ValueError("push schedule checkpoints must be suite checkpoints")
+        if any(axis not in (0, 1) for axis in group["axes"]) or any(
+            sign not in (-1, 1) for sign in group["signs"]
+        ):
+            raise ValueError("push directions must use axes 0 or 1 and signs -1 or 1")
+        for key in ("names", "commands", "checkpoints", "axes", "signs"):
+            if len(set(group[key])) != len(group[key]) or not group[key]:
+                raise ValueError(f"push schedule {key} must be unique and nonempty")
+        seen.extend(group["names"])
+    if len(set(seen)) != len(seen):
+        raise ValueError("push schedule names must be unique")
+    if suite["perturbations"] and selected - set(seen):
+        raise ValueError("every push target needs a schedule group")
+
+
+def scheduled_directions(suite, command_name, fraction):
+    """Return (target, axis, sign) shoves for one command at one checkpoint."""
+    if not suite["perturbations"]:
+        return []
+    selected = set(suite["push_bodies"]) | {point["name"] for point in suite["push_points"]}
+    directions = []
+    for group in suite["push_schedule"]:
+        if command_name not in group["commands"] or fraction not in group["checkpoints"]:
+            continue
+        for name in group["names"]:
+            if name not in selected:
+                continue
+            for axis in group["axes"]:
+                for sign in group["signs"]:
+                    directions.append((name, axis, sign))
+    return directions
 
 
 def profile_config(path):

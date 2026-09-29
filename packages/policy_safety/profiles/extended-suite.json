@@ -1,11 +1,5 @@
 {
   "seeds": [0, 1, 2],
   "nominal_seconds": 20.0,
-  "branch_seconds": 5.0,
-  "push_bodies": [
-    "pelvis",
-    "torso_link",
-    "left_shoulder_roll_link",
-    "right_shoulder_roll_link"
-  ]
+  "branch_seconds": 5.0
 }

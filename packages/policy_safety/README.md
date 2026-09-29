@@ -3,7 +3,9 @@
 This package runs explicitly adapted ONNX neural policies in MuJoCo. It produces
 preflight evidence for operator review. A result is specific to the model,
 adapter, robot model, controller settings, limits, and scenarios tested. It does
-not certify hardware safety or authorize a robot launch.
+not certify hardware safety or authorize a robot launch. This guide covers the
+simulation setup, shared movement checks, scenario battery, and report workflow.
+Recorded test results and sample observations are in [VALIDATION.md](VALIDATION.md).
 
 ## Install and run
 
@@ -93,8 +95,10 @@ position actuator gains and 20 ms control / 2 ms physics timing.
 
 This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not
-describe the complete stairs submission. Decoded targets outside actuator ranges
-are violations even though the simulator clips applied targets.
+describe the complete stairs submission. By default, decoded targets outside
+actuator ranges are violations even though the simulator clips applied targets.
+With `--clip-to-stops`, command, tracking, and torque checks use the clipped target
+instead. Reports record this option and retain the raw target and clipping amount.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
 tensor dimensions is insufficient. Implement `PolicyAdapter`, register the adapter
@@ -109,19 +113,37 @@ specific to the G1 walker contract and position actuators.
 The default medium suite uses one seed (0). Six independent commands cover standing,
 forward walking, lateral walking in both directions, and turning both ways.
 Ten-second nominal runs yield checkpoints at 25%, 50%, and 75%. Each checkpoint
-has a three-second unperturbed continuation and eight pushed continuations: pelvis
-and torso, two horizontal axes, both signs. Pushes are 10 N for 100 ms, starting
-one second into a branch. Six five-second counterfactuals cover standing, floor
-sitting, supine, prone, and both sides. This is **174 scenarios**, totaling at most
-**9.6 simulated minutes**: six nominal runs, 18 unperturbed continuations, 144
-perturbations, and six counterfactuals. Wall-clock time depends on the device.
+has a three-second unperturbed continuation. Pushes happen only at the halfway
+checkpoint. Each shove lasts 100 ms and starts one second into that branch,
+along both horizontal axes and both signs, at three strengths: 10 N, 50 N, and
+150 N. There are 15 sites: pelvis, torso, head, and each hip yaw, knee, ankle,
+shoulder, elbow, and wrist on both sides. The three trunk sites are pushed during
+all six commands, 24 times per site at each strength. The 12 limb sites are pushed
+only during forward walking, 4 times per site at each strength. This gives
+120 direction slots and 360 pushes.
+
+| Level | Force | Approximate free-body velocity change for 33 kg over 100 ms |
+| --- | ---: | ---: |
+| Small | 10 N | 0.03 m/s |
+| Medium | 50 N | 0.15 m/s |
+| Heavy | 150 N | 0.45 m/s |
+
+The head mesh is fixed on the torso, so that push is applied at the head mesh
+center. The same six gaits are repeated with the motor torque at 95% and at
+105% of the intended position-controller torque. 95% is a weak motor. 105% is a
+high gain, not wear. These 12 nominal reruns start from the default standing pose
+and receive no pushes. Six five-second counterfactuals cover standing, floor
+sitting, supine, prone, and both sides. This is **402 scenarios**, totaling at
+most **22.4 simulated minutes**: six nominal runs, 18 unperturbed continuations,
+360 perturbations, 12 torque-scaled nominals, and six counterfactuals.
+Wall-clock time depends on the device.
 
 Pushes are deterministic, not random. The seed controls the small initial base
-position offset. The medium suite omits arm pushes and additional seeds to reduce
-runtime. To restore the original 954-scenario suite, pass
-`--suite packages/policy_safety/profiles/extended-suite.json` from the repository
-root. That suite represents up to 84 simulated minutes and may require a larger
-`--timeout`. The JSON file can also be copied outside the repository.
+position offset. The medium suite uses one seed. For three seeds and longer
+runs, pass `--suite packages/policy_safety/profiles/extended-suite.json` from
+the repository root. That suite has the same push plan, **1206 scenarios**, and
+up to **114 simulated minutes**. It may require a larger `--timeout`. The JSON
+file can also be copied outside the repository.
 
 Counterfactuals use zero commands and reset policy history. Only standing starts
 use upright fall criteria. Floor-contact poses must initialize within the 5 mm
@@ -142,7 +164,8 @@ test retaining every scenario family:
   "branch_seconds": 0.2,
   "counterfactual_seconds": 0.2,
   "checkpoints": [0.25, 0.5, 0.75],
-  "push_bodies": ["pelvis", "torso_link", "left_shoulder_roll_link", "right_shoulder_roll_link"],
+  "push_bodies": ["pelvis", "torso_link", "left_knee_link", "left_shoulder_roll_link"],
+  "push_points": [{"name": "head", "body": "torso_link", "mesh": "head_link"}],
   "push_start_seconds": 0.02,
   "push_seconds": 0.02
 }
@@ -160,13 +183,38 @@ excessive commanded velocity, excessive changes in position and velocity targets
 nonzero feedforward torque, and target-to-measured tracking error. On the first
 command they also enforce 0.03 rad position mismatch and 0.05 rad/s desired speed.
 
+### Shared speed checks
+
+Every joint's commanded and measured speed cap is **9 rad/s** in the standard
+profile. The measured body angular-speed cap is **5.4 rad/s**. Measured overspeed
+must persist for **50 ms** to trigger a violation, allowing shorter impact spikes.
+Command-speed and target-change checks apply immediately.
+
+The per-joint `max_velocity_rad_secs` fields live in
+[`robot_safety/profiles/g1_type5.template.json`](../../robot_safety/profiles/g1_type5.template.json)
+and its [packaged copy](src/policy_safety/profiles/g1_type5.template.json).
+[`robot_safety/joint_checks.py`](../../robot_safety/joint_checks.py) defines
+`JOINT_SPEED_LIMIT_RAD_S = 9.0`, `BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4`, and
+`SPEED_HOLD_S = 0.05`. Both measured-speed monitors use the loaded joint profile
+and the shared body-speed and hold-time constants.
+
+These thresholds are below the Unitree runtime defaults of 10 rad/s joint speed
+and 6 rad/s body spin, documented with sources in the
+[profile guide](../../robot_safety/profiles/README.md#upstream-safety-checks-reviewed-september-28-2026).
+The hold time means they do not guarantee a stop before a rapid spike crosses
+Unitree's thresholds. The URDF motor ratings of 20–37 rad/s remain in
+`g1_type5.official_limits.json`. Position stops retain the official URDF ranges.
+The live `g1-safety-stops` service must restart to load changed limits, as described
+in the [watchdog guide](../../robot_safety/README.md#background-safety-watchdog).
+
+### Command, tracking, and torque checks
+
 | Joint group | Target speed (rad/s) | Target velocity change per second (rad/s²) | Tracking error (rad) |
 | --- | ---: | ---: | ---: |
-| Waist yaw | 32 | 0.5 | 0.05 |
-| Waist roll/pitch | 30 | 0.5 | 0.05 |
-| Shoulders/elbows | 37 | 1 | 0.30 |
-| Wrist roll | 37 | 1 | 0.05 |
-| Wrist pitch/yaw | 22 | 1 | 0.05 |
+| Legs | 9 | 1 | 0.146667 to 0.231667 |
+| Shoulders/elbows | 9 | 1 | 0.30 |
+| Waist | 9 | 0.5 | 0.05 |
+| Wrists | 9 | 1 | 0.05 |
 
 Position-target deltas must satisfy `abs(q_target - previous_q_target) <= speed_limit * control_dt`.
 Velocity-target deltas must satisfy `abs(dq_target - previous_dq_target) <= acceleration_limit * control_dt`.
@@ -199,7 +247,8 @@ These limits screen submitted policies. Hardware F3 soft-reset GR00T balancing
 does not apply them. The hardware gate remains restricted to arm/waist submissions.
 Missing joint entries are errors, including older 17-joint custom profiles.
 
-Leg position, target velocity and torque bounds use the Unitree model values.
+Leg position and torque bounds use the Unitree model values. Target velocity
+uses the standard profile's 9 rad/s cap.
 Local commanded-velocity-change limits are 1 rad/s² for all legs. Tracking
 allowances are 0.146667 rad for hip pitch/yaw, 0.231667 rad for hip roll,
 0.173750 rad for knees and 0.218750 rad for ankles. They derive from
@@ -220,9 +269,9 @@ To select the current repository template explicitly, add:
 --joint-profile robot_safety/profiles/g1_type5.template.json
 ```
 
-Global measured velocity/acceleration, base-speed and contact-force maxima still
-require separate thresholds. Scalar metrics use rad/s, rad/s², rad, m/s, rad/s,
-N, and Nm as appropriate. Contact force is the largest contact force-vector
+Additional global metric maxima remain separately configurable, including
+measured acceleration, base linear speed, and contact force. Scalar metrics use
+rad/s, rad/s², rad, m/s, N, and Nm as appropriate. Contact force is the largest contact force-vector
 magnitude at that physics step, including self-contact.
 
 Supply `--profile FILE.json` to set `maxima` and reviewed fall/position limits.
@@ -240,6 +289,39 @@ All required model weights and the robot asset manifest are fingerprinted.
 `joint_movement_checks` records the selected joint-profile values, rules and joint
 coverage. `hashes.joint_profile` identifies its exact contents. Joint-rule
 violations include the joint, observed value, threshold, units and simulation time.
+`scenario_summary` counts problems and warnings out of the scenarios in each
+gait, each gait's pushes, and each starting pose. One run counts in every class
+it hits, so the fractions can overlap. A tracking miss is a `warning` and a
+`miss`. A limit, a flail, a fall, any other violation, or an error is a
+`problem`. `flailing` is a joint faster than 9 rad/s, or the body spinning faster
+than 5.4 rad/s, held for at least 50 ms. A shorter impact, such as a foot flick
+after a shove, does not count. Position, speed, torque, and range breaches are `limits`.
+A skipped branch is counted on its own and is neither a problem nor a warning.
+The warning label describes the summary category. A tracking miss remains a
+recorded violation and still affects the exit status.
+
+Videos are separate from the screening report. `render` replays the same
+checker for the names you list and writes one H.264 `.mp4` plus a
+three-frame `.png` preview. It needs `ffmpeg`, a display-less EGL context
+(`MUJOCO_GL=egl`, which the command sets when unset), and Pillow
+(`uv pip install --python .venv-policy-safety/bin/python 'pillow>=10'`).
+The output defaults to the repository's `tmp/vids` directory and is reused if
+it already exists, unlike evaluation output directories.
+A nominal keeps moving after its first violation, so the clip shows the
+motion the checker flagged. `forward-pelvis-push` is the 10 N mid-walk shove.
+Add `-medium` or `-heavy` for 50 N and 150 N. `stand-95` and `stand-105` are
+the weak-motor and high-gain standing runs. Pass command names (`stand`,
+`forward`, `left`, `right`, `turn_left`, `turn_right`) and pose names
+(`standing`, `seated`, `supine`, `prone`, `left_side`, `right_side`).
+
+```bash
+policy-safety render \
+  --model /tmp/g1-screening-bundle/walker.onnx \
+  --adapter g1-walker-99-v1 \
+  --robot-config /tmp/g1-screening-bundle/robot.json \
+  --output tmp/vids \
+  --scenarios stand,forward,forward-pelvis-push-small,forward-pelvis-push-medium,forward-pelvis-push-heavy,stand-95,stand-105,seated
+```
 
 NPZ files use plain numerical arrays and strings, loadable with
 `numpy.load(path, allow_pickle=False)`. They contain initial and per-step MuJoCo
@@ -267,9 +349,12 @@ Exact replay across different dependency versions or devices is not promised.
 | 3 | Completed without violations, using an uncalibrated profile |
 
 Incomplete coverage takes precedence over violations in the exit status. Both
-remain visible in the report. A nominal failure marks unavailable checkpoint
-branches incomplete. An episode that reaches a violation counts as tested and
-terminates early. A worker failure preserves already written scenario results.
+remain visible in the report. A nominal run records its first violation and
+keeps simulating through its checkpoints, so violations do not prevent later
+continuations and pushes. Evaluation branches stop at their own first violation.
+If an execution error prevents a nominal checkpoint, its dependent branches are
+reported as errors with `nominal_checkpoint_unavailable`.
+A worker failure preserves already written scenario results.
 `--timeout` limits worker wall time, defaulting to 1800 seconds.
 The terminal displays an updating progress bar every second, including elapsed
 wall time, reported/total scenarios, violations (`v`), errors (`err`), skipped
@@ -292,11 +377,13 @@ establish whether the policy is physically safe.
 Zero violations only means no *enforced* checks failed in the scenarios reported
 so far. The provisional global profile has no scalar thresholds for measured joint
 velocity/acceleration, target rate, tracking error, base speeds, or contact force.
-The separate joint profile nevertheless enforces command deltas and tracking for
-its covered joints. `acceptance_checks` lists global gaps and
+The separate joint profile nevertheless enforces command deltas, tracking, and
+sustained measured joint speed for its covered joints. The shared body-speed
+check also applies. `acceptance_checks` lists global gaps and
 `joint_movement_checks` lists per-joint coverage. The evaluator checks unsaturated PD torque demand as well as the resulting
-applied torque. The independent decoded-target check prevents target clipping from
-hiding out-of-range requests. Counterfactuals run after the nominal and branch
+applied torque. By default, the independent decoded-target check prevents clipping
+from hiding out-of-range requests. `--clip-to-stops` explicitly changes that
+behavior. Counterfactuals run after the nominal and branch
 tests for each seed, so they may not yet be represented in intermediate counts.
 
 The repository wrapper makes the report and exit code available to deployment

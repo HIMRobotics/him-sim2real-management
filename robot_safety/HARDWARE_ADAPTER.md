@@ -48,9 +48,16 @@ requests and arm traffic is still unverified.
 
 The SDK callback checks `mode_machine=5`, copies fresh measured state and detects
 Start double presses directly, in addition to the existing ROS controller-stop
-node. Arm requires a fresh, stationary upper-body pose, Start released, and a
+node. Arm requires fresh feedback with all 29 joints within their position and
+initial-speed bounds, Start and F3 released, and a
 stock FSM included in the explicit profile. It never requests standing, releases
 the stock motion service, changes calibration, or automatically rearms.
+
+While armed, command validation and diagnostics cover all 29 joints, including
+leg tracking, command changes, and estimated torque. The feedback callback also
+checks sustained measured joint speed and body spin using the
+[shared speed checks](../packages/policy_safety/README.md#shared-speed-checks).
+These checks do not add leg motor output to the arm SDK adapter.
 
 ## Required hardware profile
 

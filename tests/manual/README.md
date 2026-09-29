@@ -32,8 +32,9 @@ shutdown during a T-pose stop.
 
 Run all commands on the robot host from this repository. The defaults are SDK
 interface `eth0`, SDK domain 0 and ROS localhost domain 97. The service currently
-uses [the lenient profile](../../robot_safety/profiles/g1_type5.lenient.json),
-not [the stricter template](../../robot_safety/profiles/g1_type5.template.json).
+uses [the standard template](../../robot_safety/profiles/g1_type5.template.json).
+`HIM_SAFETY_PROFILE` can explicitly select another profile, including
+[the lenient profile](../../robot_safety/profiles/g1_type5.lenient.json).
 Review the selected [profile and limits](../../robot_safety/profiles/README.md)
 before hardware testing. F3 also requires the balance ONNX model and its runtime.
 

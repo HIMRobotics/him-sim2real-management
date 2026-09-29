@@ -449,6 +449,39 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIsNotNone(self.adapter.abort_reason)
         self.assertEqual(self.transport.writes, [])
 
+    def test_leg_command_tracking_and_torque_are_rejected(self):
+        self.run_first()
+        self.now += 0.005
+        self.command["q"][3] = 0.2
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        reason = self.adapter.abort_reason
+        self.assertIn("left_knee: joint_tracking_error_limit", reason)
+        self.assertIn("limit=0.1", reason)
+        self.assertEqual(len(self.transport.writes), 1)
+        self.assertNotIn(3, self.transport.writes[-1][0])
+
+    def test_leg_velocity_change_is_rejected(self):
+        self.run_first()
+        self.now += 0.005
+        self.command["dq"][3] = 0.05
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIn(
+            "left_knee: joint_velocity_target_change_limit",
+            self.adapter.abort_reason,
+        )
+        self.assertEqual(len(self.transport.writes), 1)
+
+    def test_leg_torque_is_rejected(self):
+        legs = list(self.adapter.profile.legs)
+        legs[3] = replace(legs[3], max_torque_nm=0.001)
+        self.adapter.profile = replace(self.adapter.profile, legs=tuple(legs))
+        self.command["q"][3] = 0.004
+        self.run_first()
+        self.assertIn("left_knee: joint_torque_limit", self.adapter.abort_reason)
+        self.assertEqual(self.transport.writes, [])
+
     def test_tracking_limits_and_velocity_discontinuities_are_rejected(self):
         self.run_first()
         self.now += 0.005
@@ -573,6 +606,45 @@ class HardwareAdapterTests(unittest.TestCase):
                 data = profile_data()
                 data[field] = value
                 load_profile(data)
+
+    def _state(self, motors, gyro=None):
+        message = SimpleNamespace(
+            motor_state=motors, mode_machine=5, wireless_remote=[0] * 40
+        )
+        if gyro is not None:
+            message.imu_state = SimpleNamespace(
+                quaternion=(1.0, 0.0, 0.0, 0.0), gyroscope=gyro
+            )
+        self.adapter.receive_state(message)
+
+    def test_measured_speed_and_body_spin_abort(self):
+        self.run_first()
+        motors = [SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)]
+        motors[3].dq = 0.2
+        self._state(motors)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.now += 0.049
+        self._state(motors)
+        self.assertIsNone(self.adapter.abort_reason)
+        motors[3].dq = 0.0
+        self._state(motors)
+        motors[3].dq = 0.2
+        self.now += 0.01
+        self._state(motors)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.now += 0.05
+        self._state(motors)
+        self.assertIn("left_knee", self.adapter.abort_reason)
+        self.assertIn("joint_velocity_limit", self.adapter.abort_reason)
+
+        self.adapter.abort_reason = None
+        motors[3].dq = 0.0
+        self._state(motors)
+        self._state(motors, gyro=(6.1, 0.0, 0.0))
+        self.assertIsNone(self.adapter.abort_reason)
+        self.now += 0.05
+        self._state(motors, gyro=(6.1, 0.0, 0.0))
+        self.assertIn("base_angular_speed_limit", self.adapter.abort_reason)
 
 
 class TransportEncodingTests(unittest.TestCase):

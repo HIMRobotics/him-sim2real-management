@@ -188,3 +188,16 @@ def test_leg_position_delta(rules):
         ) as failure:
             rules.check_command(q, dq, tau, measured, previous, 0.001)
         assert failure.value.details["joint"] == name
+
+
+def test_measured_speed_above_joint_cap_is_rejected(rules):
+    for i, name, limits in rules.entries:
+        assert limits.max_velocity_rad_secs == 9.0
+        speed = np.zeros(29)
+        speed[i] = 9.0
+        rules.check_measured_velocity(speed)
+        speed[i] = 9.0 + 1e-6
+        with pytest.raises(PolicyViolation, match="joint_velocity_limit") as failure:
+            rules.check_measured_velocity(speed)
+        assert failure.value.details["joint"] == name
+        assert failure.value.details["limit"] == 9.0

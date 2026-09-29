@@ -4,8 +4,8 @@ set -eo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 install_base="${HIM_SAFETY_ROS_INSTALL:-$HOME/.him-safety/ros-install}"
-profile="${HIM_SAFETY_PROFILE:-$repo_dir/robot_safety/profiles/g1_type5.lenient.json}"
-# Undo the lenient profile: HIM_SAFETY_PROFILE=$repo_dir/robot_safety/profiles/g1_type5.template.json
+profile="${HIM_SAFETY_PROFILE:-$repo_dir/robot_safety/profiles/g1_type5.template.json}"
+# Looser manual tests: HIM_SAFETY_PROFILE=$repo_dir/robot_safety/profiles/g1_type5.lenient.json
 
 cd "$repo_dir"
 source /opt/ros/foxy/setup.bash

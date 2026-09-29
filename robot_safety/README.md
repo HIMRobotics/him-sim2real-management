@@ -1,7 +1,8 @@
 # ROS 2 safety pipeline — dry-run checkpoint
 
 Offline preflight screening is available through the [portable policy checker](../packages/policy_safety/README.md)
-and `python tools/check_policy_safety.py evaluate ...`. Its JSON reports and exit
+and `python tools/check_policy_safety.py evaluate ...`. That guide covers the
+shared speed checks, simulation battery, and report interpretation. JSON reports and exit
 codes support operator review alongside this live safety pipeline. It does not
 arm the gate, publish motor commands, or change watchdog services. Its whole-body
 simulation results do not expand the hardware adapter's arm/waist command scope.
@@ -54,10 +55,11 @@ Controller release/restore and damping still require SDK RPC replies.
 To deploy this startup change, run `./install_safety_stops.sh install` with the
 robot supported and foreground hardware tests closed. This updates the unit and
 restarts the service, temporarily interrupting monitoring. Merely editing the
-source does not update an already running process.
+source does not update an already running process. Profile and speed-limit
+changes likewise require a service restart before they take effect.
 
 The launcher uses ROS localhost domain 97, SDK domain 0, interface `eth0` and
-[g1_type5.lenient.json](profiles/g1_type5.lenient.json) by default. It requires
+[g1_type5.template.json](profiles/g1_type5.template.json) by default. It requires
 ROS 2 Foxy, colcon, the system Python's Unitree SDK/native libraries and balance
 runtime, and `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx` in this
 clone. Installation does not provision those dependencies. Service environment

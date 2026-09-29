@@ -5,6 +5,11 @@ import platform
 from pathlib import Path
 
 import joint_checks
+from joint_checks import (
+    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
+    JOINT_SPEED_LIMIT_RAD_S,
+    SPEED_HOLD_S,
+)
 import mujoco
 import numpy as np
 import onnxruntime
@@ -12,9 +17,13 @@ import onnxruntime
 from . import __version__
 from .adapter import ADAPTERS, PolicyViolation
 from .bundle import digest, model_files
-from .config import METRICS, profile_config, suite_config
+from .config import METRICS, profile_config, scheduled_directions, suite_config
 from .joint_rules import DEFAULT_JOINT_PROFILE, JointRules
-from .simulation import Simulation
+from .simulation import Simulation, mesh_point_in_body
+
+
+def raise_violation(reason, details=None):
+    raise PolicyViolation(reason, details)
 
 
 def write_report(path, report):
@@ -33,11 +42,135 @@ def verdict(scenarios, calibrated):
     return ("within_limits", 0) if calibrated else ("uncalibrated", 3)
 
 
+MISS_REASONS = {"joint_tracking_error_limit"}
+FALL_REASONS = {"fall"}
+# Earlier than Unitree's 10 rad/s joint and 6 rad/s body passive-mode limits.
+LIMIT_REASONS = {
+    "joint_target_position_limit",
+    "joint_target_velocity_limit",
+    "joint_position_target_change_limit",
+    "joint_velocity_target_change_limit",
+    "initial_joint_position_mismatch",
+    "initial_joint_target_velocity_limit",
+    "nonzero_feedforward_torque",
+    "joint_torque_limit",
+    "decoded_target_out_of_range",
+    "joint_position_limit",
+    "model_torque_limit",
+}
+
+
+def scenario_label(scenario):
+    """Group a run with its gait, shove strength, torque scale, or pose."""
+    name = scenario["name"]
+    scale = scenario.get("torque_scale")
+    if scale not in (None, 1, 1.0):
+        name = f"{name} {round(scale * 100)}%"
+    if scenario["kind"] == "counterfactual":
+        return name
+    if scenario["kind"] == "perturbation":
+        level = (scenario.get("push") or {}).get("level")
+        if level:
+            return f"{name} push {level}"
+        return f"{name} push"
+    return name
+
+
+
+
+def violent_motion(peak_joint_speed, peak_base_angular_speed):
+    """A sample is past the flail line: 9 rad/s at a joint, or 5.4 rad/s of body spin."""
+    return bool(
+        np.any(np.asarray(peak_joint_speed) > JOINT_SPEED_LIMIT_RAD_S)
+        or peak_base_angular_speed > BASE_ANGULAR_SPEED_LIMIT_RAD_S
+    )
+
+
+def overspeed_held(counts, active, hold_steps):
+    """Count consecutive samples over the line. A short impact resets the count."""
+    counts = np.where(np.asarray(active, dtype=bool), np.asarray(counts) + 1, 0)
+    return counts, bool(np.any(counts >= hold_steps))
+
+
+PROBLEM_FLAGS = ("limits", "flailing", "falls", "other", "errors")
+WARNING_FLAGS = ("misses",)
+
+
+def issue_flags(scenario):
+    """Every class this run hit. A limit and a miss can both be present."""
+    status = scenario["status"]
+    if status == "incomplete":
+        return {"skipped"}
+    flags = set()
+    if status == "error":
+        flags.add("errors")
+    if scenario.get("violent_motion"):
+        flags.add("flailing")
+    recorded = scenario.get("violations") or []
+    reasons = [item.get("reason", "") for item in recorded]
+    if not reasons:
+        reason = (scenario.get("first_violation") or {}).get("reason", "")
+        if reason:
+            reasons = [reason]
+    for reason in reasons:
+        if reason in MISS_REASONS:
+            flags.add("misses")
+        elif reason in FALL_REASONS:
+            flags.add("falls")
+        elif reason in LIMIT_REASONS or reason.endswith("_limit"):
+            flags.add("limits")
+        elif reason:
+            flags.add("other")
+    return flags
+
+
+def problem_class(scenario):
+    """Caption text for every class a run hit, in table order."""
+    flags = issue_flags(scenario)
+    if not flags:
+        return "completed"
+    order = ("limits", "misses", "flailing", "falls", "other", "errors", "skipped")
+    return "+".join(name for name in order if name in flags)
+
+
+def summarize_scenarios(scenarios):
+    """Count each class on its own. One run can increment several columns."""
+    fields = (
+        "total",
+        "problems",
+        "warnings",
+        "limits",
+        "misses",
+        "flailing",
+        "falls",
+        "other",
+        "errors",
+        "skipped",
+    )
+    order, buckets = [], {}
+    for scenario in scenarios:
+        label = scenario_label(scenario)
+        if label not in buckets:
+            order.append(label)
+            buckets[label] = {field: 0 for field in fields}
+        bucket = buckets[label]
+        bucket["total"] += 1
+        flags = issue_flags(scenario)
+        for kind in flags:
+            bucket[kind] += 1
+        if flags.intersection(PROBLEM_FLAGS):
+            bucket["problems"] += 1
+        if flags.intersection(WARNING_FLAGS):
+            bucket["warnings"] += 1
+    return [{"scenario": label, **buckets[label]} for label in order]
+
+
 class Monitor:
     def __init__(self, simulation, profile):
         self.sim = simulation
         self.profile = profile
         self.previous_velocity = simulation.data.qvel[simulation.vadr].copy()
+        self.peak_abs_velocity = np.zeros(simulation.vadr.size)
         self.peaks = {}
 
     def sample(self, target, applied, target_rate, upright):
@@ -45,6 +178,7 @@ class Monitor:
         q, dq = d.qpos[sim.qadr], d.qvel[sim.vadr]
         acceleration = (dq - self.previous_velocity) / sim.physics_dt
         self.previous_velocity = dq.copy()
+        self.peak_abs_velocity = np.maximum(self.peak_abs_velocity, np.abs(dq))
         torque = d.qfrc_actuator[sim.vadr].copy()
         contact_force = 0.0
         for i in range(d.ncon):
@@ -98,7 +232,14 @@ class Monitor:
 
 
 def run_scenario(
-    sim, adapter, profile, scenario, trace_path, checkpoint_steps=(), joint_rules=None
+    sim,
+    adapter,
+    profile,
+    scenario,
+    trace_path,
+    checkpoint_steps=(),
+    joint_rules=None,
+    clip_to_stops=False,
 ):
     command = scenario["command"]
     monitor = Monitor(sim, profile)
@@ -116,16 +257,50 @@ def run_scenario(
             "scenario duration must be a positive multiple of control timestep"
         )
     state = np.empty(mujoco.mj_stateSize(sim.model, sim.state_spec))
+    speed_caps = np.full(sim.vadr.size, np.inf)
+    for index, _name, limits in joint_rules.entries:
+        speed_caps[index] = limits.max_velocity_rad_secs
+    hold_steps = max(1, round(SPEED_HOLD_S / sim.physics_dt))
+    joint_over = np.zeros(sim.vadr.size, dtype=int)
+    base_over = np.zeros(1, dtype=int)
+    sustained_flail = False
     initial = sim.snapshot(adapter, command)
     target, applied, velocity, torque_command = (np.empty(0) for _ in range(4))
     measured_at_command = np.empty(0)
+    continue_after_violation = bool(checkpoint_steps)
+
+    def record_violation(exc):
+        entry = {
+            "reason": str(exc),
+            "time_seconds": float(sim.data.time - start),
+            **exc.details,
+        }
+        violations = result.setdefault("violations", [])
+        if not any(item["reason"] == entry["reason"] for item in violations):
+            violations.append(entry)
+        if result["first_violation"] is not None:
+            return
+        result["status"] = "violation"
+        result["first_violation"] = entry
+
+    def screen(fn):
+        """Keep a checkpoint run alive after the first failed command."""
+        try:
+            fn()
+        except PolicyViolation as exc:
+            if not continue_after_violation:
+                raise
+            record_violation(exc)
+
     try:
         if sim.command_history is None:
             # Validate the initial hold before treating policy outputs as motion.
             hold = sim.data.ctrl[sim.actuators].copy()
             zero = np.zeros(len(hold))
-            joint_rules.check_command(
-                hold, zero, zero, sim.data.qpos[sim.qadr], None, sim.dt
+            screen(
+                lambda: joint_rules.check_command(
+                    hold, zero, zero, sim.data.qpos[sim.qadr], None, sim.dt
+                )
             )
             sim.command_history = {"target": hold, "velocity": zero}
         for step in range(steps):
@@ -135,8 +310,9 @@ def run_scenario(
             applied = np.clip(target, sim.ctrl_bounds[:, 0], sim.ctrl_bounds[:, 1])
             velocity, torque_command = adapter.command_velocity_and_torque()
             measured_at_command = sim.data.qpos[sim.qadr].copy()
-            target_rate = (target - previous_target) / sim.dt
-            previous_target = target.copy()
+            commanded = applied if clip_to_stops else target
+            target_rate = (commanded - previous_target) / sim.dt
+            previous_target = commanded.copy()
             target_invalid = bool(
                 np.any(target < sim.ctrl_bounds[:, 0])
                 or np.any(target > sim.ctrl_bounds[:, 1])
@@ -145,28 +321,35 @@ def run_scenario(
                 monitor.peaks.get("clipping", 0),
                 float(np.max(np.abs(target - applied))),
             )
-            if target_invalid:
-                raise PolicyViolation("decoded_target_out_of_range")
-            joint_rules.check_command(
-                target,
-                velocity,
-                torque_command,
-                measured_at_command,
-                sim.command_history,
-                sim.dt,
+            if target_invalid and not clip_to_stops:
+                screen(lambda: raise_violation("decoded_target_out_of_range"))
+            screen(
+                lambda: joint_rules.check_command(
+                    commanded,
+                    velocity,
+                    torque_command,
+                    measured_at_command,
+                    sim.command_history,
+                    sim.dt,
+                )
             )
             kp = sim.model.actuator_gainprm[sim.actuators, 0]
             kd = -sim.model.actuator_biasprm[sim.actuators, 2]
             sim.data.ctrl[sim.actuators] = applied
-            sim.command_history = {"target": target.copy(), "velocity": velocity.copy()}
+            sim.command_history = {
+                "target": commanded.copy(),
+                "velocity": velocity.copy(),
+            }
             for substep in range(sim.substeps):
                 elapsed = (step * sim.substeps + substep) * sim.physics_dt
                 sim.apply_push(scenario.get("push"), elapsed)
                 warning_count = sim.data.warning.number.copy()
-                joint_rules.check_torque(
-                    sim.model.actuator_biasprm[sim.actuators, 0]
-                    + kp * (target - sim.data.qpos[sim.qadr])
-                    - kd * sim.data.qvel[sim.vadr]
+                screen(
+                    lambda: joint_rules.check_torque(
+                        sim.model.actuator_biasprm[sim.actuators, 0]
+                        + kp * (commanded - sim.data.qpos[sim.qadr])
+                        - kd * sim.data.qvel[sim.vadr]
+                    )
                 )
                 mujoco.mj_step(sim.model, sim.data)
                 metrics, acceleration, torque, reason = monitor.sample(
@@ -196,23 +379,38 @@ def run_scenario(
                 if reason in ("nonfinite_simulation", "simulator_warning"):
                     raise RuntimeError(reason)
                 if reason:
-                    raise PolicyViolation(reason)
-                joint_rules.check_tracking(target, sim.data.qpos[sim.qadr])
-                joint_rules.check_torque(torque)
+                    screen(lambda: raise_violation(reason))
+                measured_dq = sim.data.qvel[sim.vadr]
+                joint_over, joint_held = overspeed_held(
+                    joint_over, np.abs(measured_dq) > speed_caps, hold_steps
+                )
+                base_over, base_held = overspeed_held(
+                    base_over,
+                    [metrics["base_angular_speed"] > BASE_ANGULAR_SPEED_LIMIT_RAD_S],
+                    hold_steps,
+                )
+                if joint_held or base_held:
+                    sustained_flail = True
+                if joint_held:
+                    screen(lambda: joint_rules.check_measured_velocity(measured_dq))
+                if base_held:
+                    screen(lambda: raise_violation("base_angular_speed_limit"))
+                screen(
+                    lambda: joint_rules.check_tracking(
+                        commanded, sim.data.qpos[sim.qadr]
+                    )
+                )
+                screen(lambda: joint_rules.check_torque(torque))
             if step + 1 in checkpoint_steps:
                 snapshots[step + 1] = sim.snapshot(adapter, command)
     except PolicyViolation as exc:
-        result["status"] = "violation"
-        result["first_violation"] = {
-            "reason": str(exc),
-            "time_seconds": float(sim.data.time - start),
-            **exc.details,
-        }
+        record_violation(exc)
     except Exception as exc:  # noqa: BLE001 - Preserve diagnostics from inference backends.
         result["status"] = "error"
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         sim.data.xfrc_applied[:] = 0
+    result["violent_motion"] = sustained_flail
     result["peaks"] = monitor.peaks
     result["simulated_seconds"] = max(0.0, float(sim.data.time - start))
     displacement = sim.data.qpos[:3] - start_position
@@ -267,6 +465,9 @@ def run_scenario(
 
 
 def evaluate(request):
+    clip_to_stops = request.get("clip_to_stops", False)
+    if type(clip_to_stops) is not bool:
+        raise ValueError("clip_to_stops must be a boolean")
     output = Path(request["output"])
     report_path = output / "report.json"
     sim = Simulation(request["robot_config"])
@@ -302,6 +503,19 @@ def evaluate(request):
     adapter = ADAPTERS[request["adapter"]](request["model"], sim.robot)
     for body in suite["push_bodies"] if suite["perturbations"] else []:
         sim.model.body(body)
+    push_targets = [{"body": body} for body in suite["push_bodies"]]
+    if suite["perturbations"]:
+        for spec in suite["push_points"]:
+            sim.model.body(spec["body"])
+            push_targets.append(
+                {
+                    "body": spec["body"],
+                    "label": spec["name"],
+                    "point": mesh_point_in_body(
+                        sim.model, spec["body"], spec["mesh"]
+                    ).tolist(),
+                }
+            )
     package_files = sorted(Path(__file__).parent.glob("*.py"))
     package_files.append(Path(joint_checks.__file__))
     provenance = {
@@ -322,6 +536,7 @@ def evaluate(request):
         "adapter": request["adapter"],
         "tested_behavior": adapter.tested_behavior,
         "hardware_authorization": False,
+        "clip_to_stops": clip_to_stops,
         "profile": profile,
         "joint_movement_checks": joint_rules.coverage(),
         "acceptance_checks": {
@@ -367,26 +582,45 @@ def evaluate(request):
                 for status in ("completed", "violation", "error", "incomplete")
             },
         }
+        report["scenario_summary"] = summarize_scenarios(scenarios)
         write_report(report_path, report)
 
-    pushes = [None]
-    if suite["perturbations"]:
-        for body in suite["push_bodies"]:
-            for axis in (0, 1):
-                for sign in (-1, 1):
-                    force = [0.0, 0.0, 0.0]
-                    force[axis] = sign * suite["push_force_n"]
-                    pushes.append(
-                        {
-                            "body": body,
-                            "force": force,
-                            "start": suite["push_start_seconds"],
-                            "duration": suite["push_seconds"],
-                        }
-                    )
+    targets_by_name = {}
+    for target in push_targets:
+        targets_by_name[target.get("label", target["body"])] = target
+
+    def pushes_at(command_name, fraction):
+        branches = [None]
+        for name, axis, sign in scheduled_directions(suite, command_name, fraction):
+            target = targets_by_name[name]
+            for level in suite["push_levels"]:
+                force = [0.0, 0.0, 0.0]
+                force[axis] = sign * level["force_n"]
+                push = {
+                    "body": target["body"],
+                    "level": level["name"],
+                    "force": force,
+                    "start": suite["push_start_seconds"],
+                    "duration": suite["push_seconds"],
+                }
+                if "label" in target:
+                    push["label"] = target["label"]
+                if "point" in target:
+                    push["point"] = target["point"]
+                branches.append(push)
+        return branches
+
     planned = len(suite["seeds"]) * (
-        len(suite["commands"]) * (1 + len(suite["checkpoints"]) * len(pushes))
+        sum(
+            1
+            + sum(
+                len(pushes_at(name, fraction))
+                for fraction in suite["checkpoints"]
+            )
+            for name in suite["commands"]
+        )
         + len(suite["poses"])
+        + len(suite["commands"]) * len(suite["torque_scales"])
     )
     save()
 
@@ -394,15 +628,25 @@ def evaluate(request):
         trace = output / "traces" / f"{len(report['scenarios']):05d}.npz"
         report["active_scenario"] = scenario
         save()
+        sim.set_torque_scale(scenario.get("torque_scale", 1.0))
         try:
             result, snapshots = run_scenario(
-                sim, adapter, profile, scenario, trace, checkpoints, joint_rules
+                sim,
+                adapter,
+                profile,
+                scenario,
+                trace,
+                checkpoints,
+                joint_rules,
+                clip_to_stops,
             )
         except Exception as exc:  # noqa: BLE001 - Report each failed scenario independently.
             result, snapshots = (
                 dict(scenario, status="error", error=f"{type(exc).__name__}: {exc}"),
                 {},
             )
+        finally:
+            sim.set_torque_scale(1.0)
         report["scenarios"].append(result)
         report["active_scenario"] = None
         save()
@@ -431,8 +675,8 @@ def evaluate(request):
             sim.reset(seed)
             adapter.reset()
             snapshots = execute(scenario, steps)
-            for step in steps:
-                for push in pushes:
+            for fraction, step in zip(suite["checkpoints"], steps):
+                for push in pushes_at(name, fraction):
                     branch = dict(
                         scenario,
                         kind="perturbation" if push else "continuation",
@@ -444,7 +688,7 @@ def evaluate(request):
                         report["scenarios"].append(
                             dict(
                                 branch,
-                                status="incomplete",
+                                status="error",
                                 error="nominal_checkpoint_unavailable",
                             )
                         )
@@ -452,6 +696,17 @@ def evaluate(request):
                         continue
                     sim.restore(snapshots[step], adapter)
                     execute(branch)
+            for scale in suite["torque_scales"]:
+                scaled = dict(
+                    scenario,
+                    seconds=suite["nominal_seconds"],
+                    torque_scale=scale,
+                )
+                scaled.pop("checkpoint_step", None)
+                scaled.pop("push", None)
+                sim.reset(seed)
+                adapter.reset()
+                execute(scaled)
         for pose in suite["poses"]:
             scenario = {
                 "name": pose,

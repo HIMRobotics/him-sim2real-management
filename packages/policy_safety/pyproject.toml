@@ -12,6 +12,7 @@ dependencies = ["numpy>=1.26,<3", "mujoco>=3.3.2,<3.4", "onnxruntime>=1.22,<2", 
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+render = ["pillow>=10"]
 
 [project.scripts]
 policy-safety = "policy_safety.cli:main"
