@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 from joint_checks import (
     JointHardwareLimits,
-    JointViolation,
     check_command,
     check_measured_velocity,
     check_torque,
@@ -71,45 +70,33 @@ class JointRules:
                 or not np.isfinite(values).all()
             ):
                 raise PolicyViolation("nonfinite_or_invalid_joint_command")
-        try:
-            for i, name, limits in self.entries:
-                prior = (
-                    None
-                    if previous is None
-                    else (previous["target"][i], previous["velocity"][i])
-                )
-                check_command(
-                    name,
-                    limits,
-                    target[i],
-                    velocity[i],
-                    torque[i],
-                    measured[i],
-                    prior,
-                    dt,
-                    self.profile["initial_position_tolerance_rad"],
-                    self.profile["initial_velocity_tolerance_rad_secs"],
-                )
-        except JointViolation as exc:
-            raise PolicyViolation(exc.reason, exc.details) from exc
+        for i, name, limits in self.entries:
+            prior = (
+                None
+                if previous is None
+                else (previous["target"][i], previous["velocity"][i])
+            )
+            check_command(
+                name,
+                limits,
+                target[i],
+                velocity[i],
+                torque[i],
+                measured[i],
+                prior,
+                dt,
+                self.profile["initial_position_tolerance_rad"],
+                self.profile["initial_velocity_tolerance_rad_secs"],
+            )
 
     def check_measured_velocity(self, measured_dq):
-        try:
-            for i, name, limits in self.entries:
-                check_measured_velocity(name, limits, measured_dq[i])
-        except JointViolation as exc:
-            raise PolicyViolation(exc.reason, exc.details) from exc
+        for i, name, limits in self.entries:
+            check_measured_velocity(name, limits, measured_dq[i])
 
     def check_tracking(self, target, measured):
-        try:
-            for i, name, limits in self.entries:
-                check_tracking(name, limits, target[i], measured[i])
-        except JointViolation as exc:
-            raise PolicyViolation(exc.reason, exc.details) from exc
+        for i, name, limits in self.entries:
+            check_tracking(name, limits, target[i], measured[i])
 
     def check_torque(self, torque):
-        try:
-            for i, name, limits in self.entries:
-                check_torque(name, limits, torque[i])
-        except JointViolation as exc:
-            raise PolicyViolation(exc.reason, exc.details) from exc
+        for i, name, limits in self.entries:
+            check_torque(name, limits, torque[i])

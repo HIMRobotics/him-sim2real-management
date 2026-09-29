@@ -47,8 +47,7 @@ def check_bound(reason, joint, value, limit, units):
         raise JointViolation(reason, joint, value, limit, units)
 
 
-# Trip before Unitree's 10 rad/s joint and 6 rad/s body passive-mode limits.
-JOINT_SPEED_LIMIT_RAD_S = 9.0
+# Below Unitree's 6 rad/s body passive-mode threshold.
 BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4
 # A foot-strike flick is over in well under this. A real flail holds much longer.
 SPEED_HOLD_S = 0.05

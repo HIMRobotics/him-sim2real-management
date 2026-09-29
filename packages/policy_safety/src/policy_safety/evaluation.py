@@ -5,31 +5,33 @@ import platform
 from pathlib import Path
 
 import joint_checks
-from joint_checks import (
-    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
-    JOINT_SPEED_LIMIT_RAD_S,
-    SPEED_HOLD_S,
-)
 import mujoco
 import numpy as np
 import onnxruntime
+from joint_checks import (
+    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
+    SPEED_HOLD_S,
+    JointViolation,
+)
 
 from . import __version__
 from .adapter import ADAPTERS, PolicyViolation
 from .bundle import digest, model_files
-from .config import METRICS, profile_config, scheduled_directions, suite_config
+from .config import (
+    ISSUE_COLUMNS,
+    METRICS,
+    SUMMARY_COLUMNS,
+    atomic_report,
+    plan_scenarios,
+    profile_config,
+    suite_config,
+)
 from .joint_rules import DEFAULT_JOINT_PROFILE, JointRules
 from .simulation import Simulation, mesh_point_in_body
 
 
 def raise_violation(reason, details=None):
     raise PolicyViolation(reason, details)
-
-
-def write_report(path, report):
-    temporary = Path(path).with_suffix(".tmp")
-    temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
 
 
 def verdict(scenarios, calibrated):
@@ -42,21 +44,11 @@ def verdict(scenarios, calibrated):
     return ("within_limits", 0) if calibrated else ("uncalibrated", 3)
 
 
-MISS_REASONS = {"joint_tracking_error_limit"}
-FALL_REASONS = {"fall"}
-# Earlier than Unitree's 10 rad/s joint and 6 rad/s body passive-mode limits.
+# Other limit reasons already end with _limit.
 LIMIT_REASONS = {
-    "joint_target_position_limit",
-    "joint_target_velocity_limit",
-    "joint_position_target_change_limit",
-    "joint_velocity_target_change_limit",
     "initial_joint_position_mismatch",
-    "initial_joint_target_velocity_limit",
     "nonzero_feedforward_torque",
-    "joint_torque_limit",
     "decoded_target_out_of_range",
-    "joint_position_limit",
-    "model_torque_limit",
 }
 
 
@@ -64,10 +56,8 @@ def scenario_label(scenario):
     """Group a run with its gait, shove strength, torque scale, or pose."""
     name = scenario["name"]
     scale = scenario.get("torque_scale")
-    if scale not in (None, 1, 1.0):
+    if scale not in (None, 1):
         name = f"{name} {round(scale * 100)}%"
-    if scenario["kind"] == "counterfactual":
-        return name
     if scenario["kind"] == "perturbation":
         level = (scenario.get("push") or {}).get("level")
         if level:
@@ -76,24 +66,10 @@ def scenario_label(scenario):
     return name
 
 
-
-
-def violent_motion(peak_joint_speed, peak_base_angular_speed):
-    """A sample is past the flail line: 9 rad/s at a joint, or 5.4 rad/s of body spin."""
-    return bool(
-        np.any(np.asarray(peak_joint_speed) > JOINT_SPEED_LIMIT_RAD_S)
-        or peak_base_angular_speed > BASE_ANGULAR_SPEED_LIMIT_RAD_S
-    )
-
-
 def overspeed_held(counts, active, hold_steps):
     """Count consecutive samples over the line. A short impact resets the count."""
     counts = np.where(np.asarray(active, dtype=bool), np.asarray(counts) + 1, 0)
     return counts, bool(np.any(counts >= hold_steps))
-
-
-PROBLEM_FLAGS = ("limits", "flailing", "falls", "other", "errors")
-WARNING_FLAGS = ("misses",)
 
 
 def issue_flags(scenario):
@@ -106,16 +82,12 @@ def issue_flags(scenario):
         flags.add("errors")
     if scenario.get("violent_motion"):
         flags.add("flailing")
-    recorded = scenario.get("violations") or []
-    reasons = [item.get("reason", "") for item in recorded]
-    if not reasons:
-        reason = (scenario.get("first_violation") or {}).get("reason", "")
-        if reason:
-            reasons = [reason]
-    for reason in reasons:
-        if reason in MISS_REASONS:
+    recorded = scenario.get("violations") or [scenario.get("first_violation") or {}]
+    for entry in recorded:
+        reason = entry.get("reason", "")
+        if reason == "joint_tracking_error_limit":
             flags.add("misses")
-        elif reason in FALL_REASONS:
+        elif reason == "fall":
             flags.add("falls")
         elif reason in LIMIT_REASONS or reason.endswith("_limit"):
             flags.add("limits")
@@ -127,42 +99,24 @@ def issue_flags(scenario):
 def problem_class(scenario):
     """Caption text for every class a run hit, in table order."""
     flags = issue_flags(scenario)
-    if not flags:
-        return "completed"
-    order = ("limits", "misses", "flailing", "falls", "other", "errors", "skipped")
-    return "+".join(name for name in order if name in flags)
+    return "+".join(name for name in ISSUE_COLUMNS if name in flags) or "completed"
 
 
 def summarize_scenarios(scenarios):
     """Count each class on its own. One run can increment several columns."""
-    fields = (
-        "total",
-        "problems",
-        "warnings",
-        "limits",
-        "misses",
-        "flailing",
-        "falls",
-        "other",
-        "errors",
-        "skipped",
-    )
-    order, buckets = [], {}
+    buckets = {}
     for scenario in scenarios:
         label = scenario_label(scenario)
         if label not in buckets:
-            order.append(label)
-            buckets[label] = {field: 0 for field in fields}
+            buckets[label] = dict.fromkeys(("total", *SUMMARY_COLUMNS), 0)
         bucket = buckets[label]
         bucket["total"] += 1
         flags = issue_flags(scenario)
         for kind in flags:
             bucket[kind] += 1
-        if flags.intersection(PROBLEM_FLAGS):
-            bucket["problems"] += 1
-        if flags.intersection(WARNING_FLAGS):
-            bucket["warnings"] += 1
-    return [{"scenario": label, **buckets[label]} for label in order]
+        bucket["problems"] += bool(flags - {"misses", "skipped"})
+        bucket["warnings"] += "misses" in flags
+    return [{"scenario": label, **counts} for label, counts in buckets.items()]
 
 
 class Monitor:
@@ -170,19 +124,17 @@ class Monitor:
         self.sim = simulation
         self.profile = profile
         self.previous_velocity = simulation.data.qvel[simulation.vadr].copy()
-        self.peak_abs_velocity = np.zeros(simulation.vadr.size)
         self.peaks = {}
 
     def sample(self, target, applied, target_rate, upright):
         sim, d, m = self.sim, self.sim.data, self.sim.model
         q, dq = d.qpos[sim.qadr], d.qvel[sim.vadr]
         acceleration = (dq - self.previous_velocity) / sim.physics_dt
-        self.previous_velocity = dq.copy()
-        self.peak_abs_velocity = np.maximum(self.peak_abs_velocity, np.abs(dq))
-        torque = d.qfrc_actuator[sim.vadr].copy()
+        self.previous_velocity = dq
+        torque = d.qfrc_actuator[sim.vadr]
         contact_force = 0.0
+        wrench = np.zeros(6)
         for i in range(d.ncon):
-            wrench = np.zeros(6)
             mujoco.mj_contactForce(m, d, i, wrench)
             if not np.isfinite(wrench).all():
                 contact_force = float("nan")
@@ -240,6 +192,8 @@ def run_scenario(
     checkpoint_steps=(),
     joint_rules=None,
     clip_to_stops=False,
+    *,
+    continue_after_violation=False,
 ):
     command = scenario["command"]
     monitor = Monitor(sim, profile)
@@ -267,11 +221,11 @@ def run_scenario(
     initial = sim.snapshot(adapter, command)
     target, applied, velocity, torque_command = (np.empty(0) for _ in range(4))
     measured_at_command = np.empty(0)
-    continue_after_violation = bool(checkpoint_steps)
+    continue_after_violation = continue_after_violation or bool(checkpoint_steps)
 
     def record_violation(exc):
         entry = {
-            "reason": str(exc),
+            "reason": getattr(exc, "reason", str(exc)),
             "time_seconds": float(sim.data.time - start),
             **exc.details,
         }
@@ -283,24 +237,31 @@ def run_scenario(
         result["status"] = "violation"
         result["first_violation"] = entry
 
-    def screen(fn):
+    def screen(fn, *args):
         """Keep a checkpoint run alive after the first failed command."""
         try:
-            fn()
-        except PolicyViolation as exc:
+            fn(*args)
+        except (PolicyViolation, JointViolation) as exc:
             if not continue_after_violation:
                 raise
             record_violation(exc)
 
     try:
+        sim.set_torque_scale(scenario.get("torque_scale", 1.0))
+        kp = sim.model.actuator_gainprm[sim.actuators, 0]
+        kd = -sim.model.actuator_biasprm[sim.actuators, 2]
         if sim.command_history is None:
             # Validate the initial hold before treating policy outputs as motion.
             hold = sim.data.ctrl[sim.actuators].copy()
             zero = np.zeros(len(hold))
             screen(
-                lambda: joint_rules.check_command(
-                    hold, zero, zero, sim.data.qpos[sim.qadr], None, sim.dt
-                )
+                joint_rules.check_command,
+                hold,
+                zero,
+                zero,
+                sim.data.qpos[sim.qadr],
+                None,
+                sim.dt,
             )
             sim.command_history = {"target": hold, "velocity": zero}
         for step in range(steps):
@@ -309,47 +270,42 @@ def run_scenario(
             target = adapter.decode(raw)
             applied = np.clip(target, sim.ctrl_bounds[:, 0], sim.ctrl_bounds[:, 1])
             velocity, torque_command = adapter.command_velocity_and_torque()
-            measured_at_command = sim.data.qpos[sim.qadr].copy()
+            measured_at_command = sim.data.qpos[sim.qadr]
             commanded = applied if clip_to_stops else target
             target_rate = (commanded - previous_target) / sim.dt
             previous_target = commanded.copy()
-            target_invalid = bool(
-                np.any(target < sim.ctrl_bounds[:, 0])
-                or np.any(target > sim.ctrl_bounds[:, 1])
-            )
             monitor.peaks["clipping"] = max(
                 monitor.peaks.get("clipping", 0),
                 float(np.max(np.abs(target - applied))),
             )
-            if target_invalid and not clip_to_stops:
-                screen(lambda: raise_violation("decoded_target_out_of_range"))
+            if not clip_to_stops and np.any(target != applied):
+                screen(raise_violation, "decoded_target_out_of_range")
             screen(
-                lambda: joint_rules.check_command(
-                    commanded,
-                    velocity,
-                    torque_command,
-                    measured_at_command,
-                    sim.command_history,
-                    sim.dt,
-                )
+                joint_rules.check_command,
+                commanded,
+                velocity,
+                torque_command,
+                measured_at_command,
+                sim.command_history,
+                sim.dt,
             )
-            kp = sim.model.actuator_gainprm[sim.actuators, 0]
-            kd = -sim.model.actuator_biasprm[sim.actuators, 2]
             sim.data.ctrl[sim.actuators] = applied
             sim.command_history = {
                 "target": commanded.copy(),
                 "velocity": velocity.copy(),
             }
+            policy_values = tuple(
+                value.copy() for value in (obs[0], raw, target, applied)
+            )
             for substep in range(sim.substeps):
                 elapsed = (step * sim.substeps + substep) * sim.physics_dt
                 sim.apply_push(scenario.get("push"), elapsed)
                 warning_count = sim.data.warning.number.copy()
                 screen(
-                    lambda: joint_rules.check_torque(
-                        sim.model.actuator_biasprm[sim.actuators, 0]
-                        + kp * (commanded - sim.data.qpos[sim.qadr])
-                        - kd * sim.data.qvel[sim.vadr]
-                    )
+                    joint_rules.check_torque,
+                    sim.model.actuator_biasprm[sim.actuators, 0]
+                    + kp * (commanded - sim.data.qpos[sim.qadr])
+                    - kd * sim.data.qvel[sim.vadr],
                 )
                 mujoco.mj_step(sim.model, sim.data)
                 metrics, acceleration, torque, reason = monitor.sample(
@@ -362,14 +318,11 @@ def run_scenario(
                     (
                         float(sim.data.time),
                         state.copy(),
-                        obs[0].copy(),
-                        raw.copy(),
-                        target.copy(),
-                        applied.copy(),
-                        sim.data.qpos[sim.qadr].copy(),
-                        sim.data.qvel[sim.vadr].copy(),
-                        acceleration.copy(),
-                        torque.copy(),
+                        *policy_values,
+                        sim.data.qpos[sim.qadr],
+                        sim.data.qvel[sim.vadr],
+                        acceleration,
+                        torque,
                         sim.data.qpos[:7].copy(),
                         sim.data.qvel[:6].copy(),
                         np.array(list(metrics.values())),
@@ -379,7 +332,7 @@ def run_scenario(
                 if reason in ("nonfinite_simulation", "simulator_warning"):
                     raise RuntimeError(reason)
                 if reason:
-                    screen(lambda: raise_violation(reason))
+                    screen(raise_violation, reason)
                 measured_dq = sim.data.qvel[sim.vadr]
                 joint_over, joint_held = overspeed_held(
                     joint_over, np.abs(measured_dq) > speed_caps, hold_steps
@@ -392,24 +345,21 @@ def run_scenario(
                 if joint_held or base_held:
                     sustained_flail = True
                 if joint_held:
-                    screen(lambda: joint_rules.check_measured_velocity(measured_dq))
+                    screen(joint_rules.check_measured_velocity, measured_dq)
                 if base_held:
-                    screen(lambda: raise_violation("base_angular_speed_limit"))
-                screen(
-                    lambda: joint_rules.check_tracking(
-                        commanded, sim.data.qpos[sim.qadr]
-                    )
-                )
-                screen(lambda: joint_rules.check_torque(torque))
+                    screen(raise_violation, "base_angular_speed_limit")
+                screen(joint_rules.check_tracking, commanded, sim.data.qpos[sim.qadr])
+                screen(joint_rules.check_torque, torque)
             if step + 1 in checkpoint_steps:
                 snapshots[step + 1] = sim.snapshot(adapter, command)
-    except PolicyViolation as exc:
+    except (PolicyViolation, JointViolation) as exc:
         record_violation(exc)
     except Exception as exc:  # noqa: BLE001 - Preserve diagnostics from inference backends.
         result["status"] = "error"
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         sim.data.xfrc_applied[:] = 0
+        sim.set_torque_scale(1.0)
     result["violent_motion"] = sustained_flail
     result["peaks"] = monitor.peaks
     result["simulated_seconds"] = max(0.0, float(sim.data.time - start))
@@ -464,18 +414,28 @@ def run_scenario(
     return result, snapshots
 
 
-def evaluate(request):
-    clip_to_stops = request.get("clip_to_stops", False)
-    if type(clip_to_stops) is not bool:
+def load_session(request):
+    """Validate inputs for both screening and rendering before inference."""
+    clip = request.get("clip_to_stops", False)
+    if type(clip) is not bool:
         raise ValueError("clip_to_stops must be a boolean")
-    output = Path(request["output"])
-    report_path = output / "report.json"
     sim = Simulation(request["robot_config"])
-    suite = suite_config(request.get("suite"))
     profile = profile_config(request["profile"])
-    joint_rules = JointRules(
+    rules = JointRules(
         sim.robot["joint_names"], request.get("joint_profile", DEFAULT_JOINT_PROFILE)
     )
+    files = model_files(request["model"])
+    adapter = ADAPTERS[request["adapter"]](request["model"], sim.robot)
+    return sim, adapter, profile, rules, clip, files
+
+
+def evaluate(request):
+    output = Path(request["output"])
+    report_path = output / "report.json"
+    suite = suite_config(request.get("suite"))
+    plan = plan_scenarios(suite)
+    planned = plan["baseline_count"] + len(plan["pushes"])
+    sim, adapter, profile, joint_rules, clip_to_stops, files = load_session(request)
     for name in ("nominal_seconds", "branch_seconds", "counterfactual_seconds"):
         steps = round(suite[name] / sim.dt)
         if steps < 1 or not np.isclose(steps * sim.dt, suite[name], atol=1e-10, rtol=0):
@@ -485,26 +445,11 @@ def evaluate(request):
             ticks = round(suite[name] / sim.physics_dt)
             if not np.isclose(ticks * sim.physics_dt, suite[name], atol=1e-10, rtol=0):
                 raise ValueError(f"{name} must be a multiple of physics timestep")
-    files = model_files(request["model"])
     robot_root = sim.path.parent
-    assets = [(robot_root / f).resolve() for f in sim.robot["assets"]]
-    if any(not p.is_relative_to(robot_root) or not p.is_file() for p in assets):
-        raise ValueError(
-            "robot asset manifest requires existing files within the bundle"
-        )
-    # Require every XML and mesh in the bundle to be fingerprinted.
-    required = {
-        p.resolve()
-        for p in robot_root.rglob("*")
-        if p.suffix.lower() in (".xml", ".stl", ".obj", ".msh", ".png", ".jpg")
-    }
-    if required - set(assets):
-        raise ValueError("robot assets missing from manifest")
-    adapter = ADAPTERS[request["adapter"]](request["model"], sim.robot)
-    for body in suite["push_bodies"] if suite["perturbations"] else []:
-        sim.model.body(body)
     push_targets = [{"body": body} for body in suite["push_bodies"]]
     if suite["perturbations"]:
+        for target in push_targets:
+            sim.model.body(target["body"])
         for spec in suite["push_points"]:
             sim.model.body(spec["body"])
             push_targets.append(
@@ -523,7 +468,9 @@ def evaluate(request):
             str(p.relative_to(Path(request["model"]).resolve().parent)): digest(p)
             for p in files
         },
-        "robot_assets": {str(p.relative_to(robot_root)): digest(p) for p in assets},
+        "robot_assets": {
+            str(p.relative_to(robot_root)): digest(p) for p in sorted(sim.assets)
+        },
         "robot_config": digest(sim.path),
         "profile": digest(request["profile"]),
         "joint_profile": digest(joint_rules.path),
@@ -557,6 +504,12 @@ def evaluate(request):
             "note": "PD torque demand is checked before every physics step against the joint profile, in addition to the applied torque checks. Out-of-range decoded targets are rejected before clipping can hide them.",
         },
         "suite": suite,
+        "push_sampling": {
+            "method": "site_strength_stratified_without_replacement",
+            "seed": suite["sample_seed"],
+            "available": plan["push_candidates"],
+            "selected": len(plan["pushes"]),
+        },
         "robot": sim.robot,
         "hashes": provenance,
         "versions": {
@@ -583,53 +536,41 @@ def evaluate(request):
             },
         }
         report["scenario_summary"] = summarize_scenarios(scenarios)
-        write_report(report_path, report)
+        atomic_report(report_path, report)
 
     targets_by_name = {}
     for target in push_targets:
         targets_by_name[target.get("label", target["body"])] = target
 
-    def pushes_at(command_name, fraction):
-        branches = [None]
-        for name, axis, sign in scheduled_directions(suite, command_name, fraction):
-            target = targets_by_name[name]
-            for level in suite["push_levels"]:
-                force = [0.0, 0.0, 0.0]
-                force[axis] = sign * level["force_n"]
-                push = {
-                    "body": target["body"],
-                    "level": level["name"],
-                    "force": force,
-                    "start": suite["push_start_seconds"],
-                    "duration": suite["push_seconds"],
-                }
-                if "label" in target:
-                    push["label"] = target["label"]
-                if "point" in target:
-                    push["point"] = target["point"]
-                branches.append(push)
-        return branches
-
-    planned = len(suite["seeds"]) * (
-        sum(
-            1
-            + sum(
-                len(pushes_at(name, fraction))
-                for fraction in suite["checkpoints"]
-            )
-            for name in suite["commands"]
-        )
-        + len(suite["poses"])
-        + len(suite["commands"]) * len(suite["torque_scales"])
-    )
+    pushes_by_checkpoint = {}
+    for choice in plan["pushes"]:
+        target = targets_by_name[choice["target"]]
+        force = [0.0, 0.0, 0.0]
+        force[choice["axis"]] = choice["sign"] * choice["force_n"]
+        push = {
+            **target,
+            "level": choice["level"],
+            "force": force,
+            "start": suite["push_start_seconds"],
+            "duration": suite["push_seconds"],
+        }
+        key = (choice["seed"], choice["command"], choice["checkpoint"])
+        pushes_by_checkpoint.setdefault(key, []).append(push)
     save()
 
     def execute(scenario, checkpoints=()):
         trace = output / "traces" / f"{len(report['scenarios']):05d}.npz"
         report["active_scenario"] = scenario
         save()
-        sim.set_torque_scale(scenario.get("torque_scale", 1.0))
         try:
+            if "checkpoint_step" not in scenario:
+                pose = (
+                    scenario["name"]
+                    if scenario["kind"] == "counterfactual"
+                    else "standing"
+                )
+                sim.reset(scenario["seed"], pose)
+                adapter.reset()
             result, snapshots = run_scenario(
                 sim,
                 adapter,
@@ -645,12 +586,21 @@ def evaluate(request):
                 dict(scenario, status="error", error=f"{type(exc).__name__}: {exc}"),
                 {},
             )
-        finally:
-            sim.set_torque_scale(1.0)
         report["scenarios"].append(result)
         report["active_scenario"] = None
         save()
         return snapshots
+
+    steps = [
+        round(suite["nominal_seconds"] * fraction / sim.dt)
+        for fraction in suite["checkpoints"]
+    ]
+    if len(set(steps)) != len(steps) or any(
+        s < 1 or s >= round(suite["nominal_seconds"] / sim.dt) for s in steps
+    ):
+        raise ValueError(
+            "checkpoint times must resolve to distinct interior control steps"
+        )
 
     for seed in suite["seeds"]:
         for name, command in suite["commands"].items():
@@ -662,21 +612,10 @@ def evaluate(request):
                 "seconds": suite["nominal_seconds"],
                 "upright": True,
             }
-            steps = [
-                round(suite["nominal_seconds"] * fraction / sim.dt)
-                for fraction in suite["checkpoints"]
-            ]
-            if len(set(steps)) != len(steps) or any(
-                s < 1 or s >= round(suite["nominal_seconds"] / sim.dt) for s in steps
-            ):
-                raise ValueError(
-                    "checkpoint times must resolve to distinct interior control steps"
-                )
-            sim.reset(seed)
-            adapter.reset()
             snapshots = execute(scenario, steps)
             for fraction, step in zip(suite["checkpoints"], steps):
-                for push in pushes_at(name, fraction):
+                pushes = pushes_by_checkpoint.get((seed, name, fraction), [])
+                for push in [None, *pushes]:
                     branch = dict(
                         scenario,
                         kind="perturbation" if push else "continuation",
@@ -697,16 +636,7 @@ def evaluate(request):
                     sim.restore(snapshots[step], adapter)
                     execute(branch)
             for scale in suite["torque_scales"]:
-                scaled = dict(
-                    scenario,
-                    seconds=suite["nominal_seconds"],
-                    torque_scale=scale,
-                )
-                scaled.pop("checkpoint_step", None)
-                scaled.pop("push", None)
-                sim.reset(seed)
-                adapter.reset()
-                execute(scaled)
+                execute(dict(scenario, torque_scale=scale))
         for pose in suite["poses"]:
             scenario = {
                 "name": pose,
@@ -716,15 +646,6 @@ def evaluate(request):
                 "seconds": suite["counterfactual_seconds"],
                 "upright": pose == "standing",
             }
-            try:
-                sim.reset(seed, pose)
-                adapter.reset()
-            except Exception as exc:  # noqa: BLE001 - Invalid poses are explicit coverage failures.
-                report["scenarios"].append(
-                    dict(scenario, status="error", error=f"initialization: {exc}")
-                )
-                save()
-                continue
             execute(scenario)
     report["status"], report["exit_code"] = verdict(
         report["scenarios"],

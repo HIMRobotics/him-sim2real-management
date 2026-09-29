@@ -9,7 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from .config import positive
+from .adapter import ADAPTERS
+from .config import SUMMARY_COLUMNS, atomic_report, positive
 from .joint_rules import DEFAULT_JOINT_PROFILE
 
 
@@ -20,12 +21,6 @@ def default_video_dir():
         if (parent / "packages" / "policy_safety").is_dir():
             return parent / "tmp" / "vids"
     return Path.cwd() / "tmp" / "vids"
-
-
-def atomic_report(path, report):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
 
 
 def failure_report(output, reason):
@@ -52,28 +47,20 @@ def _render_progress(message):
         print(message, flush=True)
 
 
-def _ratio(count, total):
-    return f"{count}/{total}"
-
-
 def print_scenario_summary(summary):
     """Show problems, warnings, then each overlapping class as a fraction."""
     if not summary:
         return
-    print(
-        f"{'scenario':<18} {'problems':>8} {'warnings':>8} | "
-        f"{'limits':>8} {'misses':>8} {'flailing':>8} {'falls':>8} "
-        f"{'other':>8} {'errors':>8} {'skipped':>8}"
-    )
+
+    def line(label, values):
+        cells = [f"{value:>8}" for value in values]
+        print(f"{label:<18} " + " ".join(cells[:2]) + " | " + " ".join(cells[2:]))
+
+    line("scenario", SUMMARY_COLUMNS)
     for row in summary:
-        total = row["total"]
-        print(
-            f"{row['scenario']:<18} {_ratio(row['problems'], total):>8} "
-            f"{_ratio(row.get('warnings', 0), total):>8} | "
-            f"{_ratio(row['limits'], total):>8} {_ratio(row.get('misses', 0), total):>8} "
-            f"{_ratio(row['flailing'], total):>8} {_ratio(row['falls'], total):>8} "
-            f"{_ratio(row['other'], total):>8} {_ratio(row['errors'], total):>8} "
-            f"{_ratio(row['skipped'], total):>8}"
+        line(
+            row["scenario"],
+            [f"{row.get(key, 0)}/{row['total']}" for key in SUMMARY_COLUMNS],
         )
 
 
@@ -93,9 +80,7 @@ def print_progress(output, elapsed):
             detail += f" checkpoint={active['checkpoint_step']}"
         if active.get("push"):
             push = active["push"]
-            detail += (
-                f" push={push.get('label', push['body'])} {push['force']} N"
-            )
+            detail += f" push={push.get('label', push['body'])} {push['force']} N"
     done, total = coverage.get("reported", 0), coverage.get("planned", 0)
     filled = min(10, int(10 * done / total)) if total else 0
     bar = "[" + "#" * filled + "-" * (10 - filled) + "]"
@@ -105,19 +90,11 @@ def print_progress(output, elapsed):
         and not report.get("joint_movement_checks", {}).get("uncovered_joints")
         else " UNCALIBRATED"
     )
-    if sys.stdout.isatty():
-        message = (
-            f"{bar} {done}/{total or '?'} {elapsed:.0f}s"
-            f" v={coverage.get('violation', 0)} err={coverage.get('error', 0)}"
-            f" skip={coverage.get('incomplete', 0)}{calibration}{detail}"
-        )
-    else:
-        message = (
-            f"[{elapsed:.0f}s] {bar} {done}/{total or '?'} scenarios reported"
-            f" | violations={coverage.get('violation', 0)} errors={coverage.get('error', 0)}"
-            f" incomplete={coverage.get('incomplete', 0)}{calibration}{detail}"
-        )
-    _render_progress(message)
+    _render_progress(
+        f"[{elapsed:.0f}s] {bar} {done}/{total or '?'}"
+        f" violations={coverage.get('violation', 0)} errors={coverage.get('error', 0)}"
+        f" incomplete={coverage.get('incomplete', 0)}{calibration}{detail}"
+    )
 
 
 def run_worker(request, timeout):
@@ -190,54 +167,34 @@ def main(argv=None):
     evaluate = commands.add_parser(
         "evaluate", help="screen an explicitly adapted neural policy offline"
     )
-    evaluate.add_argument("--model", required=True, type=Path)
-    evaluate.add_argument("--adapter", required=True, choices=["g1-walker-99-v1"])
-    evaluate.add_argument("--robot-config", required=True, type=Path)
+    render = commands.add_parser("render", help="write videos for selected scenarios")
+    for command in (evaluate, render):
+        command.add_argument("--model", required=True, type=Path)
+        command.add_argument("--adapter", required=True, choices=ADAPTERS)
+        command.add_argument("--robot-config", required=True, type=Path)
+        command.add_argument(
+            "--joint-profile",
+            type=Path,
+            default=DEFAULT_JOINT_PROFILE,
+            help="per-joint movement rules, defaults to the standard 29-joint template",
+        )
+        command.add_argument(
+            "--profile",
+            type=Path,
+            default=Path(__file__).parent / "profiles/provisional.json",
+        )
+        command.add_argument(
+            "--clip-to-stops",
+            action="store_true",
+            help="command the clipped stop instead of rejecting a target past it",
+        )
     evaluate.add_argument("--suite", type=Path)
-    evaluate.add_argument(
-        "--joint-profile",
-        type=Path,
-        default=DEFAULT_JOINT_PROFILE,
-        help="per-joint movement rules, defaults to the standard 29-joint template",
-    )
-    evaluate.add_argument(
-        "--profile",
-        type=Path,
-        default=Path(__file__).parent / "profiles/provisional.json",
-    )
-    evaluate.add_argument(
-        "--clip-to-stops",
-        action="store_true",
-        help="command the clipped stop instead of rejecting a target past it",
-    )
     evaluate.add_argument("--output", required=True, type=Path)
     evaluate.add_argument(
         "--timeout",
         type=float,
         default=1800.0,
         help="maximum worker wall time in seconds",
-    )
-    render = commands.add_parser(
-        "render", help="write videos for a few scenarios, or every named one"
-    )
-    render.add_argument("--model", required=True, type=Path)
-    render.add_argument("--adapter", required=True, choices=["g1-walker-99-v1"])
-    render.add_argument("--robot-config", required=True, type=Path)
-    render.add_argument(
-        "--joint-profile",
-        type=Path,
-        default=DEFAULT_JOINT_PROFILE,
-        help="per-joint movement rules, defaults to the standard 29-joint template",
-    )
-    render.add_argument(
-        "--profile",
-        type=Path,
-        default=Path(__file__).parent / "profiles/provisional.json",
-    )
-    render.add_argument(
-        "--clip-to-stops",
-        action="store_true",
-        help="command the clipped stop instead of rejecting a target past it",
     )
     render.add_argument(
         "--output",
@@ -248,10 +205,7 @@ def main(argv=None):
     render.add_argument(
         "--scenarios",
         default="stand,forward,seated,forward-pelvis-push",
-        help=(
-            "comma-separated commands, poses, forward-pelvis-push-small, "
-            "forward-pelvis-push-medium, forward-pelvis-push-heavy, stand-95, or stand-105"
-        ),
+        help="comma-separated commands, poses, forward-pelvis-push-small/medium/heavy, or stand-95/105",
     )
     render.add_argument("--fps", type=float, default=20.0)
     args = parser.parse_args(argv)
@@ -261,47 +215,32 @@ def main(argv=None):
 
             print(prepare_g1(args.submission, args.output))
             return 0
-        if args.command == "render":
-            os.environ.setdefault("MUJOCO_GL", "egl")
-            from .render import render_selection
-
-            from .evaluation import summarize_scenarios
-
-            positive(args.fps, "fps")
-            output = args.output.resolve()
-            output.mkdir(parents=True, exist_ok=True)
-            names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
-            if not names:
-                raise ValueError("select at least one scenario")
-            _written, results = render_selection(
-                {
-                    "model": str(args.model.resolve()),
-                    "adapter": args.adapter,
-                    "robot_config": str(args.robot_config.resolve()),
-                    "profile": str(args.profile.resolve()),
-                    "joint_profile": str(args.joint_profile.resolve()),
-                    "output": str(output),
-                    "clip_to_stops": args.clip_to_stops,
-                },
-                names,
-                args.fps,
-            )
-            print_scenario_summary(summarize_scenarios(results))
-            print(f"Videos: {output}")
-            return 0
-        positive(args.timeout, "timeout")
+        rendering = args.command == "render"
+        positive(
+            args.fps if rendering else args.timeout, "fps" if rendering else "timeout"
+        )
         output = args.output.resolve()
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True, exist_ok=rendering)
         request = {
             name: str(getattr(args, name).resolve())
             for name in ("model", "robot_config", "profile", "joint_profile")
         }
         request.update(
-            adapter=args.adapter,
-            output=str(output),
-            suite=str(args.suite.resolve()) if args.suite else None,
-            clip_to_stops=args.clip_to_stops,
+            adapter=args.adapter, output=str(output), clip_to_stops=args.clip_to_stops
         )
+        if rendering:
+            os.environ.setdefault("MUJOCO_GL", "egl")
+            from .evaluation import summarize_scenarios
+            from .render import render_selection
+
+            names = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+            if not names:
+                raise ValueError("select at least one scenario")
+            _written, results = render_selection(request, names, args.fps)
+            print_scenario_summary(summarize_scenarios(results))
+            print(f"Videos: {output}")
+            return 0
+        request["suite"] = str(args.suite.resolve()) if args.suite else None
         report = run_worker(request, args.timeout)
         coverage = report.get("coverage", {})
         movement = report.get("joint_movement_checks")

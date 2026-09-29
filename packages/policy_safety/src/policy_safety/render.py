@@ -4,158 +4,107 @@ import json
 import shutil
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
+from tempfile import TemporaryFile
 
 import numpy as np
 
-from .adapter import ADAPTERS
-from .config import DEFAULT_SUITE, profile_config
-from .evaluation import problem_class, run_scenario
-from .joint_rules import DEFAULT_JOINT_PROFILE, JointRules
-from .simulation import Simulation
-
-DEFAULT_SCENARIOS = ("stand", "forward", "seated", "forward-pelvis-push")
+from .config import DEFAULT_SUITE, positive
+from .evaluation import load_session, problem_class, run_scenario
 
 
 def write_mp4(path, frames, fps):
     """Encode RGB frames as an H.264 MP4. Requires ffmpeg."""
     if not frames:
         raise ValueError("no frames to write")
-    if fps <= 0:
-        raise ValueError("fps must be positive")
+    positive(fps, "fps")
     height, width = frames[0].shape[:2]
-    payload = bytearray()
-    for frame in frames:
-        if frame.shape != (height, width, 3) or frame.dtype != np.uint8:
-            raise ValueError("frames must be uint8 RGB arrays of one size")
-        payload += frame.tobytes()
+    if any(
+        frame.shape != (height, width, 3) or frame.dtype != np.uint8 for frame in frames
+    ):
+        raise ValueError("frames must be uint8 RGB arrays of one size")
     encoder = shutil.which("ffmpeg") or str(Path(sys.executable).with_name("ffmpeg"))
     if not Path(encoder).is_file():
         raise ValueError("rendering mp4 needs ffmpeg on PATH")
     path = Path(path)
-    result = subprocess.run(
-        [
-            encoder,
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            f"{width}x{height}",
-            "-r",
-            str(fps),
-            "-i",
-            "pipe:0",
-            "-an",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            str(path),
-        ],
-        input=bytes(payload),
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.decode(errors="replace").strip()
-        raise RuntimeError(detail or "ffmpeg failed")
+    args = [
+        encoder,
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "pipe:0",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(path),
+    ]
+    with (
+        TemporaryFile() as errors,
+        subprocess.Popen(args, stdin=subprocess.PIPE, stderr=errors) as process,
+    ):
+        try:
+            with process.stdin:
+                for frame in frames:
+                    process.stdin.write(frame.tobytes())
+        except BrokenPipeError:
+            pass
+        except BaseException:
+            process.kill()
+            raise
+        if process.wait():
+            errors.seek(0)
+            raise RuntimeError(
+                errors.read().decode(errors="replace").strip() or "ffmpeg failed"
+            )
     return path
 
 
-def _caption(frame, text):
-    from PIL import Image, ImageDraw
-
-    image = Image.fromarray(frame, mode="RGB")
-    drawing = ImageDraw.Draw(image)
-    drawing.rectangle((0, 0, image.width, 22), fill=(0, 0, 0))
-    drawing.text((6, 4), text, fill=(255, 220, 80))
-    return np.asarray(image)
-
-
-def frames_from_trace(sim, trace_path, fps):
+def frames_from_trace(sim, trace_path, fps, caption=""):
     """Replay saved integration states. One frame is kept per video tick."""
     import mujoco
+    from PIL import Image, ImageDraw
 
-    trace = np.load(trace_path, allow_pickle=False)
-    states = trace["integration_state"]
-    initial = trace["initial_integration_state"]
-    if states.size:
-        states = np.concatenate([initial.reshape(1, -1), states], axis=0)
-    else:
-        states = initial.reshape(1, -1)
     stride = max(1, round((1.0 / fps) / sim.physics_dt))
-    chosen = states[::stride]
+    with np.load(trace_path, allow_pickle=False) as trace:
+        chosen = [
+            trace["initial_integration_state"],
+            *trace["integration_state"][stride - 1 :: stride].copy(),
+        ]
     renderer = mujoco.Renderer(sim.model, height=368, width=640)
     frames = []
+    camera = mujoco.MjvCamera()
+    mujoco.mjv_defaultCamera(camera)
+    camera.distance, camera.azimuth, camera.elevation = 2.8, 135, -18
     try:
         for state in chosen:
             mujoco.mj_setState(sim.model, sim.data, state, sim.state_spec)
             mujoco.mj_forward(sim.model, sim.data)
-            camera = mujoco.MjvCamera()
-            mujoco.mjv_defaultCamera(camera)
             pelvis = sim.data.xpos[sim.base]
             camera.lookat[:] = [pelvis[0], pelvis[1], 0.75]
-            camera.distance = 2.8
-            camera.azimuth = 135
-            camera.elevation = -18
             renderer.update_scene(sim.data, camera=camera)
-            frames.append(renderer.render().copy())
+            frame = Image.fromarray(renderer.render(), mode="RGB")
+            if caption:
+                drawing = ImageDraw.Draw(frame)
+                drawing.rectangle((0, 0, frame.width, 22), fill=(0, 0, 0))
+                drawing.text((6, 4), caption, fill=(255, 220, 80))
+            frames.append(np.asarray(frame))
     finally:
         renderer.close()
     return frames
-
-
-def _session(request):
-    sim = Simulation(request["robot_config"])
-    profile = profile_config(request["profile"])
-    joint_rules = JointRules(
-        sim.robot["joint_names"], request.get("joint_profile", DEFAULT_JOINT_PROFILE)
-    )
-    adapter = ADAPTERS[request["adapter"]](request["model"], sim.robot)
-    clip = request.get("clip_to_stops", False)
-    if type(clip) is not bool:
-        raise ValueError("clip_to_stops must be a boolean")
-    return sim, adapter, profile, joint_rules, clip
-
-
-def _nominal(name, suite):
-    return {
-        "name": name,
-        "kind": "nominal",
-        "seed": suite["seeds"][0],
-        "command": list(suite["commands"][name]),
-        "seconds": suite["nominal_seconds"],
-        "upright": True,
-    }
-
-
-def _run(sim, adapter, profile, joint_rules, clip, scenario, trace, checkpoints=()):
-    sim_seed = scenario["seed"]
-    if scenario["kind"] == "counterfactual":
-        sim.reset(sim_seed, scenario["name"])
-    else:
-        sim.reset(sim_seed)
-    adapter.reset()
-    sim.set_torque_scale(scenario.get("torque_scale", 1.0))
-    try:
-        return run_scenario(
-            sim,
-            adapter,
-            profile,
-            scenario,
-            trace,
-            checkpoints,
-            joint_rules,
-            clip,
-        )
-    finally:
-        sim.set_torque_scale(1.0)
 
 
 def resolve_selection(name, suite):
@@ -171,19 +120,15 @@ def resolve_selection(name, suite):
         level = "small" if name == "forward-pelvis-push" else name.rsplit("-", 1)[-1]
         return {"mode": "push", "level": level}
     for command in suite["commands"]:
-        prefix = f"{command}-"
-        if not name.startswith(prefix):
-            continue
         for scale in suite["torque_scales"]:
-            if name[len(prefix) :] == str(round(scale * 100)):
+            if name == f"{command}-{round(scale * 100)}":
                 return {"mode": "torque", "command": command, "scale": scale}
     return None
 
 
 def render_selection(request, names, fps=20):
     """Simulate the named scenarios and write one video each."""
-    if fps <= 0:
-        raise ValueError("fps must be positive")
+    positive(fps, "fps")
     suite = DEFAULT_SUITE
     selected = [resolve_selection(name, suite) for name in names]
     if any(item is None for item in selected):
@@ -196,51 +141,68 @@ def render_selection(request, names, fps=20):
     output = Path(request["output"])
     output.mkdir(parents=True, exist_ok=True)
     (output / "traces").mkdir(exist_ok=True)
-    sim, adapter, profile, joint_rules, clip = _session(request)
+    sim, adapter, profile, joint_rules, clip, _files = load_session(request)
+    run = partial(
+        run_scenario,
+        sim,
+        adapter,
+        profile,
+        joint_rules=joint_rules,
+        clip_to_stops=clip,
+        continue_after_violation=True,
+    )
+    midpoint = round(0.5 * suite["nominal_seconds"] / sim.dt)
+    forward_snapshot = None
     written, results = [], []
     for index, (name, choice) in enumerate(zip(names, selected)):
         trace = output / "traces" / f"{index:05d}.npz"
-        if choice["mode"] == "push":
-            result = _render_pelvis_push(
-                sim, adapter, profile, joint_rules, clip, suite, trace, choice["level"]
-            )
-        elif choice["mode"] == "torque":
-            scenario = _nominal(choice["command"], suite)
+        pose = choice["mode"] == "pose"
+        command = choice.get("command", "forward")
+        scenario = {
+            "name": name if pose else command,
+            "kind": "counterfactual" if pose else "nominal",
+            "seed": suite["seeds"][0],
+            "command": [0, 0, 0] if pose else list(suite["commands"][command]),
+            "seconds": suite["counterfactual_seconds" if pose else "nominal_seconds"],
+            "upright": name == "standing" if pose else True,
+        }
+        sim.reset(scenario["seed"], name if pose else "standing")
+        adapter.reset()
+        if choice["mode"] == "torque":
             scenario["torque_scale"] = choice["scale"]
-            checkpoints = tuple(
-                round(suite["nominal_seconds"] * fraction / sim.dt)
-                for fraction in suite["checkpoints"]
+        elif choice["mode"] == "push":
+            if forward_snapshot is None:
+                _, snapshots = run(
+                    scenario, trace.with_name(trace.stem + "-nominal.npz"), (midpoint,)
+                )
+                forward_snapshot = snapshots[midpoint]
+            sim.restore(forward_snapshot, adapter)
+            level = next(
+                item for item in suite["push_levels"] if item["name"] == choice["level"]
             )
-            result, _ = _run(
-                sim, adapter, profile, joint_rules, clip, scenario, trace, checkpoints
+            scenario.update(
+                kind="perturbation",
+                seconds=suite["branch_seconds"],
+                checkpoint_step=midpoint,
+                push={
+                    "body": "pelvis",
+                    "level": level["name"],
+                    "force": [level["force_n"], 0, 0],
+                    "start": suite["push_start_seconds"],
+                    "duration": suite["push_seconds"],
+                },
             )
-        elif choice["mode"] == "pose":
-            scenario = {
-                "name": name,
-                "kind": "counterfactual",
-                "seed": suite["seeds"][0],
-                "command": [0, 0, 0],
-                "seconds": suite["counterfactual_seconds"],
-                "upright": name == "standing",
-            }
-            midpoint = round(0.5 * scenario["seconds"] / sim.dt)
-            result, _ = _run(
-                sim, adapter, profile, joint_rules, clip, scenario, trace, (midpoint,)
-            )
-        else:
-            scenario = _nominal(name, suite)
-            checkpoints = tuple(
-                round(suite["nominal_seconds"] * fraction / sim.dt)
-                for fraction in suite["checkpoints"]
-            )
-            result, _ = _run(
-                sim, adapter, profile, joint_rules, clip, scenario, trace, checkpoints
-            )
-        violation = (result.get("first_violation") or {}).get("reason", result["status"])
+        checkpoints = (
+            (midpoint,) if choice == {"mode": "command", "command": "forward"} else ()
+        )
+        result, snapshots = run(scenario, trace, checkpoints)
+        if checkpoints:
+            forward_snapshot = snapshots.get(midpoint)
+        violation = (result.get("first_violation") or {}).get(
+            "reason", result["status"]
+        )
         kind = problem_class(result)
-        frames = frames_from_trace(sim, trace, fps)
-        caption = f"{name}  {kind}  {violation}"
-        frames = [_caption(frame, caption) for frame in frames]
+        frames = frames_from_trace(sim, trace, fps, f"{name}  {kind}  {violation}")
         video = write_mp4(output / f"{name}.mp4", frames, fps)
         _contact_sheet(output / f"{name}.png", frames)
         results.append(result)
@@ -263,41 +225,6 @@ def render_selection(request, names, fps=20):
         )
     (output / "renders.json").write_text(json.dumps(written, indent=2) + "\n")
     return written, results
-
-
-def _render_pelvis_push(sim, adapter, profile, joint_rules, clip, suite, trace, level):
-    """Forward walk to the mid-run checkpoint, then a forward pelvis shove."""
-    scenario = _nominal("forward", suite)
-    checkpoints = tuple(
-        round(suite["nominal_seconds"] * fraction / sim.dt)
-        for fraction in suite["checkpoints"]
-    )
-    nominal_trace = trace.with_name(trace.stem + "-nominal.npz")
-    _, snapshots = _run(
-        sim, adapter, profile, joint_rules, clip, scenario, nominal_trace, checkpoints
-    )
-    step = round(suite["nominal_seconds"] * 0.5 / sim.dt)
-    sim.restore(snapshots[step], adapter)
-    branch = dict(
-        scenario,
-        kind="perturbation",
-        seconds=suite["branch_seconds"],
-        checkpoint_step=step,
-        push={
-            "body": "pelvis",
-            "level": level,
-            "force": [next(
-                item["force_n"] for item in suite["push_levels"] if item["name"] == level
-            ), 0.0, 0.0],
-            "start": suite["push_start_seconds"],
-            "duration": suite["push_seconds"],
-        },
-    )
-    midpoint = round(0.5 * suite["branch_seconds"] / sim.dt)
-    result, _ = run_scenario(
-        sim, adapter, profile, branch, trace, (midpoint,), joint_rules, clip
-    )
-    return result
 
 
 def _contact_sheet(path, frames):

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from joint_checks import JointViolation
 from policy_safety.adapter import PolicyViolation
 from policy_safety.joint_rules import DEFAULT_JOINT_PROFILE, JointRules
 
@@ -48,6 +49,7 @@ def command_case(rules, case):
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
+        ("valid", None),
         ("position", "joint_target_position_limit"),
         ("velocity", "joint_target_velocity_limit"),
         ("position_delta", "joint_position_target_change_limit"),
@@ -59,30 +61,7 @@ def command_case(rules, case):
         ("finite", "nonfinite_or_invalid_joint_command"),
     ],
 )
-def test_each_rule_rejects(rules, case, reason):
-    with pytest.raises(PolicyViolation, match=reason) as failure:
-        rules.check_command(*command_case(rules, case), 0.02)
-    if case != "finite":
-        assert failure.value.details["joint"] == "left_shoulder_pitch"
-        assert "limit" in failure.value.details
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "valid",
-        "position",
-        "velocity",
-        "position_delta",
-        "velocity_delta",
-        "tracking",
-        "initial_position",
-        "initial_velocity",
-        "torque",
-        "finite",
-    ],
-)
-def test_hardware_checker_acceptance_matches(rules, case, monkeypatch):
+def test_hardware_checker_acceptance_matches(rules, case, reason, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     if not (root / "robot_safety").is_dir():
         pytest.skip("hardware parity test requires the repository")
@@ -111,8 +90,11 @@ def test_hardware_checker_acceptance_matches(rules, case, monkeypatch):
     if accepted:
         rules.check_command(q, dq, tau, measured, previous, 0.02)
     else:
-        with pytest.raises(PolicyViolation):
+        with pytest.raises((PolicyViolation, JointViolation), match=reason) as failure:
             rules.check_command(q, dq, tau, measured, previous, 0.02)
+        if case != "finite":
+            assert failure.value.details["joint"] == "left_shoulder_pitch"
+            assert "limit" in failure.value.details
 
 
 def test_all_joint_velocity_change_boundaries(rules):
@@ -122,7 +104,7 @@ def test_all_joint_velocity_change_boundaries(rules):
         rules.check_command(q, dq, tau, measured, previous, 0.02)
         dq[i] += 1e-6
         with pytest.raises(
-            PolicyViolation, match="joint_velocity_target_change_limit"
+            JointViolation, match="joint_velocity_target_change_limit"
         ) as failure:
             rules.check_command(q, dq, tau, measured, previous, 0.02)
         assert failure.value.details["joint"] == name
@@ -137,7 +119,7 @@ def test_tracking_boundaries_and_coverage(rules):
         rules.check_tracking(q, measured)
         q[i] += 1e-6
         with pytest.raises(
-            PolicyViolation, match="joint_tracking_error_limit"
+            JointViolation, match="joint_tracking_error_limit"
         ) as failure:
             rules.check_tracking(q, measured)
         assert failure.value.details["joint"] == name
@@ -172,7 +154,7 @@ def test_all_joint_torque_boundaries(rules, sign):
         torque[i] = sign * limits.max_torque_nm
         rules.check_torque(torque)
         torque[i] += sign * 1e-6
-        with pytest.raises(PolicyViolation, match="joint_torque_limit") as failure:
+        with pytest.raises(JointViolation, match="joint_torque_limit") as failure:
             rules.check_torque(torque)
         assert failure.value.details["joint"] == name
 
@@ -184,7 +166,7 @@ def test_leg_position_delta(rules):
         q, dq, tau, measured, previous = command_case(rules, "valid")
         q[i] = measured[i] = limits.max_velocity_rad_secs * 0.001 + 1e-6
         with pytest.raises(
-            PolicyViolation, match="joint_position_target_change_limit"
+            JointViolation, match="joint_position_target_change_limit"
         ) as failure:
             rules.check_command(q, dq, tau, measured, previous, 0.001)
         assert failure.value.details["joint"] == name
@@ -197,7 +179,7 @@ def test_measured_speed_above_joint_cap_is_rejected(rules):
         speed[i] = 9.0
         rules.check_measured_velocity(speed)
         speed[i] = 9.0 + 1e-6
-        with pytest.raises(PolicyViolation, match="joint_velocity_limit") as failure:
+        with pytest.raises(JointViolation, match="joint_velocity_limit") as failure:
             rules.check_measured_velocity(speed)
         assert failure.value.details["joint"] == name
         assert failure.value.details["limit"] == 9.0

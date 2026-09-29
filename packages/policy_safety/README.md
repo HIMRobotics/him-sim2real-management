@@ -101,16 +101,16 @@ With `--clip-to-stops`, command, tracking, and torque checks use the clipped tar
 instead. Reports record this option and retain the raw target and clipping amount.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
-tensor dimensions is insufficient. Implement `PolicyAdapter`, register the adapter
-in `ADAPTERS`, and extend the CLI choices and robot backend validation when adding
-support. Adapters must save/restore all history and recurrent state and declare
+tensor dimensions is insufficient. Follow the `G1Walker` adapter contract, register it
+in `ADAPTERS`, and extend robot backend validation when adding support. Adapters must save/restore all history and recurrent state and declare
 observation frames, normalization, action semantics, gains, and timing. Arbitrary
 submitted Python adapters are not auto-loaded. The initial simulator backend is
 specific to the G1 walker contract and position actuators.
 
 ## Scenarios and limits
 
-The default medium suite uses one seed (0). Six independent commands cover standing,
+The default suite runs **100 scenarios** with one simulation seed (0).
+Six independent commands cover standing,
 forward walking, lateral walking in both directions, and turning both ways.
 Ten-second nominal runs yield checkpoints at 25%, 50%, and 75%. Each checkpoint
 has a three-second unperturbed continuation. Pushes happen only at the halfway
@@ -120,7 +120,10 @@ along both horizontal axes and both signs, at three strengths: 10 N, 50 N, and
 shoulder, elbow, and wrist on both sides. The three trunk sites are pushed during
 all six commands, 24 times per site at each strength. The 12 limb sites are pushed
 only during forward walking, 4 times per site at each strength. This gives
-120 direction slots and 360 pushes.
+120 direction slots and 360 candidate pushes. The default selects **58 pushes**
+without replacement, sampling across site/strength groups so all 15 sites receive
+each of the three strengths. Gaits and directions within each group are randomly
+selected using `sample_seed` (default 0), giving the same selection on repeat runs.
 
 | Level | Force | Approximate free-body velocity change for 33 kg over 100 ms |
 | --- | ---: | ---: |
@@ -133,17 +136,24 @@ center. The same six gaits are repeated with the motor torque at 95% and at
 105% of the intended position-controller torque. 95% is a weak motor. 105% is a
 high gain, not wear. These 12 nominal reruns start from the default standing pose
 and receive no pushes. Six five-second counterfactuals cover standing, floor
-sitting, supine, prone, and both sides. This is **402 scenarios**, totaling at
-most **22.4 simulated minutes**: six nominal runs, 18 unperturbed continuations,
-360 perturbations, 12 torque-scaled nominals, and six counterfactuals.
-Wall-clock time depends on the device.
+sitting, supine, prone, and both sides. All **42 baseline runs** are retained:
+six nominals, 18 unperturbed continuations, 12 torque-scaled nominals, and six
+counterfactuals. With 58 sampled pushes, the total is at most **7.3 simulated
+minutes**. Wall-clock time depends on the device.
 
-Pushes are deterministic, not random. The seed controls the small initial base
-position offset. The medium suite uses one seed. For three seeds and longer
-runs, pass `--suite packages/policy_safety/profiles/extended-suite.json` from
-the repository root. That suite has the same push plan, **1206 scenarios**, and
-up to **114 simulated minutes**. It may require a larger `--timeout`. The JSON
-file can also be copied outside the repository.
+Set `max_scenarios` and `sample_seed` through `--suite FILE.json`, for example
+`{"max_scenarios": 100, "sample_seed": 1}` for another sample. The budget covers
+all simulation seeds and must fit the baseline runs. A smaller push budget may
+omit site/strength groups. Sampling omits combinations, so this is a screening
+subset, not exhaustive coverage. Reports record the selection seed, candidate
+and selected push counts, and each selected scenario. Simulation `seeds` separately
+control the initial base-position offset.
+
+For every combination, use `--suite packages/policy_safety/profiles/full-suite.json`
+(402 scenarios, up to 22.4 simulated minutes). The existing `extended-suite.json`
+also disables sampling and uses three seeds and longer runs (1206 scenarios,
+up to 114 simulated minutes). Both set `max_scenarios` to `null` and may need a
+larger `--timeout`.
 
 Counterfactuals use zero commands and reset policy history. Only standing starts
 use upright fall criteria. Floor-contact poses must initialize within the 5 mm
@@ -174,9 +184,10 @@ test retaining every scenario family:
 Two profiles apply by default. `--profile` selects global simulator limits
 (`profiles/provisional.json`), including model joint/control/force ranges, a
 0.05 rad measured-position tolerance, and provisional upright fall criteria.
-`--joint-profile` selects per-joint movement rules. Its default is a packaged,
-byte-for-byte copy of `robot_safety/profiles/g1_type5.template.json`, not the
-relaxed `lenient` profile. No repository or ROS dependency is needed at runtime.
+`--joint-profile` selects per-joint movement rules. Its default links to
+`robot_safety/profiles/g1_type5.template.json`, not the relaxed `lenient` profile.
+Wheel builds include the file's contents, with no repository or ROS dependency
+at runtime.
 
 The joint rules actively reject target positions outside their individual bounds,
 excessive commanded velocity, excessive changes in position and velocity targets,
@@ -192,9 +203,9 @@ Command-speed and target-change checks apply immediately.
 
 The per-joint `max_velocity_rad_secs` fields live in
 [`robot_safety/profiles/g1_type5.template.json`](../../robot_safety/profiles/g1_type5.template.json)
-and its [packaged copy](src/policy_safety/profiles/g1_type5.template.json).
+and are shared through the [package link](src/policy_safety/profiles/g1_type5.template.json).
 [`robot_safety/joint_checks.py`](../../robot_safety/joint_checks.py) defines
-`JOINT_SPEED_LIMIT_RAD_S = 9.0`, `BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4`, and
+`BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4` and
 `SPEED_HOLD_S = 0.05`. Both measured-speed monitors use the loaded joint profile
 and the shared body-speed and hold-time constants.
 

@@ -46,6 +46,13 @@ def validate_assets(root, robot):
                 )
             if element.tag == "include":
                 pending.append(dependency)
+    required = {
+        p.resolve()
+        for p in root.rglob("*")
+        if p.suffix.lower() in (".xml", ".stl", ".obj", ".msh", ".png", ".jpg")
+    }
+    if required - assets:
+        raise ValueError("robot assets missing from manifest")
     return assets
 
 
@@ -54,7 +61,7 @@ class Simulation:
         self.path = Path(robot_path).resolve()
         self.robot = read_json(self.path)
         robot = self.robot
-        validate_assets(self.path.parent, robot)
+        self.assets = validate_assets(self.path.parent, robot)
         if robot["version"] != 1 or robot["contract"] != "g1-walker-99-v1":
             raise ValueError("unsupported robot contract")
         for name in ("control_seconds", "physics_seconds", "standing_height"):

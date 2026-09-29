@@ -87,6 +87,7 @@ def prepare_g1(submission, output):
   </worldbody>
 </mujoco>
 """)
+    model_paths = {output / f.relative_to(submission / "policies") for f in files}
     robot = {
         "version": 1,
         "contract": "g1-walker-99-v1",
@@ -106,9 +107,7 @@ def prepare_g1(submission, output):
         "assets": [
             str(p.relative_to(output))
             for p in sorted(output.rglob("*"))
-            if p.is_file()
-            and p
-            not in [output / f.relative_to(submission / "policies") for f in files]
+            if p.is_file() and p not in model_paths
         ],
     }
     (output / "robot.json").write_text(json.dumps(robot, indent=2) + "\n")

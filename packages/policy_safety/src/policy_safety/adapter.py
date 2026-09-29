@@ -1,7 +1,5 @@
 """Trusted adapters define policy semantics independently of file dimensions."""
 
-from typing import Protocol
-
 import numpy as np
 
 from .config import vector
@@ -13,18 +11,6 @@ class PolicyViolation(ValueError):
     def __init__(self, reason, details=None):
         super().__init__(reason)
         self.details = details or {}
-
-
-class PolicyAdapter(Protocol):
-    tested_behavior: str
-
-    def reset(self): ...
-    def observation(self, q, dq, quat, base_velocity, command): ...
-    def infer(self, observation): ...
-    def decode(self, raw): ...
-    def command_velocity_and_torque(self): ...
-    def snapshot(self): ...
-    def restore(self, state): ...
 
 
 def inverse_rotate(quat, vec):
