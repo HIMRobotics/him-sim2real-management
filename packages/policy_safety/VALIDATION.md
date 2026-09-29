@@ -5,13 +5,18 @@ The dated entries below preserve results from the versions tested at the time.
 
 ## Regression checks — September 29, 2026
 
-- Policy-safety suite: 74 tests passed in `.venv-policy-safety`.
-- Repository unittest suite: 125 tests passed. Local HTTP tests required socket
-  access outside the execution sandbox.
-- Changed documentation's local links resolve. `git diff --check` and the
-  safety-stop launcher's shell syntax check passed.
+- Policy-safety suite: 64 tests passed. Shared robot-safety unittest suite: 90 passed.
+  Coverage includes all 12 leg joints, torque/tracking boundaries, checkpoint
+  restoration, push timing, and failure handling.
+- The refactor preserved all arrays in 208 sample trace files from shortened
+  evaluations with clipping off/on and eight render scenarios. Reports matched
+  except for implementation fingerprints. Ruff and `git diff --check` passed.
+- The default 100-scenario sample run reported 100 violations and zero errors.
+  Six baselines ran for 10 seconds. The other 94 runs stopped before physics
+  advanced, including all 58 push scenarios. No pushes occurred in that run.
 
-These checks did not run the full screening battery or operate robot hardware.
+Reported coverage therefore does not establish full-duration or push coverage.
+These checks did not operate robot hardware or calibrate the provisional limits.
 
 ## Recorded sample observations — September 29, 2026
 

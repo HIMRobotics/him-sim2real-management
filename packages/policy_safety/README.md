@@ -300,16 +300,15 @@ All required model weights and the robot asset manifest are fingerprinted.
 `joint_movement_checks` records the selected joint-profile values, rules and joint
 coverage. `hashes.joint_profile` identifies its exact contents. Joint-rule
 violations include the joint, observed value, threshold, units and simulation time.
-`scenario_summary` counts problems and warnings out of the scenarios in each
+The table counts problems and tracking violations out of the scenarios in each
 gait, each gait's pushes, and each starting pose. One run counts in every class
-it hits, so the fractions can overlap. A tracking miss is a `warning` and a
-`miss`. A limit, a flail, a fall, any other violation, or an error is a
-`problem`. `flailing` is a joint faster than 9 rad/s, or the body spinning faster
+it hits, so the fractions can overlap. A tracking miss counts under both
+`tracking violations` and `misses`. A limit, a flail, a fall, any other violation,
+or an error is a `problem`. `flailing` is a joint faster than 9 rad/s, or the body spinning faster
 than 5.4 rad/s, held for at least 50 ms. A shorter impact, such as a foot flick
 after a shove, does not count. Position, speed, torque, and range breaches are `limits`.
-A skipped branch is counted on its own and is neither a problem nor a warning.
-The warning label describes the summary category. A tracking miss remains a
-recorded violation and still affects the exit status.
+A skipped branch is counted separately. Tracking violations affect the exit status.
+The JSON `scenario_summary` retains the `warnings` key for compatibility.
 
 Videos are separate from the screening report. `render` replays the same
 checker for the names you list and writes one H.264 `.mp4` plus a
@@ -362,14 +361,15 @@ Exact replay across different dependency versions or devices is not promised.
 Incomplete coverage takes precedence over violations in the exit status. Both
 remain visible in the report. A nominal run records its first violation and
 keeps simulating through its checkpoints, so violations do not prevent later
-continuations and pushes. Evaluation branches stop at their own first violation.
+continuations and pushes. Evaluation branches stop at their own first violation,
+which can happen before a scheduled push. Reported counts do not imply full-duration runs.
 If an execution error prevents a nominal checkpoint, its dependent branches are
 reported as errors with `nominal_checkpoint_unavailable`.
 A worker failure preserves already written scenario results.
 `--timeout` limits worker wall time, defaulting to 1800 seconds.
 The terminal displays an updating progress bar every second, including elapsed
-wall time, reported/total scenarios, violations (`v`), errors (`err`), skipped
-branches (`skip`) and the active test where terminal width permits. Redirected
+wall time, reported/total scenarios, violations, errors, incomplete scenarios,
+and the active test where terminal width permits. Redirected
 output uses plain lines every five seconds. Unreviewed profiles display
 `UNCALIBRATED` throughout the run.
 This is a heartbeat, not proof that inference is advancing. During initialization
