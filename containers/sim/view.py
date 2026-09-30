@@ -1,14 +1,9 @@
-"""Write a browser replay of a container sim. The page is a flat floor and the G1.
-
-Mouse orbit, right-drag pan, scroll zoom. Space pauses. Arrow keys step one frame.
-The MuJoCo desktop window is not used: this machine's display has no GLX context.
-"""
+"""Write a browser replay of the recorded MuJoCo scene."""
 
 import json
 import shutil
 import struct
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import mujoco
@@ -17,11 +12,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "robot_safety"))
 
 from plant import load_model
-
-ROBOT_XML = (
-    Path(__file__).resolve().parents[2]
-    / "packages/policy_safety/src/policy_safety/robots/g1/g1_robot.xml"
-)
 
 PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -66,9 +56,31 @@ controls.update();
 
 const loader = new STLLoader();
 const parts = [];
+async function geometryFor(geom) {
+  const s = geom.size;
+  let geometry;
+  switch (geom.type) {
+    case "mesh": return await loader.loadAsync(geom.file);
+    case "plane": return new THREE.PlaneGeometry(2 * (s[0] || 10), 2 * (s[1] || 10));
+    case "box": return new THREE.BoxGeometry(2 * s[0], 2 * s[1], 2 * s[2]);
+    case "sphere": return new THREE.SphereGeometry(s[0], 24, 16);
+    case "ellipsoid":
+      geometry = new THREE.SphereGeometry(1, 24, 16);
+      geometry.scale(s[0], s[1], s[2]);
+      return geometry;
+    case "capsule": geometry = new THREE.CapsuleGeometry(s[0], 2 * s[1], 8, 24); break;
+    case "cylinder": geometry = new THREE.CylinderGeometry(s[0], s[0], 2 * s[1], 24); break;
+    default: throw new Error(`Unsupported geometry: ${geom.type}`);
+  }
+  geometry.rotateX(Math.PI / 2);
+  return geometry;
+}
 for (const geom of motion.geoms) {
-  const geometry = await loader.loadAsync(geom.file);
-  const material = new THREE.MeshStandardMaterial({ color: geom.color, metalness: 0.15, roughness: 0.6 });
+  const geometry = await geometryFor(geom);
+  const material = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(...geom.color), opacity: geom.opacity,
+    transparent: geom.opacity < 1, side: THREE.DoubleSide, metalness: 0.15, roughness: 0.6
+  });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.matrixAutoUpdate = false;
   scene.add(mesh);
@@ -106,7 +118,9 @@ show(0);
 let last = performance.now();
 function tick(now) {
   requestAnimationFrame(tick);
-  if (!paused && now - last > 20) { last = now; show(frame + 1); }
+  const next = (frame + 1) % motion.frames;
+  const delay = next ? 1000 * (motion.time[next] - motion.time[frame]) : 20;
+  if (!paused && now - last >= delay) { last = now; show(next); }
   controls.update();
   renderer.render(scene, camera);
 }
@@ -123,9 +137,16 @@ def write_compiled_stl(model, mesh_id, path):
     vert_num = int(model.mesh_vertnum[mesh_id])
     face_adr = int(model.mesh_faceadr[mesh_id])
     face_num = int(model.mesh_facenum[mesh_id])
-    vertices = np.asarray(model.mesh_vert[vert_adr : vert_adr + vert_num], dtype=np.float32)
+    vertices = np.asarray(
+        model.mesh_vert[vert_adr : vert_adr + vert_num], dtype=np.float32
+    )
     faces = np.asarray(model.mesh_face[face_adr : face_adr + face_num], dtype=np.int32)
     triangles = vertices[faces]
+    write_triangles_stl(triangles, path)
+
+
+def write_triangles_stl(triangles, path):
+    """Write triangle vertices as a binary STL."""
     normals = np.cross(
         triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
     )
@@ -133,46 +154,78 @@ def write_compiled_stl(model, mesh_id, path):
     normals = np.divide(normals, length, out=np.zeros_like(normals), where=length > 0)
     with Path(path).open("wb") as stream:
         stream.write(b"g1 sim mesh".ljust(80, b"\0"))
-        stream.write(struct.pack("<I", int(face_num)))
-        for normal, triangle in zip(normals, triangles):
-            stream.write(struct.pack("<12fH", *normal, *triangle.reshape(-1), 0))
+        stream.write(struct.pack("<I", len(triangles)))
+        stream.writelines(
+            struct.pack("<12fH", *normal, *triangle.reshape(-1), 0)
+            for normal, triangle in zip(normals, triangles)
+        )
 
 
-def visual_colors():
-    """Colors in the same order as the visual mesh geoms."""
-    colors = []
-    for geom in ET.parse(ROBOT_XML).iter("geom"):
-        mesh = geom.get("mesh")
-        if geom.get("class") == "visual" and mesh:
-            color = "#404040" if geom.get("material") == "black" else "#b8b8b8"
-            colors.append((mesh, color))
-    return colors
+def write_heightfield_stl(model, field_id, path):
+    """Export the terrain surface from the compiled heightfield."""
+    rows, cols = int(model.hfield_nrow[field_id]), int(model.hfield_ncol[field_id])
+    start = int(model.hfield_adr[field_id])
+    size = model.hfield_size[field_id]
+    x, y = np.meshgrid(
+        np.linspace(-size[0], size[0], cols), np.linspace(-size[1], size[1], rows)
+    )
+    z = model.hfield_data[start : start + rows * cols].reshape(rows, cols) * size[2]
+    vertices = np.stack((x, y, z), axis=-1)
+    a, b = vertices[:-1, :-1], vertices[:-1, 1:]
+    c, d = vertices[1:, :-1], vertices[1:, 1:]
+    triangles = np.concatenate(
+        (
+            np.stack((a, b, c), axis=-2).reshape(-1, 3, 3),
+            np.stack((b, d, c), axis=-2).reshape(-1, 3, 3),
+        )
+    )
+    write_triangles_stl(triangles, path)
 
 
 def export_replay(trace_path, dest):
     """Build dest/index.html, motion.json, and the STL files the page loads."""
     trace_path, dest = Path(trace_path), Path(dest)
-    qpos = np.load(trace_path)["qpos"]
-    model = load_model()
+    with np.load(trace_path, allow_pickle=False) as trace:
+        qpos = trace["qpos"]
+        times = trace["time"]
+        if "model" in trace:
+            model = mujoco.MjModel.from_binary_path(
+                "scene.mjb", {"scene.mjb": trace["model"].tobytes()}
+            )
+        else:
+            model = load_model()
+    if qpos.ndim != 2 or qpos.shape[1] != model.nq or not len(qpos):
+        raise ValueError("trace poses do not match the recorded model")
     data = mujoco.MjData(model)
-    colors = {name: color for name, color in visual_colors()}
     geoms = []
+    base = model.body("pelvis").id
+    robot_bodies = {base}
+    for body_id in range(base + 1, model.nbody):
+        if int(model.body_parentid[body_id]) in robot_bodies:
+            robot_bodies.add(body_id)
     for geom_id in range(model.ngeom):
-        if int(model.geom_group[geom_id]) != 2:
+        if (
+            int(model.geom_bodyid[geom_id]) in robot_bodies
+            and model.geom_group[geom_id] == 3
+        ):
             continue
-        if int(model.geom_type[geom_id]) != int(mujoco.mjtGeom.mjGEOM_MESH):
+        material = int(model.geom_matid[geom_id])
+        rgba = model.mat_rgba[material] if material >= 0 else model.geom_rgba[geom_id]
+        if rgba[3] <= 0:
             continue
-        mesh_id = int(model.geom_dataid[geom_id])
-        mesh_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id)
-        geoms.append((geom_id, mesh_id, mesh_name, colors.get(mesh_name, "#b8b8b8")))
+        kind = (
+            mujoco.mjtGeom(int(model.geom_type[geom_id]))
+            .name.removeprefix("mjGEOM_")
+            .lower()
+        )
+        geoms.append((geom_id, kind, rgba.tolist()))
     poses = [[] for _ in geoms]
     focus = []
-    base = model.body("pelvis").id
     for frame in qpos:
         data.qpos[:] = frame
         mujoco.mj_forward(model, data)
         focus.append([round(float(v), 5) for v in data.xpos[base]])
-        for slot, (geom_id, _mesh_id, _mesh_name, _color) in enumerate(geoms):
+        for slot, (geom_id, _kind, _rgba) in enumerate(geoms):
             rotation = data.geom_xmat[geom_id]
             position = data.geom_xpos[geom_id]
             poses[slot].append(
@@ -183,16 +236,26 @@ def export_replay(trace_path, dest):
     if dest.exists():
         shutil.rmtree(dest)
     mesh_dir.mkdir(parents=True)
-    payload = {"frames": int(len(qpos)), "focus": focus, "geoms": []}
+    payload = {"frames": len(qpos), "time": times.tolist(), "focus": focus, "geoms": []}
     written = set()
-    for slot, (_geom_id, mesh_id, mesh_name, color) in enumerate(geoms):
-        filename = f"{mesh_name}.stl"
-        if mesh_id not in written:
-            write_compiled_stl(model, mesh_id, mesh_dir / filename)
-            written.add(mesh_id)
-        payload["geoms"].append(
-            {"file": f"meshes/{filename}", "color": color, "poses": poses[slot]}
-        )
+    for slot, (geom_id, kind, rgba) in enumerate(geoms):
+        geom = {
+            "name": mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id),
+            "type": kind,
+            "size": model.geom_size[geom_id].tolist(),
+            "color": rgba[:3],
+            "opacity": rgba[3],
+            "poses": poses[slot],
+        }
+        if kind in ("mesh", "hfield"):
+            asset_id = int(model.geom_dataid[geom_id])
+            filename = f"{kind}_{asset_id}.stl"
+            if filename not in written:
+                writer = write_compiled_stl if kind == "mesh" else write_heightfield_stl
+                writer(model, asset_id, mesh_dir / filename)
+                written.add(filename)
+            geom.update(type="mesh", file=f"meshes/{filename}")
+        payload["geoms"].append(geom)
     dest.joinpath("motion.json").write_text(json.dumps(payload))
     dest.joinpath("index.html").write_text(PAGE)
     for name in ("three.module.js", "OrbitControls.js", "STLLoader.js"):
@@ -201,7 +264,11 @@ def export_replay(trace_path, dest):
 
 
 def main():
-    trace = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent / "output" / "trace.npz"
+    trace = (
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else Path(__file__).resolve().parent / "output" / "trace.npz"
+    )
     dest = Path(sys.argv[2]) if len(sys.argv) > 2 else trace.parent / "view"
     if not trace.is_file():
         print(f"No trace at {trace}. Run ./sim.sh first.", file=sys.stderr)

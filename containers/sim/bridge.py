@@ -185,7 +185,7 @@ class SimBridge(Node):
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         self.report_path.write_text(json.dumps(report, indent=2) + "\n")
         status = report.get("status")
-        self.exit_code = {"within_limits": 0, "violation": 1}.get(status, 2)
+        self.exit_code = {"within_limits": 0, "completed": 0, "violation": 1}.get(status, 2)
         print(
             f"sim {status} reason={report.get('reason')} commands={report.get('commands')}",
             flush=True,

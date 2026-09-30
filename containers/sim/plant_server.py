@@ -8,7 +8,14 @@ from runner import Runner
 
 
 def main():
-    runner = Runner(os.environ.get("G1_SIM_POSE", "standing"))
+    safety_checks = os.environ.get("G1_SIM_SAFETY_CHECKS", "1")
+    if safety_checks not in ("0", "1"):
+        raise ValueError("G1_SIM_SAFETY_CHECKS must be 0 or 1")
+    runner = Runner(
+        os.environ.get("G1_SIM_POSE", "standing"),
+        scene=os.environ.get("G1_SIM_SCENE") or None,
+        safety_checks=safety_checks == "1",
+    )
     for line in sys.stdin:
         line = line.strip()
         if not line:

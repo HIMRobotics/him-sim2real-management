@@ -2,9 +2,9 @@
 
 `./sim.sh` runs a submission container against a simulated Unitree G1. Use it to check the container before `./setup.sh`, and to see whether its joint commands pass the safety checks. It does not write robot motors, and it does not stop `g1-safety-stops`.
 
-The scene is a flat floor and the 29-joint G1. The container sees the same ROS topics it sees on the robot. A desktop MuJoCo window is not used. The recording plays in a browser.
+The default scene is a flat floor and the 29-joint G1. Submitters can supply a MuJoCo XML scene and assets beside their image and select it with `--scene`. Safety checks are enabled by default and can be disabled with `--no-safety-checks`. The container sees the same ROS topics it sees on the robot. The recording plays in a browser.
 
-The submission rules — packaging, inputs, outputs, limits, and access — are in [README.md](README.md). Topic fields are in [INSTRUCTIONS.md](INSTRUCTIONS.md). The sim accepts that same container and does not relax the rules.
+The submission rules — packaging, inputs, outputs, limits, and access — are in [README.md](README.md). Topic fields are in [INSTRUCTIONS.md](INSTRUCTIONS.md). Disabling simulation checks does not change the robot launcher or the host safety service.
 
 ## What it is for
 
@@ -26,7 +26,7 @@ Two processes share that network:
 
 The bridge and the plant talk over stdin. The plant is the only thing that advances physics.
 
-Each control step is 0.02 s. The plant publishes a `RobotFeedback`, the container answers with one `JointCommand` for all 29 joints, and the plant either steps MuJoCo or latches a violation. The clock for the run starts when the first command is accepted. If none arrives within 10 seconds, the report is `no_command`.
+The bridge publishes `RobotFeedback` on a 0.02 s timer and receives asynchronous `JointCommand` messages for all 29 joints. After the first accepted command, each timer callback advances MuJoCo by ten 0.002 s steps using the latest accepted command. The run duration is wall-clock time from that first acceptance. If none arrives within 10 seconds, the report is `no_command`, unless a rejected command has already latched a failure.
 
 What the container gets:
 
@@ -46,7 +46,7 @@ What the container sends:
 
 A failed check is not applied. Later commands stay rejected. The host safety service is left running.
 
-Checks, in `containers/sim/runner.py`:
+With safety checks enabled, `containers/sim/runner.py` checks:
 
 - `session_id` matches the armed session, `sequence` increases, and `observation_id` is still fresh.
 - Targets, gains, and feedforward torque are finite and inside the sanity bounds.
@@ -54,6 +54,10 @@ Checks, in `containers/sim/runner.py`:
 - After the step, a held overspeed latches. A fall latches only from the standing start.
 
 `hardware_authorization` in the report is always false. A passing sim run is not permission to run on the robot.
+
+With `--no-safety-checks`, the sim bypasses observation age, action timeout, numeric sanity bounds, joint position/tracking/rate/torque limits, feedforward-torque restrictions, overspeed, and falls. It keeps applying the last command until another arrives. MuJoCo's own physical joint and actuator limits remain part of the model. The ROS protocol still requires a matching session, increasing sequence, and an observation ID issued by the sim. Every command array must contain 29 finite numbers. Malformed commands and non-finite simulation state still terminate acceptance and report `error`.
+
+Unchecked runs report `completed`, never `within_limits`. Reports and counterfactual summaries include `safety_checks` and the selected `scene` path (`null` means the bundled scene). `--safety-checks` explicitly re-enables checking. If both flags are supplied, the last one wins.
 
 ## How to use
 
@@ -63,12 +67,14 @@ From the repo root:
 ./sim.sh --self-test
 ./sim.sh --seconds 10
 ./sim.sh --counterfactuals
+./sim.sh --scene containers/upload/environment/scene.xml
+./sim.sh --scene containers/upload/environment/scene.xml --no-safety-checks
 ./sim.sh stop
 ```
 
 `--self-test` holds the standing pose for one second and should finish `within_limits`. `./sim.sh` with no flag loads the one archive in `containers/upload/` and starts standing. `./sim.sh stop` removes the sim containers.
 
-`--counterfactuals` is the same six starts the offline screening used: standing, floor sitting, supine, prone, and both sides. Each pose starts a new container, so the submission's own state is reset. Floor sitting folds the legs. The four lying poses keep the stand joint angles and turn the pelvis; `rt/lowstate` carries that orientation on the IMU. Standing is the only pose that can fail for falling. A floor pose that stays down is not a fall, and the run does not require the robot to get up. Joint checks still apply, including the first command having to match the measured joints.
+`--counterfactuals` is the same six starts the offline screening used: standing, floor sitting, supine, prone, and both sides. Each pose starts a new container, so the submission's own state is reset. Floor sitting folds the legs. The four lying poses keep the stand joint angles and turn the pelvis. Standing is the only pose that can fail for falling. A floor pose that stays down is not a fall, and the run does not require the robot to get up. Joint checks apply unless disabled, including the first command having to match the measured joints. The selected scene and safety setting apply to all six runs.
 
 Each pose writes `containers/sim/output/poses/<pose>/report.json` and a trace. The battery writes `containers/sim/output/poses/summary.json`. Replay one pose with `./sim.sh replay containers/sim/output/poses/supine/trace.npz`. `--self-test --counterfactuals` holds the measured joints of every pose for one second. A floor pose can still fail a joint check while the body settles. That failure is not a fall.
 
@@ -78,10 +84,14 @@ Other flags:
 | --- | --- |
 | `--seconds 10` | Length of the run after the first accepted command. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
+| `--scene path/to/scene.xml` | Load a complete MuJoCo G1 scene from the host filesystem. Relative paths use the caller's working directory. |
+| `--safety-checks` | Enable simulation safety checks, the default. |
+| `--no-safety-checks` | Run without simulation safety limits, freshness/timeouts, or fall checks. |
 | `--pose name` | Start pose. Default `standing`. Also `seated`, `supine`, `prone`, `left_side`, `right_side`. |
 | `--counterfactuals` | Run all six poses, each in a fresh container. Default length is 5 s. |
 | `--view` | When a single run finishes, serve the replay page. |
 | `replay` | Serve the last recording. Does not start a new run. |
+| `--help` | Show usage without starting Docker or requesting sudo. |
 
 `./sim.sh` asks for `sudo` so it can enter the isolated network. `replay` does not.
 
@@ -90,7 +100,7 @@ The run writes:
 | File | What it is |
 | --- | --- |
 | `containers/sim/output/report.json` | Status, reason, command count, and simulated time. |
-| `containers/sim/output/trace.npz` | Pelvis and joint poses for the replay. |
+| `containers/sim/output/trace.npz` | Poses, timestamps, and a compiled model snapshot for replay. |
 | `containers/sim/output/bridge.log` | ROS bridge log, if the run fails early. |
 
 `status` in the report:
@@ -99,13 +109,57 @@ The run writes:
 | --- | --- |
 | `within_limits` | At least one command was accepted and none failed. |
 | `violation` | `reason` is the check that failed. `detail` names the joint when there is one. |
+| `completed` | Commands were accepted with safety checks disabled. This is not a safety pass. |
+| `error` | An unchecked run failed protocol or simulation validation. |
 | `no_command` | Nothing was accepted before the startup wait ended. |
 
 The same checks, without Docker, are `containers/sim/test_runner.py`:
 
 ```bash
-.venv-policy-safety/bin/python -m unittest containers.sim.test_runner
+.venv-policy-safety/bin/python -m unittest containers.sim.test_runner containers.sim.test_scene
 ```
+
+## Submit a MuJoCo environment
+
+Upload a complete MJCF scene and its assets beside the image:
+
+```text
+containers/upload/
+  submission.tar
+  environment/
+    scene.xml
+    g1_robot.xml
+    third_party/unitree_g1/assets/...
+```
+
+`--scene` selects a host file, not a path inside the image. Include files and meshes follow MuJoCo's normal path resolution from the scene and its compiler settings. Keep the asset directory layout when copying the environment. The host user who launches the sim must be able to read these files.
+
+To start with this repository's G1, copy its model and assets:
+
+```bash
+mkdir -p containers/upload/environment
+cp -R packages/policy_safety/src/policy_safety/robots/g1/. containers/upload/environment/
+```
+
+Create `containers/upload/environment/scene.xml`:
+
+```xml
+<mujoco model="submission_environment">
+  <include file="g1_robot.xml"/>
+  <option gravity="0 0 -9.81"/>
+  <worldbody>
+    <geom name="safety_floor" type="plane" size="0 0 0.05" friction="1.15"/>
+    <geom name="step" type="box" pos="2 0 0.1" size="0.4 0.8 0.1"
+          rgba="0.6 0.3 0.1 1"/>
+  </worldbody>
+</mujoco>
+```
+
+Then run `./sim.sh --self-test --scene containers/upload/environment/scene.xml`, or drop `--self-test` to run the submitted image.
+
+The scene can change terrain, friction, gravity, obstacles, and passive objects. It must retain the G1's 29 named hinge joints and matching affine position actuators, `pelvis`, `floating_base_joint`, the two named pelvis IMU sensors, and a `stand` keyframe. Additional passive joints/free bodies are supported. If adding joints changes the model's position layout, update the `stand` keyframe accordingly. Additional actuators and different robots are not supported by the current command interface.
+
+`standing` resets to the submitted `stand` keyframe, including its root position and orientation. Other poses require a ground geom named `safety_floor` and space to place the robot without substantial penetration. With checks enabled, the existing fall criterion still uses pelvis world height below 0.28 m or uprightness below 0.3, so choose the environment's vertical origin accordingly. Simulation timing remains 20 ms control / 2 ms physics even if the XML specifies another timestep.
 
 ## How to visualize
 
@@ -115,7 +169,9 @@ After a run:
 ./sim.sh replay
 ```
 
-Open `http://127.0.0.1:8765`. The page is a flat floor and the G1, playing `containers/sim/output/trace.npz`.
+Open `http://127.0.0.1:8765`. The page plays the recorded G1 and environment from `containers/sim/output/trace.npz`. The trace embeds the compiled model, so replay does not need the original XML or asset files. Replay uses the installed MuJoCo version to load that snapshot. Older traces without a model snapshot use the bundled scene.
+
+Replay draws mesh geometry, planes, boxes, spheres, ellipsoids, cylinders, capsules, and heightfield surfaces, including passive moving objects. Materials use solid colors and opacity. Textures and the scene's lighting are not reproduced.
 
 | Control | Action |
 | --- | --- |

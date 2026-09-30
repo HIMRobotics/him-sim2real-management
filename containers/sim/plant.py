@@ -1,25 +1,30 @@
 """MuJoCo G1 used as the plant behind a container submission."""
 
 import math
+import tempfile
 from pathlib import Path
 
 import mujoco
 import numpy as np
 from hardware_constants import G1_29_JOINT_NAMES
 
-def load_model():
-    """Load the G1 from a scene sitting next to the robot XML.
 
-    MuJoCo resolves the included mesh directory from that folder. A compiler
-    override from another directory drops the position gains.
-    """
+def load_model(scene=None):
+    """Load a submitted MJCF scene or the bundled flat-floor G1."""
+    if scene is not None:
+        scene = Path(scene).expanduser().resolve()
+        if not scene.is_file():
+            raise ValueError(f"MuJoCo scene does not exist: {scene}")
+        return mujoco.MjModel.from_xml_path(str(scene))
     robot_dir = (
         Path(__file__).resolve().parents[2]
         / "packages/policy_safety/src/policy_safety/robots/g1"
     )
-    scene = robot_dir / ".container_sim_scene.xml"
-    scene.write_text(
-        """<mujoco model="g1_container_sim">
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".xml", prefix=".container_sim_", dir=robot_dir
+    ) as scene:
+        scene.write(
+            """<mujoco model="g1_container_sim">
   <include file="g1_robot.xml"/>
   <option timestep="0.002" gravity="0 0 -9.81"/>
   <worldbody>
@@ -27,11 +32,9 @@ def load_model():
   </worldbody>
 </mujoco>
 """
-    )
-    try:
-        return mujoco.MjModel.from_xml_path(str(scene))
-    finally:
-        scene.unlink(missing_ok=True)
+        )
+        scene.flush()
+        return mujoco.MjModel.from_xml_path(scene.name)
 
 
 CONTROL_DT = 0.02
@@ -55,8 +58,9 @@ def quat_to_rpy(quat):
 class Plant:
     """29-DOF G1. Commands are PD targets in Unitree joint order."""
 
-    def __init__(self, pose="standing"):
-        self.model = load_model()
+    def __init__(self, pose="standing", scene=None, check_fall=True):
+        self.scene = Path(scene).expanduser().resolve() if scene else None
+        self.model = load_model(self.scene)
         self.model.opt.timestep = PHYSICS_DT
         self.data = mujoco.MjData(self.model)
         self.joint_names = [f"{name}_joint" for name in G1_29_JOINT_NAMES]
@@ -66,9 +70,19 @@ class Plant:
         self.joints = np.array(joints)
         if (
             self.model.nu != 29
-            or self.model.nq != 36
-            or np.any(self.model.actuator_biastype[self.actuators] != mujoco.mjtBias.mjBIAS_AFFINE)
-            or np.any(self.model.actuator_gaintype[self.actuators] != mujoco.mjtGain.mjGAIN_FIXED)
+            or np.any(self.model.jnt_type[self.joints] != mujoco.mjtJoint.mjJNT_HINGE)
+            or np.any(
+                self.model.actuator_trntype[self.actuators] != mujoco.mjtTrn.mjTRN_JOINT
+            )
+            or np.any(self.model.actuator_trnid[self.actuators, 0] != self.joints)
+            or np.any(
+                self.model.actuator_biastype[self.actuators]
+                != mujoco.mjtBias.mjBIAS_AFFINE
+            )
+            or np.any(
+                self.model.actuator_gaintype[self.actuators]
+                != mujoco.mjtGain.mjGAIN_FIXED
+            )
         ):
             raise ValueError("expected a 29-actuator G1 with affine position actuators")
         self.qadr = self.model.jnt_qposadr[self.joints]
@@ -76,31 +90,49 @@ class Plant:
         self.default_kp = self.model.actuator_gainprm[self.actuators, 0].copy()
         self.default_kd = -self.model.actuator_biasprm[self.actuators, 2].copy()
         self.base = self.model.body("pelvis").id
-        self.floor = self.model.geom("safety_floor").id
+        robot_bodies = {self.base}
+        for body_id in range(self.base + 1, self.model.nbody):
+            if int(self.model.body_parentid[body_id]) in robot_bodies:
+                robot_bodies.add(body_id)
+        self.robot_geoms = {
+            geom_id
+            for geom_id in range(self.model.ngeom)
+            if int(self.model.geom_bodyid[geom_id]) in robot_bodies
+        }
+        base_joint = self.model.joint("floating_base_joint").id
+        if (
+            self.model.jnt_type[base_joint] != mujoco.mjtJoint.mjJNT_FREE
+            or self.model.jnt_bodyid[base_joint] != self.base
+        ):
+            raise ValueError("expected floating_base_joint on the G1 pelvis")
+        self.base_qadr = int(self.model.jnt_qposadr[base_joint])
+        self.base_vadr = int(self.model.jnt_dofadr[base_joint])
+        self.floor = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "safety_floor"
+        )
         gyro = self.model.sensor("imu-pelvis-angular-velocity")
         accel = self.model.sensor("imu-pelvis-linear-acceleration")
         self.gyro_adr = int(gyro.adr[0] if hasattr(gyro.adr, "__len__") else gyro.adr)
-        self.accel_adr = int(accel.adr[0] if hasattr(accel.adr, "__len__") else accel.adr)
+        self.accel_adr = int(
+            accel.adr[0] if hasattr(accel.adr, "__len__") else accel.adr
+        )
         self.substeps = round(CONTROL_DT / PHYSICS_DT)
         if not math.isclose(self.substeps * PHYSICS_DT, CONTROL_DT):
             raise ValueError("control step is not an integer number of physics steps")
         self.dt = CONTROL_DT
         self.pose = "standing"
-        self.check_fall = True
+        self.fall_enabled = bool(check_fall)
+        self.check_fall = self.fall_enabled
         self.reset(pose)
 
     def reset(self, pose="standing"):
-        """Install a screening pose. Floor starts are lowered onto the plane.
-
-        Standing is the model stand keyframe, and a fall from it latches.
-        The other five poses are the counterfactuals: floor sitting, supine,
-        prone, and both sides. They must start within 5 mm of penetration.
-        They are not falls, and the run does not require them to stand up.
-        """
+        """Reset to the stand keyframe or a counterfactual on safety_floor."""
         if pose not in POSES:
             raise ValueError("unknown pose")
         self.pose = pose
-        self.check_fall = pose == "standing"
+        if pose != "standing" and self.floor < 0:
+            raise ValueError("counterfactual poses require a geom named safety_floor")
+        self.check_fall = self.fall_enabled and pose == "standing"
         key = self.model.key("stand").id
         mujoco.mj_resetDataKeyframe(self.model, self.data, key)
         data = self.data
@@ -115,7 +147,7 @@ class Plant:
                     data.qpos[address] = angle
         elif pose != "standing":
             root = math.sqrt(0.5)
-            data.qpos[3:7] = {
+            data.qpos[self.base_qadr + 3 : self.base_qadr + 7] = {
                 "supine": [root, 0, -root, 0],
                 "prone": [root, 0, root, 0],
                 "left_side": [root, -root, 0, 0],
@@ -125,17 +157,25 @@ class Plant:
         if pose != "standing":
             for _ in range(500):
                 mujoco.mj_forward(self.model, data)
-                distances = [c.dist for c in data.contact if self.floor in c.geom]
+                distances = [
+                    c.dist
+                    for c in data.contact
+                    if self.floor in c.geom
+                    and any(g in self.robot_geoms for g in c.geom)
+                ]
                 if distances:
-                    data.qpos[2] += -min(distances) + 0.001
+                    data.qpos[self.base_qadr + 2] += -min(distances) + 0.001
                     break
-                data.qpos[2] -= 0.005
+                data.qpos[self.base_qadr + 2] -= 0.005
             else:
                 raise ValueError("could not place counterfactual on the ground")
         mujoco.mj_forward(self.model, data)
         # The stand keyframe is the sim's normal start. Its feet sit in this
         # floor. Floor poses are placed to the 5 mm penetration tolerance.
-        if pose != "standing" and any(c.dist < -0.005 for c in data.contact):
+        if pose != "standing" and any(
+            c.dist < -0.005 and any(g in self.robot_geoms for g in c.geom)
+            for c in data.contact
+        ):
             raise ValueError(f"invalid {pose} pose: substantial initial penetration")
         if self.check_fall and self.fallen():
             raise ValueError("stand keyframe starts fallen")

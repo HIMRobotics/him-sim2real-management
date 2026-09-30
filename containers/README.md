@@ -36,16 +36,18 @@ Build and save it on an arm64 machine, or with `docker buildx` for `linux/arm64`
 
 ## Try it in MuJoCo
 
-`./sim.sh` runs that same archive against a simulated G1. The container is attached to a loopback-only network, so it cannot see `eth0` or write robot motors. `g1-safety-stops` stays up. The sim publishes the same feedback topics, applies `/safety/precheck`, and rejects commands with the same joint checks. The result is `containers/sim/output/report.json`.
+`./sim.sh` runs that same archive against a simulated G1. The container is attached to a loopback-only network, so it cannot see `eth0` or write robot motors. `g1-safety-stops` stays up. The sim publishes the same feedback topics and applies `/safety/precheck`. Safety checks are enabled by default. Use `--no-safety-checks` to disable simulation checks, or `--safety-checks` to enable them explicitly. The result is `containers/sim/output/report.json`, which records the selected mode.
 
 ```bash
 ./sim.sh --self-test
 ./sim.sh
 ./sim.sh --counterfactuals
+./sim.sh --scene containers/upload/environment/scene.xml
+./sim.sh --scene containers/upload/environment/scene.xml --no-safety-checks
 ./sim.sh replay
 ./sim.sh stop
 ```
 
 `--counterfactuals` repeats the run from standing, floor sitting, supine, prone, and both sides. Only the standing start treats a fall as a failure.
 
-The scene is a flat floor and the G1. What the runner does, how to start it, and how to orbit the recording are in [SIM_RUN.md](SIM_RUN.md).
+The default scene is a flat floor and the G1. Submitters can upload their own MuJoCo XML scene and assets beside `submission.tar`, then select it with `--scene`. The scene retains the G1 command interface and can add terrain, obstacles, and passive objects. Scene requirements and replay controls are in [SIM_RUN.md](SIM_RUN.md). Unchecked runs report `completed`, not a safety pass.

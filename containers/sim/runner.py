@@ -4,16 +4,16 @@ import os
 import uuid
 from pathlib import Path
 
+import mujoco
 import numpy as np
 from joint_checks import (
     BASE_ANGULAR_SPEED_LIMIT_RAD_S,
     SPEED_HOLD_S,
     JointViolation,
 )
+from plant import CONTROL_DT, PHYSICS_DT, POSES, Plant
 from policy_safety.adapter import PolicyViolation
 from policy_safety.joint_rules import JointRules
-
-from plant import CONTROL_DT, PHYSICS_DT, POSES, Plant
 
 OBSERVATION_TIMEOUT = 0.2
 ACTION_TIMEOUT = 0.2
@@ -27,18 +27,22 @@ SANITY = {
 
 
 def _finite_vector(values):
-    array = np.asarray(values, dtype=float)
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return False, np.empty(0)
     return array.shape == (29,) and bool(np.isfinite(array).all()), array
 
 
 class Runner:
     """One simulated session. A failed check latches for the rest of the run."""
 
-    def __init__(self, pose=None):
+    def __init__(self, pose=None, scene=None, safety_checks=True):
         pose = pose or os.environ.get("G1_SIM_POSE", "standing")
         if pose not in POSES:
             raise ValueError("unknown pose")
-        self.plant = Plant(pose)
+        self.safety_checks = bool(safety_checks)
+        self.plant = Plant(pose, scene=scene, check_fall=self.safety_checks)
         self.rules = JointRules(self.plant.joint_names)
         self.session_id = "sim-" + uuid.uuid4().hex[:12]
         self.observation_id = 0
@@ -100,7 +104,8 @@ class Runner:
 
     def step(self, time):
         if (
-            self.reason is None
+            self.safety_checks
+            and self.reason is None
             and self.last_command_time is not None
             and float(time) - self.last_command_time >= ACTION_TIMEOUT
         ):
@@ -115,10 +120,18 @@ class Runner:
         for _ in range(self.plant.substeps):
             dq = self.plant.step_physics()
             self.sim_time += PHYSICS_DT
-            if not np.isfinite(self.plant.data.qpos).all() or not np.isfinite(dq).all():
+            if (
+                not np.isfinite(self.plant.data.qpos).all()
+                or not np.isfinite(self.plant.data.qvel).all()
+                or not np.isfinite(dq).all()
+            ):
                 violation = ("nonfinite_simulation", None)
                 break
-            self.joint_over = np.where(np.abs(dq) > self.speed_caps, self.joint_over + 1, 0)
+            if not self.safety_checks:
+                continue
+            self.joint_over = np.where(
+                np.abs(dq) > self.speed_caps, self.joint_over + 1, 0
+            )
             if np.any(self.joint_over >= self.hold_steps):
                 index = int(np.argmax(self.joint_over))
                 violation = (
@@ -126,8 +139,16 @@ class Runner:
                     {"joint": self.plant.joint_names[index]},
                 )
                 break
-            base_speed = float(np.linalg.norm(self.plant.data.qvel[3:6]))
-            self.base_over = self.base_over + 1 if base_speed > BASE_ANGULAR_SPEED_LIMIT_RAD_S else 0
+            base_speed = float(
+                np.linalg.norm(
+                    self.plant.data.qvel[
+                        self.plant.base_vadr + 3 : self.plant.base_vadr + 6
+                    ]
+                )
+            )
+            self.base_over = (
+                self.base_over + 1 if base_speed > BASE_ANGULAR_SPEED_LIMIT_RAD_S else 0
+            )
             if self.base_over >= self.hold_steps:
                 violation = ("base_angular_speed_limit", {"value": base_speed})
                 break
@@ -145,11 +166,11 @@ class Runner:
 
     def report(self, lowstate=False):
         if self.reason:
-            status = "violation"
+            status = "violation" if self.safety_checks else "error"
         elif self.commands < 1:
             status = "no_command"
         else:
-            status = "within_limits"
+            status = "within_limits" if self.safety_checks else "completed"
         trace = self._write_trace()
         return {
             "version": 1,
@@ -163,6 +184,8 @@ class Runner:
             "hardware_authorization": False,
             "session_id": self.session_id,
             "pose": self.plant.pose,
+            "scene": str(self.plant.scene) if self.plant.scene else None,
+            "safety_checks": self.safety_checks,
             "fall_check": self.plant.check_fall,
             "trace": trace,
         }
@@ -177,10 +200,14 @@ class Runner:
             return None
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        model = np.empty(mujoco.mj_sizeModel(self.plant.model), dtype=np.uint8)
+        mujoco.mj_saveModel(self.plant.model, buffer=model)
         np.savez_compressed(
             target,
             time=np.asarray(self.trace_time, dtype=float),
             qpos=np.vstack(self.trace_qpos),
+            model=model,
+            safety_checks=self.safety_checks,
         )
         return str(target)
 
@@ -214,18 +241,29 @@ class Runner:
         if type(sequence) is not int or sequence <= self.last_sequence:
             return "sequence", None
         observation_id = frame.get("observation_id")
-        issued = self.observations.get(observation_id) if type(observation_id) is int else None
-        if issued is None or not 0 <= time - issued < OBSERVATION_TIMEOUT:
+        if (
+            type(observation_id) is not int
+            or not 1 <= observation_id <= self.observation_id
+        ):
             return "stale_observation", None
+        if self.safety_checks:
+            issued = self.observations.get(observation_id)
+            if issued is None or not 0 <= time - issued < OBSERVATION_TIMEOUT:
+                return "stale_observation", None
         ok, measured = _finite_vector(self.plant.q())
         if not ok:
             return "invalid_command", {"field": "measured"}
         arrays = {}
         for name, bounds in SANITY.items():
             ok, array = _finite_vector(frame.get(name))
-            if not ok or np.any(array < bounds[0]) or np.any(array > bounds[1]):
+            if not ok or (
+                self.safety_checks
+                and (np.any(array < bounds[0]) or np.any(array > bounds[1]))
+            ):
                 return "invalid_command", {"field": name}
             arrays[name] = array
+        if not self.safety_checks:
+            return None, None
         previous = None
         if self.previous is not None:
             previous = {"target": self.previous[0], "velocity": self.previous[1]}
