@@ -104,6 +104,78 @@
       "upper": 1.614429558,
       "velocity": 22.0,
       "effort": 5.0
+    },
+    "left_hip_pitch": {
+      "lower": -2.5307,
+      "upper": 2.8798,
+      "velocity": 32,
+      "effort": 88
+    },
+    "left_hip_roll": {
+      "lower": -0.5236,
+      "upper": 2.9671,
+      "velocity": 20,
+      "effort": 139
+    },
+    "left_hip_yaw": {
+      "lower": -2.7576,
+      "upper": 2.7576,
+      "velocity": 32,
+      "effort": 88
+    },
+    "left_knee": {
+      "lower": -0.087267,
+      "upper": 2.8798,
+      "velocity": 20,
+      "effort": 139
+    },
+    "left_ankle_pitch": {
+      "lower": -0.87267,
+      "upper": 0.5236,
+      "velocity": 30,
+      "effort": 35
+    },
+    "left_ankle_roll": {
+      "lower": -0.2618,
+      "upper": 0.2618,
+      "velocity": 30,
+      "effort": 35
+    },
+    "right_hip_pitch": {
+      "lower": -2.5307,
+      "upper": 2.8798,
+      "velocity": 32,
+      "effort": 88
+    },
+    "right_hip_roll": {
+      "lower": -2.9671,
+      "upper": 0.5236,
+      "velocity": 20,
+      "effort": 139
+    },
+    "right_hip_yaw": {
+      "lower": -2.7576,
+      "upper": 2.7576,
+      "velocity": 32,
+      "effort": 88
+    },
+    "right_knee": {
+      "lower": -0.087267,
+      "upper": 2.8798,
+      "velocity": 20,
+      "effort": 139
+    },
+    "right_ankle_pitch": {
+      "lower": -0.87267,
+      "upper": 0.5236,
+      "velocity": 30,
+      "effort": 35
+    },
+    "right_ankle_roll": {
+      "lower": -0.2618,
+      "upper": 0.2618,
+      "velocity": 30,
+      "effort": 35
     }
   }
 }

@@ -4,26 +4,35 @@ import json
 import time
 from threading import Thread
 
-SOFT_RESET_PHRASE = "Soft Reset"
-ENGLISH_SPEAKER_ID = 1
-MOTION_SWITCHER_SET_SILENT = 1004
-
-from .hardware_profile import (
+from .hardware_constants import (
+    ARM_INDICES,
+    ARM_SDK_TOPIC,
     ARM_WEIGHT_INDEX,
     DAMPING_FSM_ID,
+    ENGLISH_SPEAKER_ID,
+    LOW_COMMAND_TOPIC,
+    LOW_STATE_TOPIC,
+    LOWER_BODY_INDICES,
+    MOTION_SWITCHER_SET_SILENT,
+    NUM_JOINTS,
+    SDK_RPC_TIMEOUT_CODE,
+)
+from .hardware_profile import (
     DAMPING_RPC_TIMEOUT_SECS,
     READINESS_QUERY_ATTEMPTS,
     READINESS_RPC_TIMEOUT_SECS,
-    SDK_RPC_TIMEOUT_CODE,
-    WALK_FSM_ID,
-    ZERO_VELOCITY_DURATION_SECS,
 )
+
+SOFT_RESET_PHRASE = "Soft Reset"
 
 
 class UnitreeArmTransport:
     """Own arm_sdk publication and a separate locomotion RPC client."""
 
     def __init__(self, interface, domain, on_state):
+        from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
+            MotionSwitcherClient,
+        )
         from unitree_sdk2py.core.channel import (
             ChannelFactoryInitialize,
             ChannelPublisher,
@@ -37,11 +46,10 @@ class UnitreeArmTransport:
         ChannelFactoryInitialize(domain, interface)
         self.make_command = unitree_hg_msg_dds__LowCmd_
         self.crc = CRC()
-        self.publisher = ChannelPublisher("rt/arm_sdk", LowCmd_)
+        self.publisher = ChannelPublisher(ARM_SDK_TOPIC, LowCmd_)
         self.publisher.Init()
-        self.lowcmd = ChannelPublisher("rt/lowcmd", LowCmd_)
+        self.lowcmd = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
         self.lowcmd.Init()
-        self.switcher = None
         self.audio = None
         self.saved_motion_name = None
         self.motion_restored = False
@@ -53,7 +61,15 @@ class UnitreeArmTransport:
         self.readiness_client.SetTimeout(READINESS_RPC_TIMEOUT_SECS)
         self.readiness_client.Init()
         self.readiness_query_results = []
-        self.subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        # Each SDK client constructor includes a 0.5 s discovery wait.
+        self.switcher = MotionSwitcherClient()
+        self.switcher.SetTimeout(5.0)
+        self.switcher.Init()
+        try:
+            self._audio()
+        except Exception as error:  # noqa: BLE001
+            print(f"Optional speech initialization failed: {error}", flush=True)
+        self.subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
         # No SDK queue that could conceal old samples behind new receipt timestamps.
         self.subscriber.Init(on_state)
 
@@ -70,7 +86,7 @@ class UnitreeArmTransport:
 
     def release_motion(self):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
-        switcher = self._switcher()
+        switcher = self.switcher
         code, mode = switcher.CheckMode()
         if isinstance(mode, dict) and mode.get("name"):
             self.saved_motion_name = mode["name"]
@@ -90,7 +106,7 @@ class UnitreeArmTransport:
         if self.motion_restored:
             return 0
         self._set_motion_silent(False)
-        switcher = self._switcher()
+        switcher = self.switcher
         switcher.SetTimeout(5.0)
         name = self.saved_motion_name or "ai"
         code, _ = switcher.SelectMode(name)
@@ -103,17 +119,17 @@ class UnitreeArmTransport:
         message = self.make_command()
         message.mode_pr = 0
         message.mode_machine = machine
-        for index in range(29):
+        for index in range(NUM_JOINTS):
             motor = message.motor_cmd[index]
             motor.mode = 1
             motor.dq = 0.0
             motor.tau = 0.0
-            if index < 15:
+            if index in LOWER_BODY_INDICES:
                 motor.q = float(lower_q[index])
                 motor.kp = float(leg_kp[index])
                 motor.kd = float(leg_kd[index])
             else:
-                motor.q = float(arm_q[index - 15])
+                motor.q = float(arm_q[index - ARM_INDICES[0]])
                 motor.kp = 40.0
                 motor.kd = 1.0
         message.crc = self.crc.Crc(message)
@@ -122,7 +138,7 @@ class UnitreeArmTransport:
     def _set_motion_silent(self, silent):
         """Mute the firmware mode announcement. ReleaseMode otherwise says developer mode."""
         try:
-            switcher = self._switcher()
+            switcher = self.switcher
             switcher.SetTimeout(0.2)
             switcher._Call(MOTION_SWITCHER_SET_SILENT, json.dumps({"silent": bool(silent)}))
             switcher.SetTimeout(5.0)
@@ -148,28 +164,9 @@ class UnitreeArmTransport:
             self.audio.Init()
         return self.audio
 
-    def _switcher(self):
-        if self.switcher is None:
-            from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
-                MotionSwitcherClient,
-            )
-
-            self.switcher = MotionSwitcherClient()
-            self.switcher.SetTimeout(5.0)
-            self.switcher.Init()
-        return self.switcher
-
     def request_damping(self):
         """Use Damp's underlying RPC because Damp() discards its return code."""
         return self.locomotion.SetFsmId(DAMPING_FSM_ID)
-
-    def request_walk(self):
-        """Enter the stock balancer. Start() discards its return code."""
-        return self.locomotion.SetFsmId(WALK_FSM_ID)
-
-    def request_zero_velocity(self):
-        """Hold a zero twist. The default duration expires after one second."""
-        return self.locomotion.SetVelocity(0.0, 0.0, 0.0, ZERO_VELOCITY_DURATION_SECS)
 
     def read_ready_fsm(self):
         """Retry one timed-out startup query, requiring a real successful reply."""

@@ -4,9 +4,8 @@ import math
 from dataclasses import dataclass
 
 from robot_safety.config import COMMAND_FIELDS
-from robot_safety.feedback import G1_29_JOINT_NAMES
+from robot_safety.hardware_constants import LEFT_SHOULDER_ROLL_INDEX, NUM_JOINTS
 
-LEFT_SHOULDER_ROLL_INDEX = G1_29_JOINT_NAMES.index("left_shoulder_roll")
 MAX_TEST_EXCURSION_RAD = 0.15
 MIN_TEST_DURATION_SECS = 10.0
 
@@ -42,7 +41,7 @@ class SlowArmRaise:
     """Keep the measured starting pose except for one shoulder-roll target."""
 
     def __init__(self, measured_positions, settings):
-        if len(measured_positions) != len(G1_29_JOINT_NAMES) or not all(
+        if len(measured_positions) != NUM_JOINTS or not all(
             math.isfinite(value) for value in measured_positions
         ):
             raise ValueError("expected 29 finite measured positions")

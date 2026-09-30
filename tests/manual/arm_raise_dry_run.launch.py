@@ -2,6 +2,7 @@
 """Launch the arm test with diagnostic output unless hardware is explicitly enabled."""
 
 from pathlib import Path
+import subprocess
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -18,30 +19,27 @@ from launch_ros.actions import Node
 
 
 def start_processes(context):
-    """Select one motor gate and validate hardware settings before starting nodes."""
+    """Use the running systemd gate for hardware or start a diagnostic gate."""
     hardware = LaunchConfiguration("enable_hardware_output").perform(context)
     if hardware not in ("true", "false"):
         raise ValueError("enable_hardware_output must be true or false")
-    gate_role = "hardware_gate" if hardware == "true" else "motor_gate"
-    profile_path = LaunchConfiguration("hardware_profile_path").perform(context)
-    handover_timeout_secs = 5.0
     if hardware == "true":
-        from robot_safety.hardware_profile import HardwareProfile
-
-        profile = HardwareProfile.load(profile_path)
-        handover_timeout_secs = profile.handover_secs + 1.0
+        service = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "g1-safety-stops.service"],
+            capture_output=True, timeout=5,
+        )
+        if service.returncode != 0:
+            raise RuntimeError(
+                "Safety service is not active. Start it and wait for warmup: "
+                "systemctl --user start g1-safety-stops.service"
+            )
     interface = LaunchConfiguration("sdk_interface")
     sdk_domain = LaunchConfiguration("sdk_domain")
     discovery_timeout = LaunchConfiguration("startup_timeout_secs")
-    roles = ("feedback", "checker", gate_role, "controller_stop", "arm_raise")
+    gate_roles = () if hardware == "true" else ("motor_gate",)
+    roles = ("feedback", "checker", *gate_roles, "controller_stop", "arm_raise")
     parameters = {
         "feedback": {"sdk_interface": interface, "sdk_domain": sdk_domain},
-        "hardware_gate": {
-            "enable_hardware_output": True,
-            "hardware_profile_path": profile_path,
-            "sdk_interface": interface,
-            "sdk_domain": sdk_domain,
-        },
         "controller_stop": {"startup_timeout_secs": discovery_timeout},
     }
     processes = [
@@ -65,7 +63,7 @@ def start_processes(context):
                 "-p",
                 ["test_policy:=", LaunchConfiguration("test_policy")],
                 "-p",
-                f"handover_timeout_secs:={handover_timeout_secs}",
+                ["handover_timeout_secs:=", LaunchConfiguration("handover_timeout_secs")],
             ],
             cwd=str(Path(__file__).resolve().parents[2]),
             output="screen",
@@ -96,7 +94,7 @@ def generate_launch_description():
             DeclareLaunchArgument("sdk_domain", default_value="0"),
             DeclareLaunchArgument("startup_timeout_secs", default_value="5.0"),
             DeclareLaunchArgument("enable_hardware_output", default_value="false"),
-            DeclareLaunchArgument("hardware_profile_path", default_value=""),
+            DeclareLaunchArgument("handover_timeout_secs", default_value="5.0"),
             OpaqueFunction(function=start_processes),
         ]
     )

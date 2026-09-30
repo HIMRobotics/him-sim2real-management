@@ -3,8 +3,7 @@
 import math
 from dataclasses import dataclass
 
-from .feedback import G1_29_JOINT_NAMES
-from .hardware_profile import UPPER_BODY_INDICES
+from .hardware_constants import G1_29_JOINT_NAMES, NUM_JOINTS
 
 
 @dataclass
@@ -46,7 +45,7 @@ class JointDeltaDiagnostics:
                     "measured_velocity_rad_secs",
                 )
             }
-            for index in UPPER_BODY_INDICES
+            for index in range(NUM_JOINTS)
         }
 
     def record(self, command, feedback, previous_written_targets):

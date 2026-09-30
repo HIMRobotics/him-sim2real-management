@@ -4,10 +4,8 @@ import math
 from dataclasses import dataclass
 
 from robot_safety.config import COMMAND_FIELDS
-from robot_safety.feedback import G1_29_JOINT_NAMES
-from robot_safety.hardware_profile import UPPER_BODY_INDICES
+from robot_safety.hardware_constants import LEFT_ELBOW_INDEX, NUM_JOINTS, UPPER_BODY_INDICES
 
-LEFT_ELBOW_INDEX = G1_29_JOINT_NAMES.index("left_elbow")
 
 
 @dataclass(frozen=True)
@@ -26,7 +24,7 @@ class SmallElbowStep:
     """Keep every other target fixed and extend the left elbow by 0.05 rad."""
 
     def __init__(self, measured_positions, settings=None):
-        if len(measured_positions) != 29 or not all(
+        if len(measured_positions) != NUM_JOINTS or not all(
             math.isfinite(value) for value in measured_positions
         ):
             raise ValueError("expected 29 finite measured joint positions")
@@ -40,7 +38,7 @@ class SmallElbowStep:
         settings = self.settings
         progress = min(elapsed_secs / settings.move_duration_secs, 1.0)
         fraction = 10 * progress**3 - 15 * progress**4 + 6 * progress**5
-        command = {field: [0.0] * 29 for field in COMMAND_FIELDS}
+        command = {field: [0.0] * NUM_JOINTS for field in COMMAND_FIELDS}
         command["q"] = list(self.start_positions)
         command["q"][LEFT_ELBOW_INDEX] += settings.angle_rad * fraction
         command["dq"][LEFT_ELBOW_INDEX] = (

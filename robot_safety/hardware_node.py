@@ -1,12 +1,16 @@
 """Opt-in motor gate that writes Unitree upper-body targets and requests body damping."""
 
 import json
+import os
+import socket
 import time
 
 from std_msgs.msg import String
+from him_safety_interfaces.msg import Abort
 
 from . import ros_topics as topics
 from .hardware_adapter import G1ArmAdapter
+from .hardware_constants import NUM_JOINTS
 from .hardware_profile import (
     JOINT_DIAGNOSTICS_PERIOD_SECS,
     READINESS_QUERY_ATTEMPTS,
@@ -14,6 +18,7 @@ from .hardware_profile import (
     HardwareProfile,
 )
 from .ros_nodes import MotorGateNode
+from .motor_gate import MotorCommandGate
 from .unitree_transport import UnitreeArmTransport
 
 
@@ -31,7 +36,7 @@ class HardwareMotorGateNode(MotorGateNode):
             raise ValueError(
                 "hardware output requires explicit enable, profile path and SDK interface"
             )
-        if self.config.joints != 29:
+        if self.config.joints != NUM_JOINTS:
             raise ValueError(
                 "hardware adapter requires the identified 29-joint configuration"
             )
@@ -45,6 +50,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.final_diagnostics_logged = False
         self.create_timer(JOINT_DIAGNOSTICS_PERIOD_SECS, self.publish_joint_diagnostics)
         self.last_status = None
+        self.startup_ready = False
         self.adapter = G1ArmAdapter(profile)
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state
@@ -53,6 +59,26 @@ class HardwareMotorGateNode(MotorGateNode):
         self.get_logger().warn(
             "Hardware output enabled. Arming may command the robot. No automatic rearm."
         )
+
+    def notify_startup_ready(self):
+        """Report startup readiness only after warmup and fresh released buttons."""
+        adapter = self.adapter
+        if (
+            self.startup_ready or adapter.balance_policy is None
+            or not adapter.feedback_fresh(time.monotonic())
+            or adapter.feedback.start_button_pressed or adapter.f3_pressed
+            or adapter.abort_reason or self.motor_gate.abort_reason
+            or not adapter.workers or not all(worker.is_alive() for worker in adapter.workers)
+        ):
+            return
+        address = os.environ.get("NOTIFY_SOCKET")
+        if address:
+            if address.startswith("@"):
+                address = "\0" + address[1:]
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notifier:
+                notifier.sendto(b"READY=1\nSTATUS=Policy warmed, workers running, telemetry fresh", address)
+        self.startup_ready = True
+        self.get_logger().info("Safety monitor ready: policy warmed, workers running, telemetry fresh")
 
     def on_handover_ready(self, request, response):
         """Confirm a full-weight SDK write for this session, not physical takeover."""
@@ -101,11 +127,9 @@ class HardwareMotorGateNode(MotorGateNode):
             response.message = "ready"
         else:
             detail = self.adapter.arm_rejection_reason
-            self.get_logger().error(f"Hardware readiness rejected: {detail}")
-            self.adapter.abort("hardware_readiness_rejected")
-            self.motor_gate.abort("hardware_readiness_rejected")
-            self.latch_abort("hardware_readiness_rejected")
-            response.message = f"Hardware readiness rejected: {detail}"
+            return self._reject_request(
+                response, "hardware_readiness_rejected", f"Hardware readiness rejected: {detail}"
+            )
         return response
 
     def on_arm(self, request, response):
@@ -129,24 +153,42 @@ class HardwareMotorGateNode(MotorGateNode):
             detail = (
                 self.adapter.arm_rejection_reason or "unspecified readiness failure"
             )
-            self.get_logger().error(f"Hardware arming rejected: {detail}")
-            self.adapter.abort("hardware_arm_rejected")
-            self.motor_gate.abort("hardware_arm_rejected")
-            self.latch_abort("hardware_arm_rejected")
-            response.success = False
-            response.message = f"Hardware arming rejected: {detail}"
-            return response
+            return self._reject_request(
+                response, "hardware_arm_rejected", f"Hardware arming rejected: {detail}"
+            )
         return super().on_arm(request, response)
+
+    def _reject_request(self, response, reason, message):
+        """Latch a failed hardware check across the adapter, gate and ROS publisher."""
+        self.get_logger().error(message)
+        self.adapter.abort(reason)
+        self.motor_gate.abort(reason)
+        self.latch_abort(reason)
+        response.success = False
+        response.message = message
+        return response
+
+    def on_abort(self, message):
+        if message.source != self.get_name():
+            self.adapter.abort(message.reason or "external_abort")
+        super().on_abort(message)
 
     def publish_output(self):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
             return
+        self.notify_startup_ready()
         if self.adapter.damp_settled:
-            self.motor_gate.abort_reason = None
-            self.abort_reason = None
-            self.adapter.damp_settled = False
-        elif self.adapter.abort_reason:
+            with self.adapter.stop_lock:
+                self.adapter.damp_settled = False
+                if not self.adapter.abort_reason and not self.adapter.stop_requested.is_set():
+                    self.motor_gate = MotorCommandGate(self.host_boot_id, self.config)
+                    self.abort_reason = None
+                    # Recreate the writer to discard its retained stop for future tests.
+                    self.destroy_publisher(self.abort_publisher)
+                    self.abort_publisher = self.create_publisher(Abort, topics.ABORT, self.abort_qos)
+                    self.final_diagnostics_logged = False
+        if self.adapter.abort_reason:
             self.motor_gate.abort(self.adapter.abort_reason)
         command = self.motor_gate.cycle(time.monotonic())
         if self.motor_gate.abort_reason:
@@ -167,7 +209,6 @@ class HardwareMotorGateNode(MotorGateNode):
                 "damping_rpc_code": self.adapter.damping_rpc_code,
                 "walk_stop": self.adapter.walk_stop,
                 "walk_rpc_code": self.adapter.walk_rpc_code,
-                "velocity_rpc_code": self.adapter.velocity_rpc_code,
                 "reported_fsm_id": self.adapter.reported_fsm_id,
                 "arm_release_written": self.adapter.arm_release_written,
                 "pose_hold": self.adapter.hold_targets is not None

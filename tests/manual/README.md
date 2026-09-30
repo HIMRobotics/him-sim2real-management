@@ -1,129 +1,174 @@
 # Manual G1 safety tests
 
-The scripts build and launch five processes: telemetry, command checker, motor
-gate, controller-stop monitor and test policy. ROS uses localhost domain 97.
-The Unitree SDK uses domain 0 and interface `eth0` by default.
+These tests exercise the path from an arm policy through the ROS command checker
+and hardware motor gate to the G1. The checker validates proposed commands, and
+the gate watches command expiry and robot feedback before writing motor targets.
+A separate controller monitor broadcasts Start aborts. The hardware gate also
+reads Start and F3 directly from SDK telemetry, independently of the policy.
 
-**Current stop:** after arm ownership is taken, double Start, a fault, or
-completion holds the measured arm pose in locked standing. Stock whole-body
-damping (`SetFsmId(1)`) runs only if that hold cannot continue or the process
-is exiting. A stop before any ownership does not command the motors.
+The [safety installer](../../install_safety_stops.sh) runs that hardware gate as
+the background user service `g1-safety-stops.service`. It builds the ROS overlay,
+starts immediately, starts again at boot with user lingering, and restarts on
+process failure. It does not launch an arm test. See the
+[installation and service reference](../../robot_safety/README.md#background-safety-watchdog)
+for dependencies, configuration and removal.
 
-## Full arm sequence
+Double presses require press–release–press within 0.5 seconds. Double **F3**
+requests the local GR00T lower-body balance policy and holds the captured arm
+pose. Double **Start** requests stock whole-body damping (`SetFsmId(1)`), which
+can fold the robot. Ordinary test completion or faults after arm ownership
+normally hold the measured arm pose, with damping if that hold cannot continue.
+These are different outcomes: completion alone does not test either button.
 
-With the supported gantry setup and robot in locked standing/ready mode:
+## Prepare the robot and background service
+
+Use the supported gantry/harness setup, with feet bearing weight and room for
+arm movement and balance corrections. This setup targets the 29-DOF G1 EDU,
+machine type 5, seven joints per arm, no dexterous hands and no waist fixing
+pieces. Begin in locked standing/ready mode (FSM 4), with joints near stationary
+and Start and F3 released. Locked standing describes the operating mode.
+Physical stop behavior remains under validation following a reported joint
+shutdown during a T-pose stop.
+
+Run all commands on the robot host from this repository. The defaults are SDK
+interface `eth0`, SDK domain 0 and ROS localhost domain 97. The service currently
+uses [the standard template](../../robot_safety/profiles/g1_type5.template.json).
+`HIM_SAFETY_PROFILE` can explicitly select another profile, including
+[the lenient profile](../../robot_safety/profiles/g1_type5.lenient.json).
+Review the selected [profile and limits](../../robot_safety/profiles/README.md)
+before hardware testing. F3 also requires the balance ONNX model and its runtime.
 
 ```bash
+./install_safety_stops.sh install
+systemctl --user is-enabled g1-safety-stops.service
+systemctl --user status g1-safety-stops.service
+loginctl show-user "$USER" -p Linger
+journalctl --user -u g1-safety-stops.service -f
+```
+
+Expect `enabled`, an active service, `Linger=yes`, and eventually the gate's
+`Hardware output enabled` message after the build. Resolve build, SDK, telemetry
+or `balance network failed to load` errors before starting motion. Systemd can
+report the launcher as active while it is still building. To check persistence,
+repeat these checks after a planned reboot before starting a test.
+
+## Run an arm test through the systemd gate
+
+The hardware test uses the existing `g1-safety-stops.service`. It checks that
+this **user service** is active before starting any test nodes. It does not
+start a second hardware gate or stop/restart the service. The service owns the
+hardware profile and performs its own warmup.
+
+If a previous run stopped or completed, follow [Recovery between trials](#recovery-between-trials)
+before launching again. Restarting the test alone does not clear a latched stop.
+
+```bash
+cd /home/unitree/him-sim2real-management
+systemctl --user is-active g1-safety-stops.service
 ./tests/manual/run_unitree_arm_test.sh --hardware
 ```
 
-Once ready, request one run from another terminal:
+If the service is inactive, start it first and wait for warmup:
+`systemctl --user start g1-safety-stops.service`.
+Do not run another test graph or SDK motor publisher concurrently.
+
+Wait for `Ready for explicit start request`. In another terminal:
 
 ```bash
-./tests/manual/run_unitree_arm_test.sh --start
-```
-
-Omit `--hardware` for diagnostic motor output. Do not run another test graph or
-the original SDK motor publisher concurrently.
-
-The policy holds captured arm/waist positions until the adapter confirms a
-full-weight SDK write for its session. The profile's ownership ramp lasts
-3 seconds from the first SDK write. Then the 18-second trajectory starts at zero:
-
-- 0–3 seconds: targets move toward zero.
-- 3–9 seconds: both arms raise using the SDK example's targets.
-- 9–18 seconds: targets return toward zero.
-- Completion: latch stop and hold the measured arm pose.
-
-The trajectory retains the SDK example's feedback-based position formulas.
-This is not the small, extra-slow elbow test. The stock controller owns the legs
-during arm control. A full-weight write is not proof of physical takeover.
-
-Double press Start within 0.5 seconds for the hard stop: stock whole-body damping,
-which can fold the robot. Double press F3, the button beside Start, for the soft
-stop: the legs enter walk mode at zero speed, and the arms freeze at the pose
-they had at the press. The balancer may take a step. The arms stay on this
-process, at full ownership weight. Tracking, freshness and command-gap
-checks remain active during handover and movement. Other faults hold the measured
-arm pose. The graph stays stopped until restart.
-
-## Small elbow test
-
-```bash
-./tests/manual/run_unitree_arm_test.sh --small-step --hardware
-# Once ready, in a second terminal:
-./tests/manual/run_unitree_arm_test.sh --start
-```
-
-After the same captured-pose handover, only the left elbow target decreases by
-0.05 rad (2.9 degrees) over 10 seconds. A quintic curve gives zero endpoint
-velocity and acceleration, with peak requested speed 0.009375 rad/s.
-
-The final target is held for 2 seconds. The measured elbow must finish within
-0.02 rad of that target. The result is `small_elbow_complete` or
-`small_elbow_did_not_follow`. Both results hold the measured arm pose.
-The operator reported this test worked.
-
-## Readiness and configuration
-
-```bash
+cd /home/unitree/him-sim2real-management
 ./tests/manual/run_unitree_arm_test.sh --check-ready
+./tests/manual/run_unitree_arm_test.sh --start
 ```
 
-This queries stock mode without arming or moving. A fresh launcher is required
-after a latched failure. Startup requires FSM 4, fresh released-Start telemetry,
-machine type 5 and near-stationary joints. Readiness has two SDK attempts of
-2 seconds each within a 5-second producer deadline. A startup rejection before
-arming sends no damping or arm-release commands. Explicit double Start remains
-active. `--start` repeats readiness before granting control.
+The foreground launch contains telemetry, checker, controller monitor and arm
+producer only. Ctrl+C closes these processes and leaves the service running.
+The handover deadline defaults to five seconds. For a longer service ownership
+ramp, pass `handover_timeout_secs:=SECONDS` with at least one second of margin.
 
-The robot is a 29-DOF G1 EDU with seven joints per arm, no dexterous hands and
-no waist fixing pieces. Locked standing refers to the operating mode, not a
-mechanically locked waist.
+Readiness must succeed. The start request repeats readiness and coordinates
+arming. The producer holds captured arm/waist positions during the default
+3-second ownership ramp and waits for a full-weight SDK write. It then runs an
+18-second trajectory: targets approach zero for 3 seconds, both arms raise for
+6 seconds, then return toward zero for 9 seconds. The stock controller owns the
+legs during the arm trajectory. A full-weight write is not proof of takeover.
 
-Settings are in [g1_type5.template.json](../../robot_safety/profiles/g1_type5.template.json).
-Use `hardware_profile_path:=/absolute/path/to/settings.json` to select another
-reviewed profile. Interface/domain overrides are `sdk_interface:=eth0` and
-`sdk_domain:=0`.
+For a smaller first motion, use `test_policy:=small_elbow` instead. After handover,
+the left elbow target decreases by 0.05 rad over 10 seconds and holds for
+2 seconds. Completion reports `small_elbow_complete` if the measured elbow is
+within 0.02 rad of the target, or `small_elbow_did_not_follow` otherwise.
 
-Current local settings include kp=60, kd=1.5, a 100 ms output-gap limit, a
-0.03 rad initial position tolerance and a 0.05 rad/s startup-speed tolerance.
-Tracking allowance is 0.30 rad for shoulders/elbows and 0.05 rad for wrists/waist.
-See [profile documentation](../../robot_safety/profiles/README.md) for all limits
-and their sources. Profile kd does not configure stock emergency-stop damping.
+## Verify both stops
 
-## Joint extrema
+Keep the service journal visible throughout the test. While the arms are moving,
+double press F3. Confirm that the trajectory stops, the arms hold their captured
+pose, and the lower-body balance policy takes over. The robot may make balance
+corrections. The service status output should show
+`hardware_controller_double_f3` and `walk_stop: true`. That flag records the
+request, so also check for model errors and observe the physical response.
+
+Use a fresh test run to double press Start during arm movement. Confirm that
+motion stops and the robot enters whole-body damping. Look for
+`hardware_controller_double_start`, a successful `damping_rpc_code` of `0` and
+`reported_fsm_id` of `1` in the service journal. Status can subsequently clear
+after damping is confirmed. RPC success and reported mode alone do not prove
+physical damping. Double Start should also override an active F3 balance stop.
+
+For each trial, record the gesture, visible robot response and journal output.
+Check that a single press or a held button does not trigger this double-press
+handler. Seeing the stop in the systemd service's journal while it is the only
+hardware gate establishes that this test exercised the background process.
+An `active` service or a completed arm trajectory alone is insufficient.
+
+## Recovery between trials
+
+An immediate `Abort latched: hardware_controller_double_f3` on a new test can
+come from a previous F3 stop, without a new button press. While latched, the
+service repeats the abort on `/safety/abort`. This topic also retains the last
+message for new subscribers (`TRANSIENT_LOCAL` durability). Stopping and
+relaunching only the test therefore does not clear the stop.
+
+**Double-Start damping is the normal recovery path while keeping the service
+running.** F3 balance remains a stopped state and does not permit another arm
+test. After a stop or completion:
+
+1. Support the robot and exit all foreground test processes with Ctrl+C.
+   Old test nodes can rebroadcast their own latched aborts if left running.
+2. Double-press Start. Verify physical damping and check the service journal
+   for `damping_rpc_code: 0`, `reported_fsm_id: 1`, and `arm_release_written: true`.
+   The service clears its old session and retained abort only after those
+   software checks succeed. If damping or arm release fails, the stop remains
+   latched. Software status alone does not prove physical damping.
+3. Restore ready mode, launch a fresh test, and explicitly run `--check-ready`
+   and `--start` as above. Clearing the stop does not automatically rearm.
+
+A service restart also removes its in-memory state, but is not the normal
+between-trial procedure and leaves a gap in monitoring. Leave the service
+running after the final test.
+
+## Diagnostics and standalone tests
+
+Source ROS and the test overlay, then inspect status or joint extrema:
 
 ```bash
-./tests/manual/run_unitree_arm_test.sh --joint-deltas
+source /opt/ros/foxy/setup.bash
+source /tmp/him-safety-ros-install/setup.bash
+export ROS_DOMAIN_ID=97 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 topic echo /safety/hardware_status std_msgs/msg/String
+ros2 topic echo /safety/joint_diagnostics std_msgs/msg/String
 ```
 
-The topic `/safety/joint_diagnostics` publishes signed min/max, maximum absolute
-value and sample count for each controlled joint:
+Joint diagnostics report tracking error, target step and measured velocity for
+the 17 controlled joints, including rejected proposals. They reset on process
+rearm and are not proof of executed motion. The gate logs final extrema on
+abort, which places them in the service journal for the procedure above.
 
-- `tracking_error_rad`: proposed q minus measured q.
-- `target_step_rad`: proposed q minus the previous successful SDK-write q.
-- `measured_velocity_rad_secs`: measured SDK dq at the output check.
+Use `./tests/manual/run_unitree_arm_test.sh --small-step --hardware` for the
+elbow test through the same service, followed by `--start` in another terminal.
+The launcher does not clear an existing abort or reset a used session. The
+coordinated recovery described above is still required after a stopped run.
 
-All 17 joints are sampled before validation, including a rejected frame.
-These are checked proposals, not proof of execution. Samples include handover
-and movement, stop when output stops and reset on process restart. Nonfinite
-values are excluded from extrema but still fail validation.
-
-The launcher prints the largest tracking-error range once a second and all
-joint ranges on stop. Final lines are retained in the ROS launch log.
-No limits are automatically adjusted from observed extrema.
-
-## Original dry-run test
-
-```bash
-./tests/manual/run_arm_raise_dry_run.sh
-# Once ready, in another terminal:
-./tests/manual/run_arm_raise_dry_run.sh --start
-```
-
-This uses real telemetry, the checker, controller monitoring and a diagnostic
-motor gate. It proposes a 0.15 rad shoulder raise over 10 seconds without SDK
-motor writes. It does not validate physical tracking or stopping.
-
-Automated ROS tests use localhost domain 191 and reject manual domain 97.
+With the service stopped, `./tests/manual/run_arm_raise_dry_run.sh` and its
+`--start` command exercise a diagnostic 0.15 rad shoulder raise over 10 seconds
+using real telemetry without SDK motor writes. This does not validate physical
+stopping. Automated ROS tests use localhost domain 191, separate from manual
+domain 97.

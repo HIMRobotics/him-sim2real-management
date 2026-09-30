@@ -5,7 +5,8 @@ import time
 from him_safety_interfaces.msg import RobotFeedback
 
 from . import ros_topics as topics
-from .feedback import G1_29_JOINT_NAMES, SDK_DISCOVERY_TIMEOUT_SECS, FeedbackInbox
+from .feedback import SDK_DISCOVERY_TIMEOUT_SECS, FeedbackInbox
+from .hardware_constants import LOW_STATE_TOPIC, NUM_JOINTS
 from .ros_nodes import SafetyNode
 
 
@@ -14,7 +15,7 @@ class RobotFeedbackNode(SafetyNode):
 
     def __init__(self):
         super().__init__("robot_feedback_bridge")
-        if self.config.joints != len(G1_29_JOINT_NAMES):
+        if self.config.joints != NUM_JOINTS:
             raise ValueError("feedback bridge requires the 29-joint profile")
         self.sdk_interface = self.declare_parameter("sdk_interface", "").value
         self.sdk_domain = self.declare_parameter("sdk_domain", 0).value
@@ -38,7 +39,7 @@ class RobotFeedbackNode(SafetyNode):
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
 
         ChannelFactoryInitialize(self.sdk_domain, self.sdk_interface)
-        self.sdk_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        self.sdk_subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
         self.sdk_subscriber.Init(self.on_sdk_state, self.config.runtime_queue_capacity)
 
     def on_sdk_state(self, message):

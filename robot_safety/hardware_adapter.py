@@ -8,16 +8,27 @@ from threading import Event, Lock, RLock, Thread
 from .balance_policy import LEG_KD, LEG_KP, MODEL_PATH, BalancePolicy
 from .config import Config
 from .controller import StartDoublePressDetector, decode_f3_pressed
-from .feedback import G1_29_JOINT_NAMES, feedback_from_sdk
-from .hardware_profile import (
+from .feedback import feedback_from_sdk
+from .hardware_constants import (
+    ARM_INDICES,
     DAMPING_FSM_ID,
-    DAMPING_RETRY_SECS,
+    G1_29_JOINT_NAMES,
     SDK_RPC_SEND_CODE,
+    UPPER_BODY_INDICES,
+)
+from .hardware_profile import (
+    DAMPING_RETRY_SECS,
     HARDWARE_FEEDBACK_TIMEOUT_SECS,
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
-    UPPER_BODY_INDICES,
+)
+from .joint_checks import (
+    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
+    SPEED_HOLD_S,
+    check_command,
+    check_measured_velocity,
+    check_torque,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
 
@@ -37,39 +48,27 @@ class G1ArmAdapter:
         self.armed = False
         self.time_ready_mode_confirmed_secs = None
         self.arm_rejection_reason = None
-        self.command = None
-        self.command_expires_secs = None
+        self._reset_session()
         self.last_submission_secs = None
-        self.previous_targets = None
-        self.previous_velocities = None
-        self.last_written_ownership_weight = 0.0
-        self.first_output_secs = None
-        self.last_output_secs = None
-        self.last_worker_cycle_secs = None
         self.stop_requested = Event()
         self.shutdown_requested = Event()
         self.damping_rpc_code = None
         self.walk_rpc_code = None
-        self.velocity_rpc_code = None
-        self.last_walk_secs = None
         self.walk_stop = False
         self.balance_policy = None
-        self.balance_load_reported = False
         self.balance_released = False
-        self.arm_hold_q = None
         self.quat = (1.0, 0.0, 0.0, 0.0)
         self.gyro = (0.0, 0.0, 0.0)
+        self._joint_over_since = {}
+        self._base_over_since = None
         self.f3_pressed = False
         self.reported_fsm_id = None
         self.arm_release_written = False
-        self.ownership_taken = False
         self.hold_failed = False
         self.release_damp_when_confirmed = False
         self.damp_settled = False
-        self.hold_targets = None
         self.pose_snapshot = None
         self.pose_snapshot_secs = None
-        self.joint_diagnostics = JointDeltaDiagnostics()
         self.workers = []
         window = Config().double_press_window_secs
         self.button_detector = StartDoublePressDetector(
@@ -97,6 +96,8 @@ class G1ArmAdapter:
                 if imu is not None:
                     self.quat = tuple(float(value) for value in imu.quaternion)
                     self.gyro = tuple(float(value) for value in imu.gyroscope)
+                if self.armed and self.abort_reason is None:
+                    self._abort_if_motion_exceeds_limits()
                 with self.stop_lock:
                     self.pose_snapshot = tuple(
                         sample.q[index] for index in UPPER_BODY_INDICES
@@ -186,7 +187,7 @@ class G1ArmAdapter:
                 )
             if self.feedback.start_button_pressed or self.f3_pressed:
                 return self.reject_arm("Start and F3 must be released")
-            for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
+            for index, limits in self._monitored_joints():
                 joint_name = G1_29_JOINT_NAMES[index]
                 position = self.feedback.q[index]
                 velocity = self.feedback.dq[index]
@@ -204,9 +205,22 @@ class G1ArmAdapter:
             with self.stop_lock:
                 if self.abort_reason:
                     return self.reject_arm(f"already stopped: {self.abort_reason}")
+                self._reset_session()
                 self.last_submission_secs = now
                 self.armed = True
             return True
+
+    def _reset_session(self):
+        """Initialize output history before workers start or under both adapter locks."""
+        self.command = None
+        self.command_expires_secs = None
+        self.previous_targets = self.previous_velocities = None
+        self.first_output_secs = self.last_output_secs = None
+        self.last_worker_cycle_secs = None
+        self.last_written_ownership_weight = 0.0
+        self.ownership_taken = False
+        self.hold_targets = self.arm_hold_q = None
+        self.joint_diagnostics = JointDeltaDiagnostics()
 
     def reject_arm(self, reason):
         """Record the failed readiness check without changing motor settings."""
@@ -295,10 +309,10 @@ class G1ArmAdapter:
                     self.first_output_secs = now
                 self.last_output_secs = now
                 self.previous_targets = {
-                    index: target["q"] for index, target in targets.items()
+                    index: values[0] for index, values in self._accepted_commands.items()
                 }
                 self.previous_velocities = {
-                    index: target["dq"] for index, target in targets.items()
+                    index: values[1] for index, values in self._accepted_commands.items()
                 }
             except Exception as error:  # noqa: BLE001
                 self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
@@ -312,74 +326,78 @@ class G1ArmAdapter:
         finally:
             self.lock.release()
 
+    def _abort_if_motion_exceeds_limits(self):
+        """Stop if a joint or the body stays over the speed line for 50 ms."""
+        now = self.feedback.received_at_secs
+        for index, limits in self._monitored_joints():
+            speed = self.feedback.dq[index]
+            if not math.isfinite(speed):
+                self.abort(f"{G1_29_JOINT_NAMES[index]}: joint_velocity_limit nonfinite")
+                return
+            if abs(speed) > limits.max_velocity_rad_secs:
+                started = self._joint_over_since.setdefault(index, now)
+                if now - started >= SPEED_HOLD_S:
+                    try:
+                        check_measured_velocity(
+                            G1_29_JOINT_NAMES[index], limits, speed
+                        )
+                    except ValueError as error:
+                        self.abort(str(error))
+                        return
+            else:
+                self._joint_over_since.pop(index, None)
+        rate = math.sqrt(sum(value * value for value in self.gyro))
+        if not math.isfinite(rate):
+            self.abort("base_angular_speed_limit nonfinite")
+            return
+        if rate > BASE_ANGULAR_SPEED_LIMIT_RAD_S:
+            if self._base_over_since is None:
+                self._base_over_since = now
+            elif now - self._base_over_since >= SPEED_HOLD_S:
+                self.abort(
+                    "base_angular_speed_limit "
+                    f"value={rate:.6g} limit={BASE_ANGULAR_SPEED_LIMIT_RAD_S} rad/s"
+                )
+        else:
+            self._base_over_since = None
+
+    def _monitored_joints(self):
+        """Legs use the same command rules as the waist and arms."""
+        return (
+            *zip(range(len(self.profile.legs)), self.profile.legs),
+            *zip(UPPER_BODY_INDICES, self.profile.joints),
+        )
+
     def checked_targets(self, now):
         """Use configured gains, zero feedforward torque and bounded position/velocity."""
         targets = {}
+        accepted = {}
         dt = 0 if self.last_output_secs is None else now - self.last_output_secs
-        for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
+        for index, limits in self._monitored_joints():
             q = self.command["q"][index]
             dq = self.command["dq"][index]
             tau = self.command["tau"][index]
             joint = G1_29_JOINT_NAMES[index]
             measured = self.feedback.q[index]
-            tracking_error = abs(q - measured)
-            if not all(math.isfinite(value) for value in (q, dq, tau)):
-                raise ValueError(f"{joint}: nonfinite target q={q}, dq={dq}, tau={tau}")
-            if not limits.position_min_rad <= q <= limits.position_max_rad:
-                raise ValueError(
-                    f"{joint}: target q={q:.6f} rad outside "
-                    f"[{limits.position_min_rad}, {limits.position_max_rad}]"
-                )
-            if abs(dq) > limits.max_velocity_rad_secs:
-                raise ValueError(
-                    f"{joint}: target dq={dq:.6f} rad/s exceeds "
-                    f"absolute limit={limits.max_velocity_rad_secs}"
-                )
-            if tau != 0:
-                raise ValueError(f"{joint}: feedforward tau={tau} Nm must be zero")
-            if tracking_error > limits.max_tracking_error_rad:
-                raise ValueError(
-                    f"{joint}: tracking error={tracking_error:.6f} rad exceeds "
-                    f"limit={limits.max_tracking_error_rad}, "
-                    f"target={q:.6f}, measured={measured:.6f}"
-                )
-            if self.previous_targets is None:
-                if tracking_error > self.profile.initial_position_tolerance_rad:
-                    raise ValueError(
-                        f"{joint}: initial position error={tracking_error:.6f} rad "
-                        f"exceeds limit={self.profile.initial_position_tolerance_rad}"
-                    )
-                if abs(dq) > self.profile.initial_velocity_tolerance_rad_secs:
-                    raise ValueError(
-                        f"{joint}: initial target dq={dq:.6f} rad/s exceeds "
-                        f"absolute limit={self.profile.initial_velocity_tolerance_rad_secs}"
-                    )
-                # First SDK write uses exactly the measured position with zero weight.
+            previous = None if self.previous_targets is None else (
+                self.previous_targets[index], self.previous_velocities[index])
+            check_command(joint, limits, q, dq, tau, measured, previous, dt,
+                          self.profile.initial_position_tolerance_rad,
+                          self.profile.initial_velocity_tolerance_rad_secs)
+            check_torque(joint, limits, limits.kp * (q - measured)
+                         + limits.kd * (dq - self.feedback.dq[index]) + tau)
+            if previous is None:
                 q, dq = measured, 0.0
-            else:
-                if dt <= 0:
-                    raise ValueError(f"output time did not advance: interval={dt} secs")
-                position_change = abs(q - self.previous_targets[index])
-                if position_change > limits.max_velocity_rad_secs * dt:
-                    raise ValueError(
-                        f"{joint}: target position change={position_change:.6f} rad "
-                        f"exceeds limit={limits.max_velocity_rad_secs * dt:.6f} rad "
-                        f"over interval={dt:.6f} secs"
-                    )
-                velocity_change = abs(dq - self.previous_velocities[index])
-                if velocity_change > limits.max_acceleration_rad_secs2 * dt:
-                    raise ValueError(
-                        f"{joint}: target velocity change={velocity_change:.6f} rad/s "
-                        f"exceeds limit={limits.max_acceleration_rad_secs2 * dt:.6f} "
-                        f"over interval={dt:.6f} secs"
-                    )
-            targets[index] = {
-                "q": q,
-                "dq": dq,
-                "kp": limits.kp,
-                "kd": limits.kd,
-                "tau": 0.0,
-            }
+            accepted[index] = (q, dq)
+            if index in UPPER_BODY_INDICES:
+                targets[index] = {
+                    "q": q,
+                    "dq": dq,
+                    "kp": limits.kp,
+                    "kd": limits.kd,
+                    "tau": 0.0,
+                }
+        self._accepted_commands = accepted
         return targets
 
     def stop_once(self):
@@ -406,6 +424,8 @@ class G1ArmAdapter:
 
     def _publish_balance(self):
         """Hold the GR00T standing network on the legs. Arms stay at the captured pose."""
+        if self.balance_policy is None:
+            return
         if not self.balance_released:
             try:
                 self.walk_rpc_code = self.transport.release_motion()
@@ -417,35 +437,37 @@ class G1ArmAdapter:
             self.balance_released = True
         if self.feedback is None:
             return
-        q = self.feedback.q
+        feedback = self.feedback
+        q = feedback.q
         if self.arm_hold_q is None:
-            self.arm_hold_q = q[15:29]
-        if not self._ensure_balance_policy():
-            return
+            self.arm_hold_q = tuple(q[index] for index in ARM_INDICES)
         try:
-            lower = self.balance_policy.update(q, self.feedback.dq, self.quat, self.gyro)
-        except Exception:  # noqa: BLE001
-            return
-        try:
-            self.transport.write_lower_body(
-                lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0
-            )
-        except Exception:  # noqa: BLE001
-            return
+            lower = self.balance_policy.update(q, feedback.dq, self.quat, self.gyro)
+            now = self.clock()
+            if not 0 <= now - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS:
+                raise ValueError("stale balance feedback")
+            # Soft-reset balancing does not use submission movement limits.
+            if not self.transport.write_lower_body(lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0):
+                raise RuntimeError("balance write failed")
+        except Exception as exc:  # noqa: BLE001 - Balance failures enter damping.
+            self.abort_reason = "balance_output_error: " + str(exc)
+            self.hold_failed = True
+            self._request_stock_damping()
 
     def _ensure_balance_policy(self):
-        """Load the network once. The first F3 must not wait on this."""
+        """Load and prime inference at startup, then retain the prepared policy."""
         if self.balance_policy is not None:
             return True
         try:
-            self.balance_policy = BalancePolicy(str(MODEL_PATH))
+            policy = BalancePolicy(str(MODEL_PATH))
+            policy.warmup()
+            self.balance_policy = policy
         except Exception as exc:  # noqa: BLE001
-            if not self.balance_load_reported:
-                print(
-                    f"balance network failed to load from {MODEL_PATH}: {exc}",
-                    flush=True,
-                )
-                self.balance_load_reported = True
+            print(
+                f"balance preparation failed at {MODEL_PATH}: {exc}. "
+                "F3 balancing unavailable until restart.",
+                flush=True,
+            )
             return False
         return True
 
@@ -515,12 +537,14 @@ class G1ArmAdapter:
             self.release_damp_when_confirmed
             and self.damping_rpc_code == 0
             and self.reported_fsm_id == DAMPING_FSM_ID
+            and self.arm_release_written
         ):
             self._release_after_confirmed_damp()
 
     def _release_after_confirmed_damp(self):
         """Stop resending damp so a later stand from the remote is left alone."""
         with self.stop_lock:
+            self.arm_hold_q = None
             self.hold_failed = False
             self.walk_stop = False
             self.armed = False

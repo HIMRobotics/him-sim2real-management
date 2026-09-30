@@ -1,0 +1,6 @@
+{
+  "seeds": [0, 1, 2],
+  "max_scenarios": null,
+  "nominal_seconds": 20.0,
+  "branch_seconds": 5.0
+}

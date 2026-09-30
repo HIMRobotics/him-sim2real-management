@@ -1,7 +1,8 @@
 # G1 type-5 profile using Unitree model limits
 
-`g1_type5.template.json` uses the official position and velocity limits for all
-17 waist/arm joints in Unitree's `g1_29dof_rev_1_0.urdf`. The remaining local settings are distinguished below. No launcher
+`g1_type5.template.json` uses the official position and effort limits for all
+29 joints in Unitree's `g1_29dof_rev_1_0.urdf`, with a local 9 rad/s speed cap.
+The remaining local settings are distinguished below. No launcher
 selects hardware output automatically.
 
 Source: [Unitree revision-1.0 model](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/g1_29dof_rev_1_0.urdf),
@@ -16,6 +17,13 @@ velocity in radians/second and effort in Nm.
 
 | Joint | Minimum position | Maximum position | Velocity | Effort |
 | --- | ---: | ---: | ---: | ---: |
+| Hip pitch | -2.5307 | 2.8798 | 32 | 88 |
+| Left hip roll | -0.5236 | 2.9671 | 20 | 139 |
+| Right hip roll | -2.9671 | 0.5236 | 20 | 139 |
+| Hip yaw | -2.7576 | 2.7576 | 32 | 88 |
+| Knee | -0.087267 | 2.8798 | 20 | 139 |
+| Ankle pitch | -0.87267 | 0.5236 | 30 | 35 |
+| Ankle roll | -0.2618 | 0.2618 | 30 | 35 |
 | Waist yaw | -2.618 | 2.618 | 32 | 88 |
 | Waist roll/pitch | -0.52 | 0.52 | 30 | 35 |
 | Shoulder pitch | -3.0892 | 2.6704 | 37 | 25 |
@@ -26,17 +34,30 @@ velocity in radians/second and effort in Nm.
 | Wrist roll | -1.972222054 | 1.972222054 | 37 | 25 |
 | Wrist pitch/yaw | -1.614429558 | 1.614429558 | 22 | 5 |
 
-The adapter enforces the position bounds and uses the velocity value both to
-check target dq and limit position-target changes between SDK writes. This
-position-change check is our software rule, not a guarantee of actual joint speed.
-The previous 0.1/0.25/0.5 rad/s test caps are removed. Model velocities are high:
-37 rad/s is about 2,120 degrees/s. These are model limits, not requested speeds
-or recommendations for personnel-adjacent testing. The policy still sets the
-motion sequence. The profile alone no longer enforces a slow raise.
+The table records the URDF ratings. The standard template instead sets
+`max_velocity_rad_secs` to 9 rad/s for every joint. The adapter uses that field
+to check target dq, limit position-target changes between SDK writes, and monitor
+sustained measured overspeed. The target-change check is a software rule, not a
+guarantee of actual joint speed. See the
+[shared speed checks](../../packages/policy_safety/README.md#shared-speed-checks)
+for config locations, body-spin limits, and the measured-speed hold time.
+The policy still sets the motion sequence. The profile alone does not enforce
+a slow raise.
 
-Effort is recorded for reference. The adapter does not enforce a total PD torque
-limit or assert that firmware implements the model's effort bounds. Feedforward
-torque remains zero. Joint bounds alone do not prevent collisions or joint damage.
+`max_torque_nm` enforces the model effort bound against estimated PD demand
+using the gains of the active controller. The simulator also checks applied
+torque. Hardware feedback does not currently expose measured torque to this
+checker, so this is a command estimate, not a measured-torque monitor or a
+firmware guarantee. Feedforward torque remains zero.
+
+Active arm-policy output and the offline evaluator use the same `joint_checks.py`
+functions. Both validate all 29 joints, including leg commands and measured
+speeds. F3 soft-reset GR00T balancing is
+exempt from these submission movement and torque limits. Feedback freshness and
+output-error handling still apply. The hardware arm gate still rejects whole-body
+submissions and writes only waist/arm targets. Monitoring leg commands and
+feedback does not grant leg control through the arm SDK path.
+Older custom profiles must add all 12 leg entries and every joint's torque bound.
 
 ## Gains and local settings
 
@@ -61,14 +82,52 @@ the trajectory clock. First output uses measured positions and zero ownership we
 
 | Joint group | Change in target dq per second | Target-to-measured error |
 | --- | ---: | ---: |
+| Hip pitch/yaw | 1.0 rad/s² | 0.146667 rad (8.4°) |
+| Hip roll | 1.0 rad/s² | 0.231667 rad (13.3°) |
+| Knees | 1.0 rad/s² | 0.173750 rad (10.0°) |
+| Ankles | 1.0 rad/s² | 0.218750 rad (12.5°) |
 | Shoulders/elbows | 1.0 rad/s² | 0.30 rad (17.2°) |
 | Wrists | 1.0 rad/s² | 0.05 rad (2.9°) |
 | Waist | 0.5 rad/s² | 0.05 rad (2.9°) |
 
-These acceleration and tracking thresholds remain local proposals. The official
-model does not specify replacements for them. The acceleration check applies to
-commanded dq. Because the example sends dq=0, it does not bound acceleration
-implied by the position trajectory. No hardware jerk limiter is implemented.
+Leg tracking allowances are now derived from `0.25 * max_torque_nm / kp`,
+rounded to six decimals, using this profile's Unitree model effort limits and
+reference gains (hips 150, knees 200, ankles 40 Nm/rad). Both sides use the same
+values. The standard, lenient and standalone profiles share these leg allowances.
+
+The quarter-effort scaling comes from
+[NVIDIA's G1 policy parameters](https://github.com/NVlabs/GR00T-WholeBodyControl/blob/b042411fae38ee4d1af9aac82a37a1f8d14d6dd0/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/policy_parameters.hpp).
+Upstream uses it to scale actions around a default pose, **not** as a tracking
+fault threshold. Applying it to target-minus-measured error is our explicit
+engineering choice for a provisional screening default. It replaces the copied
+arm tolerances without claiming a manufacturer-approved tracking envelope.
+At the reference kp, the proportional correction at the threshold is about 25%
+of model effort. This is not a bound on total PD torque or a continuous-duty rating.
+
+The simulator retains policy gains, so the fixed radian thresholds are not
+recomputed for each submission. Its separate full PD-demand check uses the actual
+simulator gains and includes damping. No arm/waist values, command-change limits,
+startup tolerances or soft-reset behavior change with this tracking update.
+The leg commanded-velocity-change allowance remains a local 1 rad/s² setting.
+With desired dq=0, that check does not bound acceleration implied by the position
+trajectory. No hardware jerk limiter is implemented.
+
+### Upstream safety checks reviewed September 28, 2026
+
+- [Unitree's G1 runtime termination checks](https://github.com/unitreerobotics/unitree_sdk2/blob/main/include/unitree/robot/g1/common/terminations.hpp)
+  default to 10 rad/s measured joint speed, 6 rad/s body angular velocity and
+  1 rad tilt. The shared local checks use lower speed thresholds with a 50 ms
+  hold, as described in the [screening guide](../../packages/policy_safety/README.md#shared-speed-checks).
+  A rapid spike can cross the runtime thresholds before that hold elapses.
+  The URDF motor ratings remain in `g1_type5.official_limits.json`.
+- [NVIDIA's G1 joint safety monitor](https://github.com/NVlabs/GR00T-WholeBodyControl/blob/b042411fae38ee4d1af9aac82a37a1f8d14d6dd0/decoupled_wbc/control/envs/g1/utils/joint_safety.py)
+  explicitly excludes legs. Its 6 rad/s arm limit cannot justify a leg setting.
+- Neither checker supplies a leg tracking-error or commanded-acceleration bound.
+  The Unitree URDF supplies position, velocity and effort bounds, not those two metrics.
+
+The PD-demand check uses model effort bounds and actual controller gains.
+The derived tracking defaults still require controller-specific validation.
+Neither upstream repository establishes these values as validated fault thresholds.
 
 The SDK example can still trigger tracking, timing or other checks. Replacing
 position and velocity caps does not establish that it will complete. Whole-body

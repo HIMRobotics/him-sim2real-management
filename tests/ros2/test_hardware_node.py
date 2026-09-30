@@ -1,6 +1,7 @@
 """Verify the ROS gate-to-SDK boundary using a fake transport only."""
 
 import time
+import os
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -27,6 +28,51 @@ from tests.test_robot_safety_hardware import FakeTransport, load_profile, profil
 
 
 class HardwareNodeTests(unittest.TestCase):
+    def test_startup_ready_requires_warmup_telemetry_and_live_workers(self):
+        adapter = SimpleNamespace(
+            balance_policy=None, feedback_fresh=Mock(return_value=True),
+            feedback=SimpleNamespace(start_button_pressed=False), f3_pressed=False,
+            abort_reason=None, workers=[Mock(is_alive=Mock(return_value=True))],
+        )
+        node = SimpleNamespace(
+            adapter=adapter, startup_ready=False,
+            motor_gate=SimpleNamespace(abort_reason=None), get_logger=Mock(),
+        )
+        with patch.dict(os.environ, {"NOTIFY_SOCKET": "@test-safety-notify"}), patch(
+            "robot_safety.hardware_node.socket.socket"
+        ) as socket:
+            notify = lambda: HardwareMotorGateNode.notify_startup_ready(node)
+            notify()
+            socket.assert_not_called()
+            adapter.balance_policy = object()
+            adapter.feedback_fresh.return_value = False
+            notify()
+            socket.assert_not_called()
+            adapter.feedback_fresh.return_value = True
+            adapter.feedback.start_button_pressed = True
+            notify()
+            socket.assert_not_called()
+            adapter.feedback.start_button_pressed = False
+            adapter.workers[0].is_alive.return_value = False
+            notify()
+            socket.assert_not_called()
+            adapter.workers[0].is_alive.return_value = True
+            adapter.f3_pressed = True
+            notify()
+            socket.assert_not_called()
+            adapter.f3_pressed = False
+            adapter.abort_reason = "fault"
+            notify()
+            socket.assert_not_called()
+            adapter.abort_reason = None
+            notify()
+            notify()
+            sent = socket.return_value.__enter__.return_value.sendto
+            sent.assert_called_once()
+            self.assertIn(b"READY=1", sent.call_args[0][0])
+            self.assertEqual(sent.call_args[0][1], "\0test-safety-notify")
+            self.assertTrue(node.startup_ready)
+
     def test_readiness_timeout_rejects_without_damping(self):
         from robot_safety.hardware_adapter import G1ArmAdapter
 
@@ -41,6 +87,9 @@ class HardwareNodeTests(unittest.TestCase):
             ),
             get_logger=Mock(return_value=Mock()),
             latch_abort=Mock(),
+        )
+        node._reject_request = lambda *args: HardwareMotorGateNode._reject_request(
+            node, *args
         )
         response = HardwareMotorGateNode.on_ready(
             node, Trigger.Request(), Trigger.Response()
@@ -120,6 +169,46 @@ class HardwareNodeTests(unittest.TestCase):
             self.assertEqual(transport.stop_calls, 0)
             self.assertEqual(node.adapter.abort_reason, "controller_double_start")
             self.assertEqual(transport.writes[-1][1], 0.0)
+            observer = rclpy.create_node("abort_history_observer")
+            received = []
+            from robot_safety import ros_topics as topics
+            from robot_safety.core import SupervisorPhase
+
+            def observe_for(seconds):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    rclpy.spin_once(observer, timeout_sec=0.02)
+
+            try:
+                subscription = observer.create_subscription(
+                    Abort, topics.ABORT, received.append, node.abort_qos
+                )
+                observe_for(0.5)
+                self.assertTrue(received)
+                self.assertEqual(received[-1].reason, "controller_double_start")
+                observer.destroy_subscription(subscription)
+
+                node.adapter.release_damp_when_confirmed = True
+                node.adapter._request_stock_damping()
+                node.publish_output()
+                self.assertIsNone(node.abort_reason)
+                self.assertIsNone(node.motor_gate.policy_session_id)
+                self.assertEqual(node.motor_gate.supervisor_phase, SupervisorPhase.INHIBITED)
+                self.assertFalse(node.adapter.armed)
+                received.clear()
+                observer.create_subscription(
+                    Abort, topics.ABORT, received.append, node.abort_qos
+                )
+                observe_for(0.5)
+                self.assertEqual(received, [])
+
+                node.adapter.damp_settled = True
+                abort.reason = "new_stop"
+                node.on_abort(abort)
+                self.assertEqual(node.motor_gate.abort_reason, "new_stop")
+                self.assertEqual(node.abort_reason, "new_stop")
+            finally:
+                observer.destroy_node()
         finally:
             if node is not None:
                 node.destroy_node()

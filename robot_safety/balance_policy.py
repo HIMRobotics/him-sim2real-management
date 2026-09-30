@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .hardware_constants import LOWER_BODY_INDICES, NUM_JOINTS
+
 _MODEL_RELATIVE = Path(".cache") / "groot_balance" / "GR00T-WholeBodyControl-Balance.onnx"
 
 
@@ -32,8 +34,7 @@ def resolve_model_path():
 
 MODEL_PATH = resolve_model_path()
 
-NUM_JOINTS = 29
-NUM_ACTIONS = 15
+NUM_ACTIONS = len(LOWER_BODY_INDICES)
 SINGLE_OBS_DIM = 86
 OBS_HISTORY_LEN = 6
 NUM_OBS = SINGLE_OBS_DIM * OBS_HISTORY_LEN
@@ -42,7 +43,6 @@ ANG_VEL_SCALE = 0.5
 DOF_POS_SCALE = 1.0
 DOF_VEL_SCALE = 0.05
 ACTION_SCALE = 0.25
-CMD_SCALE = np.array([2.0, 2.0, 0.5], dtype=np.float32)
 HEIGHT_CMD = np.float32(0.74)
 
 DEFAULT_ANGLES = np.array(
@@ -53,6 +53,8 @@ DEFAULT_ANGLES = np.array(
     ],
     dtype=np.float32,
 )
+DEFAULT_JOINT_POSITIONS = np.zeros(NUM_JOINTS, dtype=np.float32)
+DEFAULT_JOINT_POSITIONS[:NUM_ACTIONS] = DEFAULT_ANGLES
 LEG_KP = np.array(
     [150, 150, 150, 200, 40, 40, 150, 150, 150, 200, 40, 40, 250, 250, 250],
     dtype=np.float32,
@@ -80,23 +82,6 @@ JOINT_LIMITS = np.array(
         [-0.52, 0.52],
     ],
     dtype=np.float32,
-)
-LOWER_JOINT_NAMES = (
-    "left_hip_pitch",
-    "left_hip_roll",
-    "left_hip_yaw",
-    "left_knee",
-    "left_ankle_pitch",
-    "left_ankle_roll",
-    "right_hip_pitch",
-    "right_hip_roll",
-    "right_hip_yaw",
-    "right_knee",
-    "right_ankle_pitch",
-    "right_ankle_roll",
-    "waist_yaw",
-    "waist_roll",
-    "waist_pitch",
 )
 
 
@@ -130,13 +115,11 @@ def single_observation(q, dq, quat_wxyz, gyro, action):
         raise ValueError("expected 29 joint positions and velocities")
     if action.shape != (NUM_ACTIONS,):
         raise ValueError("expected 15 previous actions")
-    defaults = np.zeros(NUM_JOINTS, dtype=np.float32)
-    defaults[:NUM_ACTIONS] = DEFAULT_ANGLES
     obs = np.zeros(SINGLE_OBS_DIM, dtype=np.float32)
     obs[3] = HEIGHT_CMD
     obs[7:10] = np.asarray(gyro, dtype=np.float32) * ANG_VEL_SCALE
     obs[10:13] = gravity_orientation(quat_wxyz)
-    obs[13:42] = (q - defaults) * DOF_POS_SCALE
+    obs[13:42] = (q - DEFAULT_JOINT_POSITIONS) * DOF_POS_SCALE
     obs[42:71] = dq * DOF_VEL_SCALE
     obs[71:86] = action
     return obs
@@ -163,6 +146,15 @@ class BalancePolicy:
             [np.zeros(SINGLE_OBS_DIM, dtype=np.float32)] * OBS_HISTORY_LEN,
             maxlen=OBS_HISTORY_LEN,
         )
+
+    def warmup(self):
+        """Prime inference without modifying history or sending motor targets."""
+        raw = self.session.run(
+            None, {self.input_name: np.zeros((1, NUM_OBS), dtype=np.float32)}
+        )[0]
+        action = np.asarray(raw, dtype=np.float32).reshape(NUM_ACTIONS)
+        if not np.all(np.isfinite(action)):
+            raise ValueError("balance warmup returned a non-finite action")
 
     def update(self, q, dq, quat_wxyz, gyro):
         """Append one frame and return clipped lower-body position targets."""

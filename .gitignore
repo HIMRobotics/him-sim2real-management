@@ -7,6 +7,7 @@ exports/*
 
 .app/
 .venv/
+.venv-policy-safety/
 venv/
 .env
 .env.*
@@ -23,3 +24,8 @@ venv/
 /build/
 /install/
 /log/
+
+# Portable Python package build products
+packages/*/build/
+packages/*/dist/
+*.egg-info/
