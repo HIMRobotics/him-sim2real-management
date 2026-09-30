@@ -109,10 +109,16 @@ def test_observation_coordinates_history_and_scaling(setup):
 def test_sample_neural_path_and_embedded_normalization(bundle):
     import onnx
 
+    import yaml
+
     sim = Simulation(bundle / "robot.json")
     sim.reset(0)
     adapter = G1Walker(bundle / "walker.onnx", sim.robot)
-    config = json.loads((bundle / "source_model_config.json").read_text())
+    policy_yaml = (
+        Path(__file__).resolve().parents[3]
+        / "examples/policy.yaml"
+    )
+    config_joints = yaml.safe_load(policy_yaml.read_text())["joints"]
     q, dq, quat, vel = (
         sim.data.qpos[sim.qadr],
         sim.data.qvel[sim.vadr],
@@ -127,7 +133,7 @@ def test_sample_neural_path_and_embedded_normalization(bundle):
             inverse_rotate(quat, [0, 0, -1]),
             q.astype(np.float32)
             - np.array(
-                [config["default_joint_pos"][n] for n in config["joint_names"]],
+                [joint["default_position"] for joint in config_joints],
                 dtype=np.float32,
             ),
             dq,

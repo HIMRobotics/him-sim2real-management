@@ -29,3 +29,15 @@ venv/
 packages/*/build/
 packages/*/dist/
 *.egg-info/
+
+tmp
+
+# Uploaded robot containers. Keep the drop folder, not the images.
+containers/upload/*
+!containers/upload/.gitkeep
+
+# MuJoCo container-sim build, reports, and temporary scene.
+containers/sim/.ros/
+containers/sim/output/
+.container_sim_scene.xml
+MUJOCO_LOG.TXT

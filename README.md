@@ -52,7 +52,8 @@ The app is a small local web page served by Python’s standard library: no Node
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | SDK, networking, empty commands, interruptions |
 | [ARENA_RECEIVING.md](ARENA_RECEIVING.md) | Receiving, verifying, interpreting, and comparing runs |
 | [VALIDATION.md](VALIDATION.md) | Tests actually run and hardware checks remaining |
-| `examples/demo-run/` | Clearly synthetic example of the delivered run/report |
+| `examples/` | Sample policy bundle: YAML plus ONNX. The specimen is a G1 walker. |
+| `setup.sh`, `sim.sh`, [containers/SIM_RUN.md](containers/SIM_RUN.md), [containers/INSTRUCTIONS.md](containers/INSTRUCTIONS.md) | Run an uploaded container on the robot, or against MuJoCo first |
 
 From a Mac or Linux laptop, choose **Set up the G1 over SSH** to check existing SSH access, copy the recorder, transfer a policy file with checksum verification, and open the robot recorder through a managed tunnel. An existing trusted SSH host and unlocked key/agent are required. The remote Linux Python needs the Unitree SDK. The app transfers policies but never executes them.
 

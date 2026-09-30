@@ -59,7 +59,7 @@ Some Unitree ONNX exports also include a separate weights file, `policy.onnx.dat
 
 ### C. Custom runner or unknown origin
 
-Use the author's documented launch command in the environment and working directory they specify. If those are missing, the handoff is incomplete. A simulator upload to Arena does not, by itself, establish physical-G1 deployability. This manager records standard G1 telemetry independently of the policy format; it does not automatically adapt an Arena submission.
+Use the author's documented launch command in the environment and working directory they specify. The one ONNX layout this repo screens lives in [examples/](examples/) and is described in [ONNX_BUNDLE.md](ONNX_BUNDLE.md). That file is not a robot launcher. If the author's launch command is missing, the handoff is incomplete. A simulator upload to Arena does not, by itself, establish physical-G1 deployability. This manager records standard G1 telemetry independently of the policy format; it does not automatically adapt an Arena submission.
 
 ## Session order in this app
 

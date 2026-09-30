@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Offline MuJoCo screening for explicitly adapted ONNX policies"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.26,<3", "mujoco>=3.3.2,<3.4", "onnxruntime>=1.22,<2", "onnx>=1.17,<2"]
+dependencies = ["numpy>=1.26,<3", "mujoco>=3.3.2,<3.4", "onnxruntime>=1.22,<2", "onnx>=1.17,<2", "pyyaml>=6,<7"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
@@ -23,4 +23,4 @@ py-modules = ["joint_checks"]
 package-dir = {"" = "../../robot_safety", "policy_safety" = "src/policy_safety"}
 
 [tool.setuptools.package-data]
-policy_safety = ["profiles/*.json"]
+policy_safety = ["profiles/*.json", "robots/g1/*", "robots/g1/third_party/unitree_g1/*", "robots/g1/third_party/unitree_g1/assets/*"]

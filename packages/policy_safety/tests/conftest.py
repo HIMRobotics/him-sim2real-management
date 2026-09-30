@@ -18,7 +18,7 @@ def bundle(tmp_path_factory):
 
     sample = (
         Path(__file__).resolve().parents[3]
-        / "examples/sample_submissions/unitree_g1_stairs"
+        / "examples"
     )
     if not sample.is_dir():
         pytest.skip("sample submission is needed for integration tests")

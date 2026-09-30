@@ -19,7 +19,7 @@ uv pip install --python .venv-policy-safety/bin/python ./packages/policy_safety
 source .venv-policy-safety/bin/activate
 python --version
 policy-safety prepare-g1 \
-  --submission examples/sample_submissions/unitree_g1_stairs \
+  --submission examples \
   --output /tmp/g1-screening-bundle
 policy-safety evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \
@@ -37,12 +37,12 @@ If pip reports that `numpy>=1.26` is unavailable and lists versions only up to
 1.24.4, first check `python --version` and `python -m pip --version`. On this host,
 that error came from using Python 3.8 outside the safety environment.
 
-The preparation command copies the example's ONNX and external weights, model
-configuration, robot XML, meshes, and third-party notices into a portable bundle.
-It adds a flat scene and explicit controller configuration. Output directories
-must not already exist. Preparation reads files without importing the submitted
-Python or running its scripts. The sample files must be present to prepare this
-example, but are not dependencies of the installed package.
+The preparation command reads the policy YAML and copies the ONNX and its
+external weights. It attaches this package's G1 MuJoCo model, adds a flat scene,
+and writes `robot.json` from the YAML's joint defaults, scales, and gains.
+Output directories must not already exist. Preparation does not import or run
+submitted Python. The sample ONNX must be present to prepare this example. The
+robot model ships with the package.
 
 You can copy the bundle and install this package on another device. No repository,
 ROS installation, robot network, or Unitree SDK is required to evaluate it.
@@ -91,7 +91,11 @@ linear velocity, local angular velocity, projected gravity, joint offsets, joint
 velocities, previous network action, and commanded forward/lateral/yaw velocity.
 The sample ONNX graph already contains normalization. Outputs become joint
 position targets using explicit per-joint defaults and scales, with the sample's
-position actuator gains and 20 ms control / 2 ms physics timing.
+position actuator gains and 20 ms control / 2 ms physics timing. The same
+contract is the YAML in
+[`examples/policy.yaml`](../../examples/policy.yaml), described in
+[ONNX_BUNDLE.md](../../ONNX_BUNDLE.md). `prepare-g1` reads that YAML and writes
+`robot.json` for the checker.
 
 This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not
@@ -136,7 +140,9 @@ center. The same six gaits are repeated with the motor torque at 95% and at
 105% of the intended position-controller torque. 95% is a weak motor. 105% is a
 high gain, not wear. These 12 nominal reruns start from the default standing pose
 and receive no pushes. Six five-second counterfactuals cover standing, floor
-sitting, supine, prone, and both sides. All **42 baseline runs** are retained:
+sitting, supine, prone, and both sides. A container submission is screened on
+those same starts with `./sim.sh --counterfactuals`, described in
+[containers/SIM_RUN.md](../../containers/SIM_RUN.md). All **42 baseline runs** are retained:
 six nominals, 18 unperturbed continuations, 12 torque-scaled nominals, and six
 counterfactuals. With 58 sampled pushes, the total is at most **7.3 simulated
 minutes**. Wall-clock time depends on the device.
