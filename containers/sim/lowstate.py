@@ -15,9 +15,9 @@ class SimLowState:
         if interface != "lo":
             return
         try:
-            import os
+            import socket
 
-            if os.path.exists("/sys/class/net/eth0"):
+            if {name for _, name in socket.if_nameindex()} != {"lo"}:
                 return
             from unitree_sdk2py.core.channel import (
                 ChannelFactoryInitialize,

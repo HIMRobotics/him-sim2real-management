@@ -6,6 +6,7 @@ the system ROS 2 Foxy interpreter. They talk over stdin.
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ import rclpy
 from him_safety_interfaces.msg import Abort, JointCommand, RobotFeedback
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 SIM_DIR = Path(__file__).resolve().parent
@@ -90,6 +92,7 @@ class SimBridge(Node):
         self.observation_pub = self.create_publisher(
             RobotFeedback, POLICY_OBSERVATION, feedback_qos
         )
+        self.sim_state_pub = self.create_publisher(String, "/sim/state", feedback_qos)
         self.abort_pub = self.create_publisher(Abort, ABORT, abort_qos)
         self.create_subscription(JointCommand, PRECHECK, self.on_precheck, command_qos)
         self.create_service(Trigger, ARM, self.on_arm)
@@ -120,7 +123,9 @@ class SimBridge(Node):
             "kd": list(message.kd),
             "tau": list(message.tau),
         }
-        result = self.plant.call({"op": "command", "time": self.clock(), "frame": frame})
+        result = self.plant.call(
+            {"op": "command", "time": self.clock(), "frame": frame}
+        )
         if result.get("ok"):
             self.accepted = True
             if self.run_started is None:
@@ -138,6 +143,10 @@ class SimBridge(Node):
         elif time.monotonic() - self.run_started >= self.seconds:
             self.finish()
             return
+        if self.accepted:
+            stepped = self.plant.call({"op": "step", "time": self.clock()})
+            if stepped.get("reason"):
+                self.latch(stepped["reason"])
         state = self.plant.call({"op": "feedback", "time": self.clock()})
         if not state.get("ok"):
             self.latch(state.get("reason") or "plant_error")
@@ -145,11 +154,6 @@ class SimBridge(Node):
             return
         self.publish_state(state)
         self.lowstate.publish(state)
-        if not self.accepted:
-            return
-        stepped = self.plant.call({"op": "step", "time": self.clock()})
-        if stepped.get("reason"):
-            self.latch(stepped["reason"])
 
     def publish_state(self, state):
         message = RobotFeedback()
@@ -161,6 +165,9 @@ class SimBridge(Node):
         message.start_button_pressed = False
         self.feedback_pub.publish(message)
         self.observation_pub.publish(message)
+        sim_message = String()
+        sim_message.data = json.dumps(state)
+        self.sim_state_pub.publish(sim_message)
 
     def latch(self, reason):
         if self.abort_reason is None:
@@ -182,10 +189,15 @@ class SimBridge(Node):
         report = self.plant.call(
             {"op": "report", "lowstate": bool(getattr(self.lowstate, "ok", False))}
         )
+        report.update(
+            execution="docker_ros", policy=os.environ.get("G1_SIM_EXAMPLE") or None
+        )
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         self.report_path.write_text(json.dumps(report, indent=2) + "\n")
         status = report.get("status")
-        self.exit_code = {"within_limits": 0, "completed": 0, "violation": 1}.get(status, 2)
+        self.exit_code = {"within_limits": 0, "completed": 0, "violation": 1}.get(
+            status, 2
+        )
         print(
             f"sim {status} reason={report.get('reason')} commands={report.get('commands')}",
             flush=True,
@@ -194,10 +206,15 @@ class SimBridge(Node):
 
 def require_isolated_netns():
     if os.environ.get("G1_SIM_NETNS") != "1":
-        print("Refusing to start the sim bridge outside the isolated netns.", file=sys.stderr)
+        print(
+            "Refusing to start the sim bridge outside the isolated netns.",
+            file=sys.stderr,
+        )
         return False
-    if os.path.exists("/sys/class/net/eth0"):
-        print("Refusing to start: eth0 is visible. This netns can reach the robot.", file=sys.stderr)
+    if {name for _, name in socket.if_nameindex()} != {"lo"}:
+        print(
+            "Refusing to start: the sim network must contain only lo.", file=sys.stderr
+        )
         return False
     return True
 
@@ -214,7 +231,9 @@ def main():
     ready = Path(os.environ.get("G1_SIM_READY", str(SIM_DIR / "output/ready")))
     from lowstate import SimLowState
 
-    lowstate = SimLowState(os.environ.get("ROBOT_DOMAIN", "0"), os.environ.get("ROBOT_INTERFACE", "lo"))
+    lowstate = SimLowState(
+        os.environ.get("ROBOT_DOMAIN", "0"), os.environ.get("ROBOT_INTERFACE", "lo")
+    )
     plant = PlantClient(python)
     armed = plant.call({"op": "arm"})
     if not armed.get("ok"):

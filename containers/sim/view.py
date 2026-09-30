@@ -102,7 +102,9 @@ function show(index) {
       0, 0, 0, 1
     );
   });
-  hud.textContent = paused ? `paused  frame ${frame + 1} / ${motion.frames}` : `frame ${frame + 1} / ${motion.frames}`;
+  const playback = paused ? "paused" : "playing";
+  hud.textContent = `${motion.summary}\n${playback}  ${motion.time[frame].toFixed(2)} s  frame ${frame + 1} / ${motion.frames}`;
+  hud.style.whiteSpace = "pre-line";
 }
 window.addEventListener("keydown", (event) => {
   if (event.code === "Space") { paused = !paused; event.preventDefault(); }
@@ -188,6 +190,9 @@ def export_replay(trace_path, dest):
     with np.load(trace_path, allow_pickle=False) as trace:
         qpos = trace["qpos"]
         times = trace["time"]
+        safety_checks = (
+            bool(trace["safety_checks"]) if "safety_checks" in trace else True
+        )
         if "model" in trace:
             model = mujoco.MjModel.from_binary_path(
                 "scene.mjb", {"scene.mjb": trace["model"].tobytes()}
@@ -236,7 +241,26 @@ def export_replay(trace_path, dest):
     if dest.exists():
         shutil.rmtree(dest)
     mesh_dir.mkdir(parents=True)
-    payload = {"frames": len(qpos), "time": times.tolist(), "focus": focus, "geoms": []}
+    summary = "Safety checks: " + ("ON" if safety_checks else "OFF")
+    report_path = trace_path.parent / "report.json"
+    if report_path.is_file():
+        report = json.loads(report_path.read_text())
+        summary = f"{report.get('policy') or 'Simulation'} | {summary} | {report.get('status', '')}"
+        if report.get("reason"):
+            summary += "\nStopped accepting commands: " + report["reason"]
+        motion = report.get("motion", {})
+        if "fell" in motion:
+            summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")
+        if "stairs" in motion:
+            stairs = motion["stairs"]
+            summary += f" | Stair treads: {stairs['distinct_treads']}/3 | Finish upright: {stairs['finished_upright']}"
+    payload = {
+        "frames": len(qpos),
+        "time": times.tolist(),
+        "focus": focus,
+        "summary": summary,
+        "geoms": [],
+    }
     written = set()
     for slot, (geom_id, kind, rgba) in enumerate(geoms):
         geom = {

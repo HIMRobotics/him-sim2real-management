@@ -36,6 +36,8 @@ Build and save it on an arm64 machine, or with `docker buildx` for `linux/arm64`
 
 ## Try it in MuJoCo
 
+Real stair-walker and GR00T balance examples are available with `./sim.sh --example stairs` and `./sim.sh --example balance`. Add `--local` to run without Docker/ROS/sudo, and `--view` to replay the result. See [Runnable simulation policies](examples/README.md) for safety-on/off commands and the current measured results.
+
 `./sim.sh` runs that same archive against a simulated G1. The container is attached to a loopback-only network, so it cannot see `eth0` or write robot motors. `g1-safety-stops` stays up. The sim publishes the same feedback topics and applies `/safety/precheck`. Safety checks are enabled by default. Use `--no-safety-checks` to disable simulation checks, or `--safety-checks` to enable them explicitly. The result is `containers/sim/output/report.json`, which records the selected mode.
 
 ```bash

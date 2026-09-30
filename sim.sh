@@ -11,6 +11,28 @@ ros_dir="$repo_dir/containers/sim/.ros"
 net_name=g1-sim-net
 user_name=g1-sim-user
 runtime="${CONTAINER_RUNTIME:-docker}"
+original_args=("$@")
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'HELP'
+Usage: ./sim.sh [--image NAME] [--scene PATH] [--seconds N]
+                [--safety-checks | --no-safety-checks]
+                [--pose NAME | --counterfactuals] [--self-test] [--view]
+                [--example stairs|walker|balance] [--local] [--output DIR]
+       ./sim.sh replay [TRACE]
+       ./sim.sh stop
+
+--scene PATH        Load a host-side MuJoCo XML scene and its relative assets.
+                    Default: the bundled G1 on a flat floor.
+--safety-checks     Enable safety checks (default).
+--no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
+                    Message format and finite-value validation still apply.
+--example NAME     Run a bundled ONNX controller in its matching environment.
+--local            Run an example directly in MuJoCo without Docker/ROS/sudo.
+--output DIR       Store this run separately for comparison and replay.
+HELP
+  exit 0
+fi
 
 if [[ "${1:-}" == "replay" ]]; then
   trace="${2:-$out_dir/trace.npz}"
@@ -21,11 +43,6 @@ if [[ "${1:-}" == "replay" ]]; then
   exec python3 -m http.server --bind 127.0.0.1 8765 --directory "$out_dir/view"
 fi
 
-if [[ "${EUID}" -ne 0 ]]; then
-  echo "Sim needs root to enter the isolated network. Re-running with sudo."
-  exec sudo --preserve-env=G1_SIM_SECONDS,G1_SIM_PYTHON,CONTAINER_RUNTIME,G1_IMAGE,DISPLAY,XAUTHORITY -- "$0" "$@"
-fi
-
 owner="${SUDO_USER:-$USER}"
 seconds="${G1_SIM_SECONDS:-10}"
 seconds_set=0
@@ -34,6 +51,11 @@ view=0
 counterfactuals=0
 pose="standing"
 image="${G1_IMAGE:-}"
+scene=""
+safety_checks=1
+example=""
+local_mode=0
+stopping=0
 # Keep this list in step with containers/sim/plant.py POSES.
 poses=(standing seated supine prone left_side right_side)
 
@@ -60,9 +82,8 @@ stop_sim() {
 }
 
 if [[ "${1:-}" == "stop" ]]; then
-  stop_sim
-  echo "Stopped the MuJoCo container sim."
-  exit 0
+  stopping=1
+  shift
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -73,9 +94,38 @@ while [[ $# -gt 0 ]]; do
     --pose) pose="${2:?--pose needs a name}"; shift 2 ;;
     --seconds) seconds="${2:?--seconds needs a duration}"; seconds_set=1; shift 2 ;;
     --image) image="${2:?--image needs a name}"; shift 2 ;;
+    --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
+    --safety-checks) safety_checks=1; shift ;;
+    --no-safety-checks) safety_checks=0; shift ;;
+    --example) example="${2:?--example needs stairs, walker, or balance}"; shift 2 ;;
+    --local) local_mode=1; shift ;;
+    --output) out_dir="${2:?--output needs a directory}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$example" && "$example" != stairs && "$example" != walker && "$example" != balance ]]; then
+  echo "--example must be stairs, walker, or balance" >&2
+  exit 2
+fi
+if [[ -n "$example" && ( -n "$image" || "$self_test" -eq 1 ) ]]; then
+  echo "Use --example by itself, without --image or --self-test." >&2
+  exit 2
+fi
+if [[ "$local_mode" -eq 1 && -z "$example" ]]; then
+  echo "--local requires --example stairs, walker, or balance." >&2
+  exit 2
+fi
+out_dir="$(realpath -m -- "$out_dir")"
+
+if [[ "$stopping" -eq 1 ]]; then
+  if [[ "${EUID}" -ne 0 ]]; then
+    exec sudo --preserve-env=CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
+  fi
+  stop_sim
+  echo "Stopped the MuJoCo container sim."
+  exit 0
+fi
 
 known_pose=0
 for name in "${poses[@]}"; do
@@ -102,6 +152,41 @@ fi
 if ! [[ "$seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk "BEGIN { exit !($seconds > 0) }"; then
   echo "--seconds must be positive" >&2
   exit 2
+fi
+
+if [[ -n "$scene" ]]; then
+  if [[ ! -f "$scene" || ! -r "$scene" ]]; then
+    echo "MuJoCo scene is not a readable file: $scene" >&2
+    exit 2
+  fi
+  scene="$(realpath -- "$scene")"
+fi
+
+if [[ "$local_mode" -eq 1 ]]; then
+  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
+  local_args=(--example "$example" --seconds "$seconds")
+  [[ "$safety_checks" -eq 0 ]] && local_args+=(--no-safety-checks)
+  [[ -n "$scene" ]] && local_args+=(--scene "$scene")
+  if [[ "$counterfactuals" -eq 1 ]]; then
+    for pose in "${poses[@]}"; do
+      "$python" "$repo_dir/containers/sim/local.py" "${local_args[@]}" --pose "$pose" --output "$out_dir/poses/$pose" || true
+    done
+    exec "$python" "$repo_dir/containers/sim/summary.py" "$out_dir/poses" "$safety_checks" "$scene" "${poses[@]}"
+  fi
+  status=0
+  "$python" "$repo_dir/containers/sim/local.py" "${local_args[@]}" --pose "$pose" --output "$out_dir" || status=$?
+  echo "Replay: ./sim.sh replay $out_dir/trace.npz"
+  if [[ "$view" -eq 1 && -f "$out_dir/trace.npz" ]]; then
+    "$python" "$repo_dir/containers/sim/view.py" "$out_dir/trace.npz" "$out_dir/view"
+    echo "Open http://127.0.0.1:8765"
+    "$python" -m http.server --bind 127.0.0.1 8765 --directory "$out_dir/view"
+  fi
+  exit "$status"
+fi
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Sim needs root to enter the isolated network. Re-running with sudo."
+  exec sudo --preserve-env=G1_SIM_SECONDS,G1_SIM_PYTHON,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
 fi
 
 as_owner() {
@@ -139,7 +224,8 @@ load_image() {
   fi
 }
 
-if "$runtime" ps --format '{{.Names}}' | grep -qx g1-user-container; then
+running="$("$runtime" ps --format '{{.Names}}')"
+if grep -qx g1-user-container <<<"$running"; then
   echo "The robot container is running. ./setup.sh stop it before starting the sim." >&2
   exit 1
 fi
@@ -149,20 +235,30 @@ if [[ ! -f "$ros_dir/install/setup.bash" ]]; then
   as_owner bash -c "source /opt/ros/foxy/setup.bash && cd '$repo_dir' && colcon build --packages-select him_safety_interfaces --base-paths ros2 --build-base '$ros_dir/build' --install-base '$ros_dir/install'"
 fi
 
-if [[ "$self_test" -eq 0 ]]; then
+if [[ -n "$example" ]]; then
+  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
+  prepared="$(as_owner env "HIM_BALANCE_ONNX=${HIM_BALANCE_ONNX:-$repo_dir/.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx}" "$python" "$repo_dir/containers/examples/prepare.py" "$example")"
+  [[ -n "$scene" ]] || scene="$prepared/environment/scene.xml"
+  image="g1-sim-example-$example:local"
+  "$runtime" build -t "$image" "$prepared/container"
+elif [[ "$self_test" -eq 0 ]]; then
   load_image
 fi
 
 base_out="$out_dir"
+trap stop_sim EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 run_session() {
   stop_sim
   mkdir -p "$out_dir"
-  rm -f "$out_dir/ready" "$out_dir/report.json"
+  rm -f "$out_dir/ready" "$out_dir/report.json" "$out_dir/trace.npz"
   chown "$owner" "$out_dir" 2>/dev/null || true
 
   echo "Starting $pose (isolated network, loopback only, no eth0)."
-  "$runtime" run -d --name "$net_name" --network none ros:foxy-ros-base sleep infinity >/dev/null
-  net_pid="$("$runtime" inspect -f '{{.State.Pid}}' "$net_name")"
+  echo "Scene: ${scene:-bundled G1 on a flat floor}. Safety checks: $safety_checks."
+  "$runtime" run -d --name "$net_name" --network none ros:foxy-ros-base sleep infinity >/dev/null || return 2
+  net_pid="$("$runtime" inspect -f '{{.State.Pid}}' "$net_name")" || return 2
   if nsenter -t "$net_pid" -n -- ip link show eth0 >/dev/null 2>&1; then
     echo "Isolated network still has eth0. Not starting the sim." >&2
     stop_sim
@@ -172,6 +268,9 @@ run_session() {
   sim_env=(
     "G1_SIM_NETNS=1"
     "G1_SIM_POSE=$pose"
+    "G1_SIM_SCENE=$scene"
+    "G1_SIM_SAFETY_CHECKS=$safety_checks"
+    "G1_SIM_EXAMPLE=$example"
     "G1_SIM_SECONDS=$seconds"
     "G1_SIM_REPORT=$out_dir/report.json"
     "G1_SIM_READY=$out_dir/ready"
@@ -214,12 +313,14 @@ run_session() {
     "$runtime" run -d --name "$user_name" --network "container:$net_name" \
       -v "$repo_dir/containers/sim/fastdds.xml:/fastdds.xml:ro" \
       -e ROBOT_INTERFACE=lo \
+      -e G1_SIM_NETNS=1 \
+      -e "G1_SIM_EXAMPLE=$example" \
       -e ROBOT_DOMAIN=0 \
       -e ROS_DOMAIN_ID=97 \
       -e ROS_LOCALHOST_ONLY=1 \
       -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
       -e FASTRTPS_DEFAULT_PROFILES_FILE=/fastdds.xml \
-      "$image" >/dev/null
+      "$image" >/dev/null || { stop_sim; return 2; }
   fi
 
   set +e
@@ -229,6 +330,7 @@ run_session() {
   if [[ -f "$out_dir/hold.pid" ]]; then
     kill_tree "$(cat "$out_dir/hold.pid")"
   fi
+  "$runtime" logs "$user_name" >"$out_dir/policy.log" 2>&1 || true
   "$runtime" rm -f "$user_name" "$net_name" >/dev/null 2>&1 || true
   rm -f "$out_dir/bridge.pid" "$out_dir/hold.pid"
 
@@ -236,11 +338,7 @@ run_session() {
     echo "Report: $out_dir/report.json"
     cat "$out_dir/report.json"
     if [[ -f "$out_dir/trace.npz" ]]; then
-      if [[ "$out_dir" == "$base_out" ]]; then
-        echo "Replay: ./sim.sh replay"
-      else
-        echo "Replay: ./sim.sh replay $out_dir/trace.npz"
-      fi
+      echo "Replay: ./sim.sh replay $out_dir/trace.npz"
     fi
   else
     echo "Sim bridge produced no report." >&2
@@ -253,6 +351,8 @@ run_session() {
 if [[ "$counterfactuals" -eq 0 ]]; then
   status=0
   run_session || status=$?
+  stop_sim
+  trap - EXIT INT TERM
   if [[ "$view" -eq 1 && -f "$out_dir/trace.npz" ]]; then
     python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
     as_owner "$python" "$repo_dir/containers/sim/view.py" "$out_dir/trace.npz" "$out_dir/view"
@@ -272,44 +372,7 @@ done
 out_dir="$base_out"
 python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
 set +e
-as_owner "$python" - "$base_out/poses" "$base_out/poses/summary.json" "${poses[@]}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-summary_path = Path(sys.argv[2])
-rows = []
-for name in sys.argv[3:]:
-    path = root / name / "report.json"
-    if path.is_file():
-        report = json.loads(path.read_text())
-        rows.append(
-            {
-                "pose": name,
-                "status": report.get("status"),
-                "reason": report.get("reason"),
-                "fall_check": report.get("fall_check"),
-                "commands": report.get("commands"),
-                "report": str(path),
-            }
-        )
-    else:
-        rows.append({"pose": name, "status": "error", "reason": "no_report", "report": None})
-codes = {"within_limits": 0, "violation": 1}
-worst = 0
-for row in rows:
-    worst = max(worst, codes.get(row["status"], 2))
-summary = {
-    "version": 1,
-    "status": {0: "within_limits", 1: "violation", 2: "error"}[worst],
-    "poses": rows,
-    "hardware_authorization": False,
-}
-summary_path.write_text(json.dumps(summary, indent=2) + "\n")
-print(json.dumps(summary, indent=2))
-sys.exit(worst)
-PY
+as_owner "$python" "$repo_dir/containers/sim/summary.py" "$base_out/poses" "$safety_checks" "$scene" "${poses[@]}"
 status=$?
 set -e
 echo "Summary: $base_out/poses/summary.json"

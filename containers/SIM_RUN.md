@@ -63,6 +63,8 @@ Unchecked runs report `completed`, never `within_limits`. Reports and counterfac
 
 From the repo root:
 
+To run a real policy immediately, use `./sim.sh --example stairs --local --seconds 20 --no-safety-checks --view`, or choose `--example balance`. Omit `--no-safety-checks` to compare against the enabled safety checks. Omit `--local` for the full Docker/ROS path. Complete commands, model requirements, and measured results are in [Runnable simulation policies](examples/README.md).
+
 ```bash
 ./sim.sh --self-test
 ./sim.sh --seconds 10
@@ -84,6 +86,9 @@ Other flags:
 | --- | --- |
 | `--seconds 10` | Length of the run after the first accepted command. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
+| `--example stairs\|walker\|balance` | Prepare a real ONNX policy, its matching scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
+| `--local` | Run an `--example` directly against MuJoCo without Docker, ROS, or sudo. |
+| `--output DIR` | Save a run separately so safety-on/off results can both be replayed. |
 | `--scene path/to/scene.xml` | Load a complete MuJoCo G1 scene from the host filesystem. Relative paths use the caller's working directory. |
 | `--safety-checks` | Enable simulation safety checks, the default. |
 | `--no-safety-checks` | Run without simulation safety limits, freshness/timeouts, or fall checks. |
@@ -95,6 +100,8 @@ Other flags:
 
 `./sim.sh` asks for `sudo` so it can enter the isolated network. `replay` does not.
 
+`--local` also runs without sudo. Local examples use simulated timestamps. Docker/ROS runs enforce wall-clock freshness and action deadlines. The default durations are unchanged. The scene and safety settings apply to both backends and all counterfactual poses.
+
 The run writes:
 
 | File | What it is |
@@ -102,6 +109,9 @@ The run writes:
 | `containers/sim/output/report.json` | Status, reason, command count, and simulated time. |
 | `containers/sim/output/trace.npz` | Poses, timestamps, and a compiled model snapshot for replay. |
 | `containers/sim/output/bridge.log` | ROS bridge log, if the run fails early. |
+| `containers/sim/output/policy.log` | Submitted container stdout/stderr, captured before removal. |
+
+When `--output` is supplied, these files go in that directory. Docker runs can be stopped with `./sim.sh stop --output DIR`. Reports include `execution`, the selected example `policy` when applicable, and independent `motion` measurements. The simulation-only `/sim/state` topic supplies base pose and velocity to example controllers. Its schema is in [the examples guide](examples/README.md#simulation-only-policy-observations).
 
 `status` in the report:
 

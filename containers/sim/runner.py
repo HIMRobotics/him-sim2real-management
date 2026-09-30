@@ -11,6 +11,7 @@ from joint_checks import (
     SPEED_HOLD_S,
     JointViolation,
 )
+from metrics import MotionMetrics
 from plant import CONTROL_DT, PHYSICS_DT, POSES, Plant
 from policy_safety.adapter import PolicyViolation
 from policy_safety.joint_rules import JointRules
@@ -65,6 +66,7 @@ class Runner:
         self.base_over = 0
         self.trace_qpos = []
         self.trace_time = []
+        self.metrics = MotionMetrics(self.plant)
         self._remember()
 
     def arm(self):
@@ -120,6 +122,7 @@ class Runner:
         for _ in range(self.plant.substeps):
             dq = self.plant.step_physics()
             self.sim_time += PHYSICS_DT
+            self.metrics.observe()
             if (
                 not np.isfinite(self.plant.data.qpos).all()
                 or not np.isfinite(self.plant.data.qvel).all()
@@ -188,6 +191,7 @@ class Runner:
             "safety_checks": self.safety_checks,
             "fall_check": self.plant.check_fall,
             "trace": trace,
+            "motion": self.metrics.report(),
         }
 
     def _remember(self):

@@ -12,6 +12,8 @@
 
 This folder does not launch the robot. `policy-safety prepare-g1` reads `policy.yaml`, attaches this repo's MuJoCo G1, and writes `robot.json` for screening. Contract notes are in [ONNX_BUNDLE.md](../ONNX_BUNDLE.md).
 
+To run this network in the current simulator, use `./sim.sh --example stairs --local --seconds 20 --no-safety-checks --view` for the restored stair controller and course, or `--example walker` for flat walking. Omit `--local` for Docker/ROS and omit `--no-safety-checks` to enable the normal checks. The [simulation example guide](../containers/examples/README.md) also covers GR00T balance and separate recordings for both safety settings.
+
 ```bash
 policy-safety prepare-g1 \
   --submission examples \

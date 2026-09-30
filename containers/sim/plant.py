@@ -236,4 +236,11 @@ class Plant:
             "rpy": quat_to_rpy(quat),
             "height": float(self.data.xpos[self.base, 2]),
             "upright": float(self.data.xmat[self.base].reshape(3, 3)[2, 2]),
+            "position": self.data.xpos[self.base].tolist(),
+            "base_velocity": self.data.qvel[
+                self.base_vadr : self.base_vadr + 6
+            ].tolist(),
+            "ctrl_low": self.model.actuator_ctrlrange[self.actuators, 0].tolist(),
+            "ctrl_high": self.model.actuator_ctrlrange[self.actuators, 1].tolist(),
+            "sim_time": float(self.data.time),
         }
