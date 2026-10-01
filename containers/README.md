@@ -11,7 +11,7 @@ The image may contain several models, and the code inside may be laid out howeve
 | Packaging | One `linux/arm64` image, dependencies already installed, one `ENTRYPOINT`. Delivered as `containers/upload/submission.tar`. | Loads that archive and starts the entrypoint. Does not look for ONNX files, a Python layout, or a second container. |
 | Inputs | Read robot state from the topics below. Do not assume a camera, lidar, or odometry feed. | `/safety/robot_feedback` (29 joint `q` and `dq`) and `rt/lowstate` (IMU and the same 29 motors). No camera images. |
 | Outputs | Publish a 29-slot `JointCommand` on `/safety/precheck` every control step. Stop when `/safety/abort` arrives. | The host checks that message and is the only writer of motor commands. |
-| Limits | Stay inside the joint profile. A command uses a fresh `observation_id` (0.2 s) and the next one arrives before the action timeout (0.2 s). | Rejects a bad frame and latches the abort. In sim, the first command must arrive within 10 s, then the run lasts `--seconds` (default 10). On the robot the process runs until the operator stops it or the abort latches. No memory or CPU quota is applied. |
+| Limits | Stay inside the joint profile. A command uses a fresh `observation_id` (0.2 s) and the next one arrives before the action timeout (0.2 s). | Rejects a bad frame and latches the abort. In sim, the first command must arrive within 30 s, then the run lasts `--seconds` (default 10). A rejected command keeps the last accepted hold. On the robot the process runs until the operator stops it or the abort latches. No memory or CPU quota is applied. |
 | Access | Talk to sensors and motors only through those interfaces. | Reads state and takes `/safety/precheck`. Does not grant `rt/lowcmd`, `rt/arm_sdk`, or control of `g1-safety-stops`. |
 
 Details, joint order, and the save command are in [INSTRUCTIONS.md](INSTRUCTIONS.md).
@@ -36,9 +36,9 @@ Build and save it on an arm64 machine, or with `docker buildx` for `linux/arm64`
 
 ## Try it in MuJoCo
 
-Real stair-walker and GR00T balance examples are available with `./sim.sh --example stairs` and `./sim.sh --example balance`. Add `--local` to run without Docker/ROS/sudo, and `--view` to replay the result. See [Runnable simulation policies](examples/README.md) for safety-on/off commands and the current measured results.
+Real stair-walker and GR00T balance examples are available with `./sim.sh --example stairs` and `./sim.sh --example balance`. Add `--local` to run without Docker/ROS/sudo, and `--view` to open the page before the run. `./sim.sh --circle` walks one flat circle with the cached walker and needs no archive. See [Runnable simulation policies](examples/README.md) for safety-on/off commands and the current measured results.
 
-`./sim.sh` runs that same archive against a simulated G1. The container is attached to a loopback-only network, so it cannot see `eth0` or write robot motors. `g1-safety-stops` stays up. The sim publishes the same feedback topics and applies `/safety/precheck`. Safety checks are enabled by default. Use `--no-safety-checks` to disable simulation checks, or `--safety-checks` to enable them explicitly. The result is `containers/sim/output/report.json`, which records the selected mode.
+`./sim.sh` runs on the robot's Linux host. Mac and Windows will use `desktop_sim.sh` once `containers/sim/Dockerfile` and `compose.yaml` are added. `./sim.sh` runs that same archive against a simulated G1. The container is attached to a loopback-only network, so it cannot see `eth0` or write robot motors. `g1-safety-stops` stays up. The sim publishes the same feedback topics and applies `/safety/precheck`. Safety checks are enabled by default. Use `--no-safety-checks` to disable simulation checks, or `--safety-checks` to enable them explicitly. The result is `containers/sim/output/report.json`, which records the selected mode.
 
 ```bash
 ./sim.sh --self-test

@@ -123,6 +123,7 @@ class Plant:
         self.pose = "standing"
         self.fall_enabled = bool(check_fall)
         self.check_fall = self.fall_enabled
+        self._push = None
         self.reset(pose)
 
     def reset(self, pose="standing"):
@@ -211,8 +212,32 @@ class Plant:
             np.asarray(frame["tau"], dtype=float),
         )
 
+    def set_push(self, push):
+        """Arm a body force. None clears it. Applied at the start of each physics tick."""
+        self._push = push
+
+    def apply_push(self, push, elapsed):
+        """Match the offline checker: one world-frame force, optionally off the body origin."""
+        self.data.xfrc_applied[:] = 0
+        if not push or not (
+            push["start"] <= elapsed < push["start"] + push["duration"] - 1e-12
+        ):
+            return
+        body_id = self.model.body(push["body"]).id
+        force = np.asarray(push["force"], dtype=float)
+        self.data.xfrc_applied[body_id, :3] = force
+        if push.get("point") is not None:
+            rotation = self.data.xmat[body_id].reshape(3, 3)
+            point = self.data.xpos[body_id] + rotation @ np.asarray(
+                push["point"], dtype=float
+            )
+            self.data.xfrc_applied[body_id, 3:] = np.cross(
+                point - self.data.xipos[body_id], force
+            )
+
     def step_physics(self):
         """Advance one physics tick. Returns measured joint velocity."""
+        self.apply_push(self._push, float(self.data.time))
         mujoco.mj_step(self.model, self.data)
         return self.dq()
 

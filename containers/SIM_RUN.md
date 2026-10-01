@@ -26,7 +26,7 @@ Two processes share that network:
 
 The bridge and the plant talk over stdin. The plant is the only thing that advances physics.
 
-The bridge publishes `RobotFeedback` on a 0.02 s timer and receives asynchronous `JointCommand` messages for all 29 joints. After the first accepted command, each timer callback advances MuJoCo by ten 0.002 s steps using the latest accepted command. The run duration is wall-clock time from that first acceptance. If none arrives within 10 seconds, the report is `no_command`, unless a rejected command has already latched a failure.
+The bridge publishes `RobotFeedback` on a 0.02 s timer and receives asynchronous `JointCommand` messages for all 29 joints. After the first accepted command, each timer callback advances MuJoCo by ten 0.002 s steps using the latest accepted command. The run duration is wall-clock time from that first acceptance. If none arrives within 30 seconds, the report is `no_command`, unless a rejected command has already latched a failure.
 
 What the container gets:
 
@@ -44,7 +44,7 @@ What the container sends:
 | `/safety/precheck` | One 29-slot `JointCommand` per step. |
 | `/safety/abort` | Subscribe and stop. The sim publishes this when a check fails. |
 
-A failed check is not applied. Later commands stay rejected. The host safety service is left running.
+A failed command is not applied. Later commands stay rejected. A rejected joint command keeps the last accepted hold. A fall, overspeed, or action timeout drops that hold and damps. The host safety service is left running.
 
 With safety checks enabled, `containers/sim/runner.py` checks:
 
@@ -67,6 +67,7 @@ To run a real policy immediately, use `./sim.sh --example stairs --local --secon
 
 ```bash
 ./sim.sh --self-test
+./sim.sh --battery
 ./sim.sh --seconds 10
 ./sim.sh --counterfactuals
 ./sim.sh --scene containers/upload/environment/scene.xml
@@ -94,11 +95,17 @@ Other flags:
 | `--no-safety-checks` | Run without simulation safety limits, freshness/timeouts, or fall checks. |
 | `--pose name` | Start pose. Default `standing`. Also `seated`, `supine`, `prone`, `left_side`, `right_side`. |
 | `--counterfactuals` | Run all six poses, each in a fresh container. Default length is 5 s. |
-| `--view` | When a single run finishes, serve the replay page. |
+| `--battery` | Flat floor, all six poses, then a 10 N, 50 N, and 150 N pelvis push on each. Writes `containers/sim/output/battery/report.json`. |
+| `--push none\|small\|medium\|heavy` | Run that one battery case. Add `--pose` to pick the start. Add `--view`, press Start, and watch it. |
+| `--battery --circle` | Same pushes while the cached walker circles. Standing only. A gait step is applied directly, and the fall check stays on. |
+| `--circle` | Walk one flat circle with the cached G1 walker. No submission. The fall check stays on. The submission tracking window is not applied, because a gait step does not fit it. |
+| `--view` | Open the page first. Press Start to run, then the recording plays from the first frame. |
 | `replay` | Serve the last recording. Does not start a new run. |
 | `--help` | Show usage without starting Docker or requesting sudo. |
 
 `./sim.sh` asks for `sudo` so it can enter the isolated network. `replay` does not.
+
+`./sim.sh` needs Linux network namespaces, so it does not run on macOS or Windows. The desktop entry will be `desktop_sim.sh` at the repo root, with the same flags, using only Docker Compose. The plant, bridge, and viewer stay in `containers/sim/`. That directory will also hold `Dockerfile` and `compose.yaml`: a loopback-only `net` service, a `sim` service on that network publishing `127.0.0.1:8765`, and an optional `linux/arm64` `submission` service. Reports stay in `containers/sim/output/`. Those files are not in the repo yet.
 
 `--local` also runs without sudo. Local examples use simulated timestamps. Docker/ROS runs enforce wall-clock freshness and action deadlines. The default durations are unchanged. The scene and safety settings apply to both backends and all counterfactual poses.
 
@@ -191,6 +198,6 @@ Replay draws mesh geometry, planes, boxes, spheres, ellipsoids, cylinders, capsu
 | Space | Pause |
 | Left / right arrow | One frame back or forward while paused |
 
-Ctrl+C stops the page. `./sim.sh --view` serves that page when the run finishes, instead of requiring a second command.
+Ctrl+C stops the page. `./sim.sh --view` opens the page before the run. Press Start, and playback begins at the first frame while the run is going. The camera stays where you leave it. A blue line on the floor is the pelvis path. `./sim.sh --seconds 10 --view --circle` is that page with the cached walker and no submission archive.
 
 `./sim.sh replay path/to/trace.npz` plays a different recording. The page is rebuilt into `containers/sim/output/view/`.

@@ -19,7 +19,7 @@ uv pip install --python .venv-policy-safety/bin/python ./packages/policy_safety
 source .venv-policy-safety/bin/activate
 python --version
 policy-safety prepare-g1 \
-  --submission examples \
+  --submission /path/to/g1-walker-bundle \
   --output /tmp/g1-screening-bundle
 policy-safety evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \
@@ -92,10 +92,10 @@ velocities, previous network action, and commanded forward/lateral/yaw velocity.
 The sample ONNX graph already contains normalization. Outputs become joint
 position targets using explicit per-joint defaults and scales, with the sample's
 position actuator gains and 20 ms control / 2 ms physics timing. The same
-contract is the YAML in
-[`examples/policy.yaml`](../../examples/policy.yaml), described in
+contract is the YAML described in
 [ONNX_BUNDLE.md](../../ONNX_BUNDLE.md). `prepare-g1` reads that YAML and writes
-`robot.json` for the checker.
+`robot.json` for the checker. The runnable container example is the balance
+submission in [examples/](../../examples/).
 
 This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not

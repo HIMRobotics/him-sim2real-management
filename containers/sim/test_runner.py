@@ -1,6 +1,7 @@
 """Safety checks for container commands against the MuJoCo G1."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -135,6 +136,58 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(runner.plant.state()["height"], 0.5)
         self.assertFalse(report["hardware_authorization"])
 
+    def test_circle_walks_without_falling(self):
+        model = ROOT / "examples/walker.onnx"
+        if not model.is_file():
+            self.skipTest("cached walker weights are not on this machine")
+        runner = Runner()
+        start = None
+        for step in range(150):
+            result = runner.circle(step * 0.02)
+            self.assertIsNone(result.get("reason"))
+            position = runner.plant.state()["position"]
+            if start is None:
+                start = position
+        end = runner.plant.state()
+        moved = sum((end["position"][i] - start[i]) ** 2 for i in range(2)) ** 0.5
+        self.assertGreater(end["height"], 0.5)
+        self.assertGreater(end["upright"], 0.8)
+        self.assertGreater(moved, 0.3)
+
+    def test_balance_step_stays_inside_submission_limits(self):
+        import sys
+
+        sys.path.insert(0, str(ROOT / "examples"))
+        from policy import COMMAND_STEP, POSITION_LIMIT, TRACKING_LIMIT, limit_targets
+
+        measured = np.zeros(29)
+        desired = np.full(29, 3.0)
+        previous = None
+        for _ in range(40):
+            target = limit_targets(previous, measured, desired)
+            self.assertTrue(np.all(np.abs(target - measured) <= TRACKING_LIMIT * 0.9 + 1e-9))
+            self.assertTrue(np.all(target >= POSITION_LIMIT[:, 0] - 1e-9))
+            self.assertTrue(np.all(target <= POSITION_LIMIT[:, 1] + 1e-9))
+            if previous is not None:
+                self.assertLessEqual(float(np.max(np.abs(target - previous))), COMMAND_STEP + 1e-9)
+            previous = target
+            measured = target.copy()
+        self.assertGreater(float(target[3]), 1.0)
+
+    def test_rejected_command_keeps_the_hold(self):
+        runner = Runner()
+        state = runner.feedback(0.0)
+        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+        held = runner.active["q"].copy()
+        q = list(state["q"])
+        q[0] = q[0] + 0.2
+        reason = runner.command(hold(runner, state, 1, q=q), 0.02)
+        self.assertEqual(reason, "joint_tracking_error_limit")
+        np.testing.assert_allclose(runner.active["q"], held)
+        for step in range(25):
+            runner.step(0.03 + step * 0.02)
+        self.assertGreater(runner.plant.state()["height"], 0.5)
+
     def test_feedforward_torque_rejected(self):
         runner = Runner()
         state = runner.feedback(0.0)
@@ -198,6 +251,25 @@ class RunnerTest(unittest.TestCase):
         runner.step(0.01)
         self.assertEqual(len(runner.trace_qpos), 2)
         self.assertEqual(runner.trace_qpos[-1].shape, (runner.plant.model.nq,))
+
+    def test_live_file_follows_each_step(self):
+        import json
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "live.jsonl"
+            os.environ["G1_SIM_LIVE"] = str(path)
+            try:
+                runner = Runner()
+                runner.step(0.01)
+            finally:
+                os.environ.pop("G1_SIM_LIVE", None)
+            lines = path.read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+        frame = json.loads(lines[-1])
+        self.assertEqual(len(frame["qpos"]), runner.plant.model.nq)
+        self.assertGreater(frame["t"], 0)
 
     def test_replay_page_includes_the_g1(self):
         import os
@@ -269,6 +341,63 @@ class RunnerTest(unittest.TestCase):
             self.assertFalse(report["fall_check"])
             self.assertNotEqual(report["reason"], "fall")
 
+    def test_push_is_applied_only_inside_its_window(self):
+        plant = Plant("standing")
+        plant.set_push(
+            {"body": "pelvis", "force": [10.0, 0.0, 0.0], "start": 0.02, "duration": 0.02}
+        )
+        plant.step_physics()
+        self.assertEqual(float(plant.data.xfrc_applied[plant.base, 0]), 0.0)
+        plant.data.time = 0.02
+        plant.step_physics()
+        self.assertEqual(float(plant.data.xfrc_applied[plant.base, 0]), 10.0)
+        plant.data.time = 0.04
+        plant.step_physics()
+        self.assertEqual(float(plant.data.xfrc_applied[plant.base, 0]), 0.0)
+
+    def test_named_push_writes_one_report_case(self):
+        from battery import run_battery
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                run_battery(tmp, poses=["standing"], push="sideways")
+            summary = run_battery(tmp, 0.2, poses=["seated"], push="none")
+            self.assertTrue((Path(tmp) / "report.json").is_file())
+        self.assertEqual(len(summary["cases"]), 1)
+        self.assertEqual(summary["cases"][0]["pose"], "seated")
+        self.assertEqual(summary["cases"][0]["push"], "none")
+        self.assertEqual(summary["status"], summary["cases"][0]["status"])
+
+    def test_example_command_files(self):
+        from circle import load_command
+
+        stand = load_command(ROOT / "examples/stand.yaml")
+        circle = load_command(ROOT / "examples/circle.yaml")
+        self.assertTrue(np.allclose(stand, [0.0, 0.0, 0.0]))
+        self.assertTrue(np.allclose(circle, [0.45, 0.0, 0.9]))
+
+    def test_circle_battery_uses_the_walker_gait(self):
+        model = ROOT / "examples/walker.onnx"
+        if not model.is_file():
+            self.skipTest("cached walker weights are not on this machine")
+        from battery import run_case
+
+        report = run_case("standing", None, 0.2, circle=True)
+        self.assertGreaterEqual(report["commands"], 5)
+        self.assertGreater(report["motion"]["final_position"][2], 0.5)
+
+    def test_flat_ground_pose_push_uses_the_plant(self):
+        from battery import run_case
+
+        report = run_case(
+            "standing",
+            {"body": "pelvis", "force": [10.0, 0.0, 0.0], "start": 0.02, "duration": 0.02},
+            0.2,
+        )
+        self.assertEqual(report["pose"], "standing")
+        self.assertGreaterEqual(report["commands"], 1)
+        self.assertIn(report["status"], ("within_limits", "violation"))
+
     def test_standing_fall_still_latches(self):
         runner = Runner("standing")
         state = runner.feedback(0.0)
@@ -277,6 +406,26 @@ class RunnerTest(unittest.TestCase):
         mujoco.mj_forward(runner.plant.model, runner.plant.data)
         runner.step(0.01)
         self.assertEqual(runner.reason, "fall")
+
+    def test_torn_live_line_resyncs_instead_of_raising(self):
+        from live import LiveSession
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            live = directory / "live.jsonl"
+            session = LiveSession(
+                directory, live, directory / "start", directory / "report.json",
+                "standing", None,
+            )
+            zeros = ",".join(["0"] * session.model.nq)
+            live.write_text('{"t": 0.0, "qpos": [' + zeros + "]}\n, \"qpos\"\n")
+            body = session.snapshot(0)
+            self.assertTrue(body["reset"])
+            self.assertEqual(body["frames"], [])
+            live.write_text('{"t": 0.02, "qpos": [' + zeros + "]}\n")
+            body = session.snapshot(0)
+            self.assertEqual(len(body["frames"]), 1)
+            self.assertAlmostEqual(body["frames"][0]["time"], 0.02)
 
 
 if __name__ == "__main__":

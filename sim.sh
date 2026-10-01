@@ -17,7 +17,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'HELP'
 Usage: ./sim.sh [--image NAME] [--scene PATH] [--seconds N]
                 [--safety-checks | --no-safety-checks]
-                [--pose NAME | --counterfactuals] [--self-test] [--view]
+                [--pose NAME | --counterfactuals] [--self-test] [--circle]
+                [--command FILE] [--view]
+                [--battery] [--push none|small|medium|heavy]
                 [--example stairs|walker|balance] [--local] [--output DIR]
        ./sim.sh replay [TRACE]
        ./sim.sh stop
@@ -30,6 +32,17 @@ Usage: ./sim.sh [--image NAME] [--scene PATH] [--seconds N]
 --example NAME     Run a bundled ONNX controller in its matching environment.
 --local            Run an example directly in MuJoCo without Docker/ROS/sudo.
 --output DIR       Store this run separately for comparison and replay.
+--circle           Walk with the cached G1 walker. Command file defaults to
+                   examples/circle.yaml. No submission.
+--command FILE     Walker command file. examples/stand.yaml stays put.
+                   examples/circle.yaml is the loop. Same runner as --circle.
+--battery          Flat-ground battery: every pose, then 10/50/150 N pelvis
+                   pushes. Writes containers/sim/output/battery/report.json.
+                   With --circle, the cached walker gaits instead of a hold.
+--push NAME        One battery case: none, small, medium, or heavy.
+                   With --view, open the page and press Start to watch it.
+--view             Open http://127.0.0.1:8765 first. Press Start to run the
+                   policy and watch the render live. Ctrl+C closes the page.
 HELP
   exit 0
 fi
@@ -47,9 +60,14 @@ owner="${SUDO_USER:-$USER}"
 seconds="${G1_SIM_SECONDS:-10}"
 seconds_set=0
 self_test=0
+circle=0
+command_file=""
 view=0
+battery=0
+push=""
 counterfactuals=0
 pose="standing"
+pose_set=0
 image="${G1_IMAGE:-}"
 scene=""
 safety_checks=1
@@ -81,6 +99,52 @@ stop_sim() {
   "$runtime" rm -f "$user_name" "$net_name" >/dev/null 2>&1 || true
 }
 
+live_pid=""
+stop_view() {
+  if [[ -n "${live_pid:-}" ]]; then
+    kill_tree "$live_pid"
+    wait "$live_pid" 2>/dev/null || true
+    live_pid=""
+  fi
+}
+
+start_live_view() {
+  mkdir -p "$out_dir"
+  chown "$owner" "$out_dir" 2>/dev/null || true
+  rm -f "$out_dir/view/start" "$out_dir/live.jsonl"
+  local python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
+  local scene_args=()
+  [[ -n "$scene" ]] && scene_args=(--scene "$scene")
+  as_owner "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose" "${scene_args[@]}"
+  rm -f "$out_dir/live-view.log"
+  # Open the log as the user. A root shell would otherwise leave a file
+  # the battery viewer cannot replace.
+  as_owner env "LOG=$out_dir/live-view.log" bash -c \
+    'exec "$1" "${@:2}" >"$LOG" 2>&1' _ \
+    "$python" "$repo_dir/containers/sim/live.py" \
+    --directory "$out_dir/view" \
+    --live "$out_dir/live.jsonl" \
+    --start "$out_dir/view/start" \
+    --report "$out_dir/report.json" \
+    --pose "$pose" \
+    "${scene_args[@]}" &
+  live_pid=$!
+  echo "Open http://127.0.0.1:8765"
+  echo "Press Start to run the policy. The camera stays put so the path is visible."
+}
+
+wait_for_start() {
+  echo "Waiting for Start in the browser."
+  while [[ ! -f "$out_dir/view/start" ]]; do
+    if ! kill -0 "$live_pid" 2>/dev/null; then
+      echo "Viewer exited before Start." >&2
+      cat "$out_dir/live-view.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.2
+  done
+}
+
 if [[ "${1:-}" == "stop" ]]; then
   stopping=1
   shift
@@ -89,9 +153,13 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --self-test) self_test=1; shift ;;
+    --circle) circle=1; shift ;;
+    --command) command_file="${2:?--command needs a yaml file}"; circle=1; shift 2 ;;
+    --battery) battery=1; shift ;;
+    --push) push="${2:?--push needs none, small, medium, or heavy}"; shift 2 ;;
     --view) view=1; shift ;;
     --counterfactuals) counterfactuals=1; shift ;;
-    --pose) pose="${2:?--pose needs a name}"; shift 2 ;;
+    --pose) pose="${2:?--pose needs a name}"; pose_set=1; shift 2 ;;
     --seconds) seconds="${2:?--seconds needs a duration}"; seconds_set=1; shift 2 ;;
     --image) image="${2:?--image needs a name}"; shift 2 ;;
     --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
@@ -108,8 +176,28 @@ if [[ -n "$example" && "$example" != stairs && "$example" != walker && "$example
   echo "--example must be stairs, walker, or balance" >&2
   exit 2
 fi
-if [[ -n "$example" && ( -n "$image" || "$self_test" -eq 1 ) ]]; then
-  echo "Use --example by itself, without --image or --self-test." >&2
+if [[ -n "$example" && ( -n "$image" || "$self_test" -eq 1 || "$circle" -eq 1 ) ]]; then
+  echo "Use --example by itself, without --image, --self-test, or --circle." >&2
+  exit 2
+fi
+if [[ "$circle" -eq 1 && "$self_test" -eq 1 ]]; then
+  echo "Use --circle by itself, without --self-test." >&2
+  exit 2
+fi
+if [[ -n "$push" && "$battery" -eq 0 ]]; then
+  echo "--push is a battery case. Add --battery." >&2
+  exit 2
+fi
+if [[ "$battery" -eq 1 && "$view" -eq 1 && -z "$push" ]]; then
+  echo "Pass --push none, small, medium, or heavy to watch one battery case." >&2
+  exit 2
+fi
+if [[ "$battery" -eq 1 && ( "$self_test" -eq 1 || "$counterfactuals" -eq 1 || -n "$example" || -n "$image" ) ]]; then
+  echo "--battery runs on the flat-ground plant. Drop --self-test, --counterfactuals, --example, and --image." >&2
+  exit 2
+fi
+if [[ "$battery" -eq 1 && "$circle" -eq 1 && "$pose" != "standing" ]]; then
+  echo "The circle battery starts from the walker stance. Drop --pose." >&2
   exit 2
 fi
 if [[ "$local_mode" -eq 1 && -z "$example" ]]; then
@@ -149,6 +237,17 @@ fi
 if [[ "$self_test" -eq 1 && "$seconds_set" -eq 0 ]]; then
   seconds=1
 fi
+if [[ "$circle" -eq 1 && -z "$command_file" ]]; then
+  command_file="$repo_dir/examples/circle.yaml"
+fi
+if [[ -n "$command_file" && ! -f "$command_file" ]]; then
+  echo "Walker command file is not readable: $command_file" >&2
+  exit 2
+fi
+if [[ "$battery" -eq 1 && "$seconds_set" -eq 0 ]]; then
+  seconds=2
+  [[ "$circle" -eq 1 ]] && seconds=10
+fi
 if ! [[ "$seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk "BEGIN { exit !($seconds > 0) }"; then
   echo "--seconds must be positive" >&2
   exit 2
@@ -160,6 +259,42 @@ if [[ -n "$scene" ]]; then
     exit 2
   fi
   scene="$(realpath -- "$scene")"
+fi
+
+if [[ "$battery" -eq 1 ]]; then
+  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
+  battery_args=(--output "$out_dir/battery" --seconds "$seconds")
+  [[ "$safety_checks" -eq 0 ]] && battery_args+=(--no-safety-checks)
+  if [[ -n "$push" || "$pose_set" -eq 1 ]]; then
+    battery_args+=(--pose "$pose")
+  fi
+  [[ -n "$push" ]] && battery_args+=(--push "$push")
+  [[ "$circle" -eq 1 ]] && battery_args+=(--circle)
+  if [[ "$view" -eq 1 ]]; then
+    mkdir -p "$out_dir/battery"
+    rm -f "$out_dir/view/start" "$out_dir/live.jsonl" "$out_dir/battery/report.json" "$out_dir/live-view.log"
+    "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose"
+    "$python" "$repo_dir/containers/sim/live.py" \
+      --directory "$out_dir/view" \
+      --live "$out_dir/live.jsonl" \
+      --start "$out_dir/view/start" \
+      --report "$out_dir/battery/report.json" \
+      --pose "$pose" \
+      >"$out_dir/live-view.log" 2>&1 &
+    live_pid=$!
+    trap 'kill_tree "$live_pid"' EXIT INT TERM
+    echo "Open http://127.0.0.1:8765"
+    echo "Press Start to run ${pose} / ${push}."
+    wait_for_start
+    G1_SIM_LIVE="$out_dir/live.jsonl" G1_SIM_COMMAND="$command_file" "$python" "$repo_dir/containers/sim/battery.py" "${battery_args[@]}"
+    status=$?
+    echo "Report: $out_dir/battery/report.json"
+    echo "Viewer is still at http://127.0.0.1:8765"
+    echo "Left drag orbits, right drag pans, scroll zooms. Space pauses. Ctrl+C closes the page."
+    wait "$live_pid" || true
+    exit "$status"
+  fi
+  G1_SIM_COMMAND="$command_file" exec "$python" "$repo_dir/containers/sim/battery.py" "${battery_args[@]}"
 fi
 
 if [[ "$local_mode" -eq 1 ]]; then
@@ -200,6 +335,8 @@ as_owner() {
 in_netns() {
   local pid="$1"
   shift
+  # -n puts the bridge on the sim container's loopback. Discovery is unicast
+  # to 127.0.0.1 there (containers/sim/fastdds.xml), not host shared memory.
   nsenter -t "$pid" -n -- runuser -u "$owner" -- "$@"
 }
 
@@ -241,23 +378,26 @@ if [[ -n "$example" ]]; then
   [[ -n "$scene" ]] || scene="$prepared/environment/scene.xml"
   image="g1-sim-example-$example:local"
   "$runtime" build -t "$image" "$prepared/container"
-elif [[ "$self_test" -eq 0 ]]; then
+elif [[ "$self_test" -eq 0 && "$circle" -eq 0 ]]; then
   load_image
 fi
 
 base_out="$out_dir"
-trap stop_sim EXIT
+trap 'stop_sim; stop_view' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [[ "$view" -eq 1 && "$counterfactuals" -eq 0 ]]; then
+  start_live_view
+fi
 run_session() {
   stop_sim
   mkdir -p "$out_dir"
-  rm -f "$out_dir/ready" "$out_dir/report.json" "$out_dir/trace.npz"
+  rm -f "$out_dir/ready" "$out_dir/report.json" "$out_dir/trace.npz" "$out_dir/live.jsonl"
   chown "$owner" "$out_dir" 2>/dev/null || true
 
   echo "Starting $pose (isolated network, loopback only, no eth0)."
   echo "Scene: ${scene:-bundled G1 on a flat floor}. Safety checks: $safety_checks."
-  "$runtime" run -d --name "$net_name" --network none ros:foxy-ros-base sleep infinity >/dev/null || return 2
+  "$runtime" run -d --name "$net_name" --network none --ipc shareable ros:foxy-ros-base sleep infinity >/dev/null || return 2
   net_pid="$("$runtime" inspect -f '{{.State.Pid}}' "$net_name")" || return 2
   if nsenter -t "$net_pid" -n -- ip link show eth0 >/dev/null 2>&1; then
     echo "Isolated network still has eth0. Not starting the sim." >&2
@@ -278,13 +418,23 @@ run_session() {
     "ROBOT_INTERFACE=lo"
     "ROBOT_DOMAIN=0"
     "ROS_DOMAIN_ID=97"
-    "ROS_LOCALHOST_ONLY=1"
+    "ROS_LOCALHOST_ONLY=0"
     "RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
     "FASTRTPS_DEFAULT_PROFILES_FILE=$repo_dir/containers/sim/fastdds.xml"
+    "G1_SIM_STARTUP=30"
     "G1_SIM_TRACE=$out_dir/trace.npz"
   )
+  if [[ "$view" -eq 1 ]]; then
+    sim_env+=("G1_SIM_LIVE=$out_dir/live.jsonl")
+  fi
+  if [[ "$circle" -eq 1 ]]; then
+    sim_env+=("G1_SIM_CIRCLE=1" "G1_SIM_EXAMPLE=circle" "G1_SIM_COMMAND=$command_file")
+  fi
 
-  bridge_cmd="cd '$repo_dir' && source /opt/ros/foxy/setup.bash && source '$ros_dir/install/setup.bash' && exec python3 containers/sim/bridge.py"
+  # Foxy's setup hook forces ROS_LOCALHOST_ONLY=0 when it is already set.
+  # Keep it 0 on purpose: the value 1 enables a discovery path that cannot
+  # meet the submission. The XML profile is the discovery config.
+  bridge_cmd="cd '$repo_dir' && source /opt/ros/foxy/setup.bash && source '$ros_dir/install/setup.bash' && export ROS_LOCALHOST_ONLY=0 ROS_DOMAIN_ID=97 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTRTPS_DEFAULT_PROFILES_FILE='$repo_dir/containers/sim/fastdds.xml' && exec python3 containers/sim/bridge.py"
   in_netns "$net_pid" env "${sim_env[@]}" bash -c "$bridge_cmd" >"$out_dir/bridge.log" 2>&1 &
   echo $! >"$out_dir/bridge.pid"
 
@@ -305,19 +455,21 @@ run_session() {
     return 1
   fi
 
-  if [[ "$self_test" -eq 1 ]]; then
-    hold_cmd="cd '$repo_dir' && source /opt/ros/foxy/setup.bash && source '$ros_dir/install/setup.bash' && exec python3 containers/sim/hold.py"
+  if [[ "$circle" -eq 1 ]]; then
+    : # The bridge drives the walker. No submission container.
+  elif [[ "$self_test" -eq 1 ]]; then
+    hold_cmd="cd '$repo_dir' && source /opt/ros/foxy/setup.bash && source '$ros_dir/install/setup.bash' && export ROS_LOCALHOST_ONLY=0 ROS_DOMAIN_ID=97 RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTRTPS_DEFAULT_PROFILES_FILE='$repo_dir/containers/sim/fastdds.xml' && exec python3 containers/sim/hold.py"
     in_netns "$net_pid" env "${sim_env[@]}" bash -c "$hold_cmd" >"$out_dir/hold.log" 2>&1 &
     echo $! >"$out_dir/hold.pid"
   else
-    "$runtime" run -d --name "$user_name" --network "container:$net_name" \
+    "$runtime" run -d --name "$user_name" --network "container:$net_name" --ipc "container:$net_name" \
       -v "$repo_dir/containers/sim/fastdds.xml:/fastdds.xml:ro" \
       -e ROBOT_INTERFACE=lo \
       -e G1_SIM_NETNS=1 \
       -e "G1_SIM_EXAMPLE=$example" \
       -e ROBOT_DOMAIN=0 \
       -e ROS_DOMAIN_ID=97 \
-      -e ROS_LOCALHOST_ONLY=1 \
+      -e ROS_LOCALHOST_ONLY=0 \
       -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
       -e FASTRTPS_DEFAULT_PROFILES_FILE=/fastdds.xml \
       "$image" >/dev/null || { stop_sim; return 2; }
@@ -349,17 +501,19 @@ run_session() {
 }
 
 if [[ "$counterfactuals" -eq 0 ]]; then
+  if [[ "$view" -eq 1 ]]; then
+    wait_for_start
+  fi
   status=0
   run_session || status=$?
   stop_sim
-  trap - EXIT INT TERM
-  if [[ "$view" -eq 1 && -f "$out_dir/trace.npz" ]]; then
-    python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
-    as_owner "$python" "$repo_dir/containers/sim/view.py" "$out_dir/trace.npz" "$out_dir/view"
-    echo "Open http://127.0.0.1:8765"
-    echo "Left drag orbits, right drag pans, scroll zooms. Space pauses. Ctrl+C stops the viewer."
-    as_owner python3 -m http.server --bind 127.0.0.1 8765 --directory "$out_dir/view"
+  if [[ "$view" -eq 1 && -n "$live_pid" ]]; then
+    echo "Viewer is still at http://127.0.0.1:8765"
+    echo "Left drag orbits, right drag pans, scroll zooms. Space pauses. Ctrl+C closes the page."
+    wait "$live_pid" || true
+    live_pid=""
   fi
+  trap - EXIT INT TERM
   exit "$status"
 fi
 

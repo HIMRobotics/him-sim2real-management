@@ -93,7 +93,7 @@ Ctrl+C stops it. `./setup.sh stop` removes it. The safety service keeps running.
 
 ## MuJoCo
 
-`./sim.sh` loads the same archive and runs it against a simulated G1. Use this before `./setup.sh`, and for the safety check. It does not use `eth0` and does not stop `g1-safety-stops`. The runner, the report, and the replay controls are in [SIM_RUN.md](SIM_RUN.md).
+`./sim.sh` loads the same archive and runs it against a simulated G1 on the robot's Linux host. Mac and Windows will use `desktop_sim.sh` at the repo root. That launcher is not in the repo yet. Use this before `./setup.sh`, and for the safety check. It does not use `eth0` and does not stop `g1-safety-stops`. The runner, the report, and the replay controls are in [SIM_RUN.md](SIM_RUN.md).
 
 ```bash
 ./sim.sh --self-test
@@ -107,10 +107,10 @@ Safety checks are enabled by default. `--no-safety-checks` disables the sim's li
 
 Submitters may include an `environment/` directory beside `submission.tar`, containing a complete G1 MuJoCo scene and its assets. Select its host XML path with `--scene`. The XML must retain the named G1 joints, actuators, floating base, pelvis IMU sensors, and `stand` keyframe. See [SIM_RUN.md](SIM_RUN.md#submit-a-mujoco-environment) for an example and counterfactual requirements.
 
-`./sim.sh --view` serves the page when the run finishes. `./sim.sh replay` serves the last recording at `http://127.0.0.1:8765`. Left drag orbits, right drag pans, scroll zooms, space pauses, arrow keys step one frame. Replay uses the recorded G1 and environment, including obstacles. The recording is `containers/sim/output/trace.npz`.
+`./sim.sh --view` opens `http://127.0.0.1:8765` before the run. Press Start and the page plays from the first frame. The camera stays put, and a blue line is the pelvis path. `./sim.sh replay` serves the last recording on that same URL. Left drag orbits, right drag pans, scroll zooms, space pauses, arrow keys step one frame. Replay uses the recorded G1 and environment, including obstacles. The recording is `containers/sim/output/trace.npz`. `./sim.sh --circle` walks one flat circle with the cached walker and does not load a submission.
 
 `./sim.sh stop` removes the sim containers. The report is `containers/sim/output/report.json`. `within_limits` means commands were accepted with checking enabled and no violation. `completed` means the run had commands and checking was disabled. `violation` names a failed check. `error` indicates an unchecked run failed protocol or simulation validation. `no_command` means nothing was accepted. Reports include `safety_checks` and `scene`.
 
 The sim serves `/safety/checker/arm`, publishes `/safety/robot_feedback` and `/safety/policy_observation`, and publishes `rt/lowstate` on `lo` inside that isolated network. `ROBOT_INTERFACE` is `lo`. With checks enabled, a command that fails a joint check is not applied. `/safety/abort` follows, and later commands stay rejected.
 
-The timed window starts when the first command is accepted. If none arrives within 10 seconds, the report is `no_command`. `./sim.sh --self-test` needs no archive: it holds the stand for one second. The checks themselves are `containers/sim/test_runner.py`.
+The timed window starts when the first command is accepted. If none arrives within 30 seconds, the report is `no_command`. A rejected joint command keeps the last accepted hold. A fall, overspeed, or action timeout drops that hold and damps. `./sim.sh --self-test` needs no archive: it holds the stand for one second. The checks themselves are `containers/sim/test_runner.py`.

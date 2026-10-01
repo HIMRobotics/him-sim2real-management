@@ -30,7 +30,7 @@ From the repository root:
 
 Each output directory contains `report.json` and `trace.npz`. Named output directories preserve both recordings. Exit code 0 means a checked run passed or an unchecked run completed, code 1 is a safety violation, and code 2 is an execution error or missing commands. A completed unchecked run is not necessarily a successful task.
 
-The balance weights are already cached on the development host at `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx`. On another host, set `HIM_BALANCE_ONNX` to your copy. They are not downloaded or committed by this example. The walker and external weights are the files in `examples/`.
+The balance weights are already cached on the development host at `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx`. On another host, set `HIM_BALANCE_ONNX` to your copy. They are not downloaded or committed by this example. `examples/` is now the balance submission container, so `--example stairs` and `--example walker` have no weights in the tree.
 
 ## View a result
 
@@ -38,7 +38,7 @@ The balance weights are already cached on the development host at `.cache/groot_
 ./sim.sh replay containers/sim/output/stairs-off/trace.npz
 ```
 
-Open `http://127.0.0.1:8765`. The replay shows the robot, stairs, safety mode, result, and any rejection reason. Left drag orbits, right drag pans, scroll zooms, and Space pauses. Ctrl+C stops the server. Use the `stairs-on`, `balance-on`, or `balance-off` trace to view the other runs. Alternatively, add `--view` to a run command to open the replay server when it finishes, including after a violation.
+Open `http://127.0.0.1:8765`. The replay shows the robot, stairs, safety mode, result, and any rejection reason. Left drag orbits, right drag pans, scroll zooms, and Space pauses. A blue line on the floor is the pelvis path. Ctrl+C stops the server. Use the `stairs-on`, `balance-on`, or `balance-off` trace to view the other runs. Add `--view` to open that page first: press Start, and playback begins at the first frame. `./sim.sh --view --circle` is the same page for one flat circle from the cached walker, with no submission.
 
 If running on the robot over SSH, forward port 8765 with `ssh -L 8765:127.0.0.1:8765 unitree@<robot>` and open the same URL on your laptop.
 

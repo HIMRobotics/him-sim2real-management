@@ -32,6 +32,10 @@ packages/*/dist/
 
 tmp
 
+# Built example image. Rebuild with examples/build.sh.
+examples/submission.tar
+examples/.build/
+
 # Uploaded robot containers. Keep the drop folder, not the images.
 containers/upload/*
 !containers/upload/.gitkeep

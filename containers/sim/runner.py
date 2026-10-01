@@ -1,5 +1,6 @@
 """Accept container joint frames, check them, and step the MuJoCo plant."""
 
+import json
 import os
 import uuid
 from pathlib import Path
@@ -67,6 +68,8 @@ class Runner:
         self.trace_qpos = []
         self.trace_time = []
         self.metrics = MotionMetrics(self.plant)
+        self._live = None
+        self._circle = None
         self._remember()
 
     def arm(self):
@@ -89,7 +92,9 @@ class Runner:
             return self.reason
         reason, detail = self._validate(frame, float(time))
         if reason:
-            self._latch(reason, detail)
+            # Keep the last accepted hold. Dropping it leaves kp at 0, and the
+            # body folds even though the rejected target was never applied.
+            self._latch(reason, detail, hold=True)
             return reason
         self.commands += 1
         self.last_sequence = int(frame["sequence"])
@@ -112,7 +117,7 @@ class Runner:
             and float(time) - self.last_command_time >= ACTION_TIMEOUT
         ):
             self._latch("action_timeout", None)
-        if self.active is None or self.reason is not None:
+        if self.active is None:
             q, dq = self.plant.q(), self.plant.dq()
             q_des, dq_des, kp, kd, tau = self.plant.damping_command(q, dq)
             self.plant._apply_arrays(q_des, dq_des, kp, kd, tau)
@@ -168,6 +173,9 @@ class Runner:
         }
 
     def report(self, lowstate=False):
+        if self._live is not None:
+            self._live.close()
+            self._live = None
         if self.reason:
             status = "violation" if self.safety_checks else "error"
         elif self.commands < 1:
@@ -197,6 +205,16 @@ class Runner:
     def _remember(self):
         self.trace_qpos.append(self.plant.data.qpos.copy())
         self.trace_time.append(self.sim_time)
+        path = os.environ.get("G1_SIM_LIVE")
+        if not path:
+            return
+        if self._live is None:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._live = target.open("w")
+        qpos = [round(float(value), 5) for value in self.plant.data.qpos]
+        self._live.write(json.dumps({"t": self.sim_time, "qpos": qpos}) + "\n")
+        self._live.flush()
 
     def _write_trace(self):
         path = os.environ.get("G1_SIM_TRACE")
@@ -215,6 +233,43 @@ class Runner:
         )
         return str(target)
 
+    def circle(self, time):
+        """One walking step of a flat circle. Movement limits are not applied."""
+        try:
+            if self._circle is None:
+                from circle import CircleWalker
+
+                self._circle = CircleWalker()
+                self._circle.settle(self.plant)
+                self._reset_trace()
+            if self.reason is None:
+                target = self._circle.targets(self.plant)
+                self.active = {
+                    "q": np.asarray(target, dtype=float).copy(),
+                    "dq": np.zeros(29),
+                    "kp": self._circle.kp.copy(),
+                    "kd": self._circle.kd.copy(),
+                    "tau": np.zeros(29),
+                }
+                self.commands += 1
+                self.last_command_time = float(time)
+                self._circle.started = True
+        except Exception as exc:  # noqa: BLE001
+            self._latch("plant_error", {"detail": str(exc)})
+        return self.step(time)
+
+    def _reset_trace(self):
+        if self._live is not None:
+            self._live.close()
+            self._live = None
+        path = os.environ.get("G1_SIM_LIVE")
+        if path:
+            Path(path).unlink(missing_ok=True)
+        self.trace_qpos = []
+        self.trace_time = []
+        self.sim_time = 0.0
+        self._remember()
+
     def handle(self, request):
         op = request.get("op")
         if op == "arm":
@@ -224,6 +279,11 @@ class Runner:
         if op == "command":
             reason = self.command(request["frame"], request["time"])
             return {"ok": reason is None, "reason": reason, "detail": self.detail}
+        if op == "circle":
+            result = self.circle(request["time"])
+            result["ok"] = result.get("reason") != "plant_error"
+            result["detail"] = self.detail
+            return result
         if op == "step":
             result = self.step(request["time"])
             result["ok"] = True
@@ -233,10 +293,11 @@ class Runner:
             return self.report(request.get("lowstate", False))
         return {"ok": False, "reason": "unknown_op"}
 
-    def _latch(self, reason, detail):
+    def _latch(self, reason, detail, hold=False):
         self.reason = reason
         self.detail = detail
-        self.active = None
+        if not hold:
+            self.active = None
 
     def _validate(self, frame, time):
         if not isinstance(frame, dict) or frame.get("session_id") != self.session_id:

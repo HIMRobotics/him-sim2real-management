@@ -1,21 +1,39 @@
-# Example policy
+# Walker submission
 
-`examples/` is one policy bundle: a YAML file plus the ONNX files that YAML names. The network here is a Unitree G1 walker. Its contract id is `g1-walker-99-v1`. Another policy replaces these files. It does not get its own subdirectory.
+This folder is one Docker submission. The network is the G1 walker in `walker.onnx`: 99 inputs, 29 joint targets. `stand.yaml` and `circle.yaml` set `vx`, `vy`, and `yaw_rate`. It does not publish `rt/lowcmd` or `rt/arm_sdk`. The GR00T balance file is not this network and is not loaded.
 
-| File | Role |
+Do not start it on the robot with `./setup.sh` until a physical run is intended. The archive beside this folder is for MuJoCo.
+
+## Image
+
+Base image `ros:foxy-ros-base`, platform `linux/arm64`. The image installs `rmw_fastrtps_cpp`, builds `him_safety_interfaces`, and contains the ONNX file and `unitree_sdk2py`. `examples/entrypoint.sh` is the image `ENTRYPOINT`. `setup.sh` stays on the host and only launches the image.
+
+| Source | Use |
 | --- | --- |
-| `policy.yaml` | Observation layout, joint order, defaults, action scales, gains, timing |
-| `walker.onnx` | 99-input, 29-output network |
-| `walker.onnx.data` | External weights. Keep this beside `walker.onnx`. |
+| `/safety/checker/arm` | `session_id` |
+| `/safety/robot_feedback` | 29 joint `q` and `dq`, `observation_id` |
+| `rt/lowstate` | IMU quaternion (w, x, y, z) and gyro |
+| `/sim/state` | Base velocity for the walker observation. Sim only. |
+| `/safety/precheck` | 29-slot `JointCommand` |
+| `/safety/abort` | Stop publishing |
 
-`walker.onnx` and `walker.onnx.data` are a third-party locomotion prior from [luckyrobots/g1-manipulation-challenge](https://github.com/luckyrobots/g1-manipulation-challenge). See that repository for license terms.
+The first command holds the measured joints. Later commands are the walker targets, with gains from `walker.yaml`. Feedforward torque is zero. `WALKER_COMMAND` selects the yaml. The default is `stand.yaml`. A gait step does not fit the submission tracking window, so `./sim.sh --command` applies that yaml on the plant instead of through the image.
 
-This folder does not launch the robot. `policy-safety prepare-g1` reads `policy.yaml`, attaches this repo's MuJoCo G1, and writes `robot.json` for screening. Contract notes are in [ONNX_BUNDLE.md](../ONNX_BUNDLE.md).
+## Build
 
-To run this network in the current simulator, use `./sim.sh --example stairs --local --seconds 20 --no-safety-checks --view` for the restored stair controller and course, or `--example walker` for flat walking. Omit `--local` for Docker/ROS and omit `--no-safety-checks` to enable the normal checks. The [simulation example guide](../containers/examples/README.md) also covers GR00T balance and separate recordings for both safety settings.
+From the repository root, on this arm64 machine:
 
 ```bash
-policy-safety prepare-g1 \
-  --submission examples \
-  --output /tmp/g1-screening-bundle
+./examples/build.sh
 ```
+
+That writes `examples/submission.tar` and does not start a container. The image contains `walker.onnx` and `walker.onnx.data`. It uses ONNX Runtime 1.16.3 because that is the newest build published for Python 3.8 on linux/arm64. CycloneDDS is copied from this robot's Python 3.8 install, since PyPI has no matching wheel. The SDK default is `/home/unitree/Workspace/unitree_sdk2_python/unitree_sdk2py`. Override with `UNITREE_SDK2PY`.
+
+## Run in sim
+
+```bash
+cp examples/submission.tar containers/upload/submission.tar
+./sim.sh --seconds 10 --view
+```
+
+`./sim.sh` attaches the container to a loopback-only network and sets `ROBOT_INTERFACE=lo`. It does not use `eth0`. Safety checks stay on. A target the joint profile rejects ends the run as `violation`. With `--view`, open `http://127.0.0.1:8765` and press Start. Playback starts at the first frame. The camera stays put, and a blue line is the pelvis path. That path is only in the browser. `./sim.sh --command examples/stand.yaml --view` holds the walker stance. `./sim.sh --command examples/circle.yaml --view` is the loop. Neither command loads the GR00T balance file.

@@ -43,6 +43,16 @@ def prepare(name, destination=None):
         copy_file(model, project / "balance.onnx")
         defaults = DEFAULT_JOINT_POSITIONS.tolist()
     else:
+        missing = [
+            filename
+            for filename in ("walker.onnx", "walker.onnx.data", "policy.yaml")
+            if not (ROOT / "examples" / filename).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                "examples/ is the balance submission, not the walker bundle. Missing "
+                + ", ".join(missing)
+            )
         for filename in ("walker.onnx", "walker.onnx.data", "policy.yaml"):
             copy_file(ROOT / "examples" / filename, project / filename)
         cfg = yaml.safe_load((project / "policy.yaml").read_text())

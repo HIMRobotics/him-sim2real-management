@@ -100,6 +100,10 @@ class SimBridge(Node):
         self.create_timer(0.1, self.repeat_abort)
         self.abort_reason = None
         self.accepted = False
+        self.circle = os.environ.get("G1_SIM_CIRCLE") == "1"
+        if self.circle:
+            self.accepted = True
+            self.run_started = time.monotonic()
 
     def clock(self):
         return time.monotonic() - self.created
@@ -142,6 +146,17 @@ class SimBridge(Node):
                 return
         elif time.monotonic() - self.run_started >= self.seconds:
             self.finish()
+            return
+        if self.circle:
+            stepped = self.plant.call({"op": "circle", "time": self.clock()})
+            if stepped.get("reason"):
+                self.latch(stepped["reason"])
+            state = self.plant.call({"op": "feedback", "time": self.clock()})
+            if not state.get("ok"):
+                self.latch(state.get("reason") or "plant_error")
+                self.finish()
+                return
+            self.publish_state(state)
             return
         if self.accepted:
             stepped = self.plant.call({"op": "step", "time": self.clock()})

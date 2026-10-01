@@ -21,6 +21,12 @@ PAGE = """<!DOCTYPE html>
 <style>
   html, body { margin: 0; height: 100%; background: #f4f4f4; overflow: hidden; }
   #hud { position: absolute; left: 12px; top: 12px; font: 14px sans-serif; color: #222; }
+  #start {
+    position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
+    font: 600 18px sans-serif; padding: 12px 28px; border: 0; border-radius: 8px;
+    background: #1a1a1a; color: #fff; cursor: pointer;
+  }
+  #start:disabled { background: #888; cursor: default; }
 </style>
 </head>
 <body>
@@ -47,6 +53,9 @@ scene.add(sun);
 const grid = new THREE.GridHelper(8, 16, 0xbbbbbb, 0xdddddd);
 grid.rotation.x = Math.PI / 2;
 scene.add(grid);
+const trailGeom = new THREE.BufferGeometry();
+const trail = new THREE.Line(trailGeom, new THREE.LineBasicMaterial({ color: 0x1565c0 }));
+scene.add(trail);
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 50);
 camera.up.set(0, 0, 1);
 camera.position.set(2.2, -2.2, 1.4);
@@ -88,11 +97,13 @@ for (const geom of motion.geoms) {
 }
 
 let frame = 0;
+let mode = motion.live ? "idle" : "replay";
 let paused = false;
 function show(index) {
+  if (!motion.frames) return;
   frame = (index + motion.frames) % motion.frames;
   const focus = motion.focus[frame];
-  controls.target.set(focus[0], focus[1], focus[2]);
+  if (mode === "idle") controls.target.set(focus[0], focus[1], focus[2]);
   parts.forEach((mesh, i) => {
     const pose = motion.geoms[i].poses[frame];
     mesh.matrix.set(
@@ -102,9 +113,85 @@ function show(index) {
       0, 0, 0, 1
     );
   });
-  const playback = paused ? "paused" : "playing";
+  const count = frame + 1;
+  const positions = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const point = motion.focus[i];
+    positions[i * 3] = point[0];
+    positions[i * 3 + 1] = point[1];
+    positions[i * 3 + 2] = 0.02;
+  }
+  trailGeom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const playback = mode === "idle" ? "ready" : mode === "live" ? "live" : (paused ? "paused" : "playing");
   hud.textContent = `${motion.summary}\n${playback}  ${motion.time[frame].toFixed(2)} s  frame ${frame + 1} / ${motion.frames}`;
   hud.style.whiteSpace = "pre-line";
+}
+function remember(frames, replace) {
+  if (replace) {
+    motion.time = [];
+    motion.focus = [];
+    for (const geom of motion.geoms) geom.poses = [];
+  }
+  for (const item of frames) {
+    motion.time.push(item.time);
+    motion.focus.push(item.focus);
+    item.poses.forEach((pose, index) => motion.geoms[index].poses.push(pose));
+  }
+  motion.frames = motion.time.length;
+}
+if (motion.live) {
+  const start = document.createElement("button");
+  start.id = "start";
+  start.textContent = "Start";
+  document.body.appendChild(start);
+  let synced = false;
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    start.textContent = "Starting";
+    motion.summary = "Starting the policy";
+    show(0);
+    const response = await fetch("/start", {method: "POST"});
+    if (!response.ok) {
+      motion.summary = "Start failed";
+      start.disabled = false;
+      start.textContent = "Start";
+      show(0);
+      return;
+    }
+    const poll = async () => {
+      let body;
+      try {
+        const after = synced ? motion.frames : 0;
+        const response = await fetch("/frames?after=" + after);
+        if (!response.ok) throw new Error("frames");
+        body = await response.json();
+      } catch (error) {
+        setTimeout(poll, 200);
+        return;
+      }
+      if (body.reset || !synced) {
+        if (body.frames.length) {
+          remember(body.frames, true);
+          synced = true;
+        }
+      } else if (body.frames.length) {
+        remember(body.frames, false);
+      }
+      if (synced) {
+        if (mode === "idle") {
+          mode = "live";
+          frame = 0;
+          last = performance.now();
+          show(0);
+        }
+        start.remove();
+      }
+      if (body.summary) motion.summary = body.summary;
+      if (body.done) mode = "replay";
+      if (!body.done) setTimeout(poll, 50);
+    };
+    poll();
+  });
 }
 window.addEventListener("keydown", (event) => {
   if (event.code === "Space") { paused = !paused; event.preventDefault(); }
@@ -120,9 +207,14 @@ show(0);
 let last = performance.now();
 function tick(now) {
   requestAnimationFrame(tick);
-  const next = (frame + 1) % motion.frames;
-  const delay = next ? 1000 * (motion.time[next] - motion.time[frame]) : 20;
-  if (!paused && now - last >= delay) { last = now; show(next); }
+  if (!paused && motion.frames > 1 && mode !== "idle") {
+    const caughtUp = mode === "live" && frame >= motion.frames - 1;
+    const next = caughtUp ? frame : (frame + 1) % motion.frames;
+    const delay = next !== frame && motion.time[next] !== undefined
+      ? Math.max(0, 1000 * (motion.time[next] - motion.time[frame]))
+      : 20;
+    if (!caughtUp && now - last >= delay) { last = now; show(next); }
+  }
   controls.update();
   renderer.render(scene, camera);
 }
@@ -184,30 +276,14 @@ def write_heightfield_stl(model, field_id, path):
     write_triangles_stl(triangles, path)
 
 
-def export_replay(trace_path, dest):
-    """Build dest/index.html, motion.json, and the STL files the page loads."""
-    trace_path, dest = Path(trace_path), Path(dest)
-    with np.load(trace_path, allow_pickle=False) as trace:
-        qpos = trace["qpos"]
-        times = trace["time"]
-        safety_checks = (
-            bool(trace["safety_checks"]) if "safety_checks" in trace else True
-        )
-        if "model" in trace:
-            model = mujoco.MjModel.from_binary_path(
-                "scene.mjb", {"scene.mjb": trace["model"].tobytes()}
-            )
-        else:
-            model = load_model()
-    if qpos.ndim != 2 or qpos.shape[1] != model.nq or not len(qpos):
-        raise ValueError("trace poses do not match the recorded model")
-    data = mujoco.MjData(model)
-    geoms = []
+def visible_geoms(model):
+    """Geoms the replay draws, in page order. Group 3 collision shells are skipped."""
     base = model.body("pelvis").id
     robot_bodies = {base}
     for body_id in range(base + 1, model.nbody):
         if int(model.body_parentid[body_id]) in robot_bodies:
             robot_bodies.add(body_id)
+    geoms = []
     for geom_id in range(model.ngeom):
         if (
             int(model.geom_bodyid[geom_id]) in robot_bodies
@@ -224,41 +300,38 @@ def export_replay(trace_path, dest):
             .lower()
         )
         geoms.append((geom_id, kind, rgba.tolist()))
-    poses = [[] for _ in geoms]
-    focus = []
-    for frame in qpos:
-        data.qpos[:] = frame
-        mujoco.mj_forward(model, data)
-        focus.append([round(float(v), 5) for v in data.xpos[base]])
-        for slot, (geom_id, _kind, _rgba) in enumerate(geoms):
-            rotation = data.geom_xmat[geom_id]
-            position = data.geom_xpos[geom_id]
-            poses[slot].append(
-                [round(float(v), 5) for v in rotation]
-                + [round(float(v), 5) for v in position]
-            )
+    return base, geoms
+
+
+def pose_frame(model, data, base, geoms, qpos, time):
+    """One rendered frame: pelvis focus and each geom's rotation plus position."""
+    data.qpos[:] = qpos
+    mujoco.mj_forward(model, data)
+    focus = [round(float(value), 5) for value in data.xpos[base]]
+    poses = []
+    for geom_id, _kind, _rgba in geoms:
+        rotation = data.geom_xmat[geom_id]
+        position = data.geom_xpos[geom_id]
+        poses.append(
+            [round(float(value), 5) for value in rotation]
+            + [round(float(value), 5) for value in position]
+        )
+    return {"time": float(time), "focus": focus, "poses": poses}
+
+
+def write_page(dest, model, geoms, frames, summary, live=False):
+    """Write index.html, motion.json, and the mesh files the page loads."""
+    dest = Path(dest)
     mesh_dir = dest / "meshes"
     if dest.exists():
         shutil.rmtree(dest)
     mesh_dir.mkdir(parents=True)
-    summary = "Safety checks: " + ("ON" if safety_checks else "OFF")
-    report_path = trace_path.parent / "report.json"
-    if report_path.is_file():
-        report = json.loads(report_path.read_text())
-        summary = f"{report.get('policy') or 'Simulation'} | {summary} | {report.get('status', '')}"
-        if report.get("reason"):
-            summary += "\nStopped accepting commands: " + report["reason"]
-        motion = report.get("motion", {})
-        if "fell" in motion:
-            summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")
-        if "stairs" in motion:
-            stairs = motion["stairs"]
-            summary += f" | Stair treads: {stairs['distinct_treads']}/3 | Finish upright: {stairs['finished_upright']}"
     payload = {
-        "frames": len(qpos),
-        "time": times.tolist(),
-        "focus": focus,
+        "frames": len(frames),
+        "time": [frame["time"] for frame in frames],
+        "focus": [frame["focus"] for frame in frames],
         "summary": summary,
+        "live": live,
         "geoms": [],
     }
     written = set()
@@ -269,7 +342,7 @@ def export_replay(trace_path, dest):
             "size": model.geom_size[geom_id].tolist(),
             "color": rgba[:3],
             "opacity": rgba[3],
-            "poses": poses[slot],
+            "poses": [frame["poses"][slot] for frame in frames],
         }
         if kind in ("mesh", "hfield"):
             asset_id = int(model.geom_dataid[geom_id])
@@ -287,7 +360,93 @@ def export_replay(trace_path, dest):
     return dest
 
 
+def report_summary(report, safety_checks=True):
+    """HUD text for a finished run."""
+    summary = f"{report.get('policy') or 'Simulation'} | Safety checks: "
+    summary += "ON" if report.get("safety_checks", safety_checks) else "OFF"
+    summary += " | " + str(report.get("status", ""))
+    if report.get("reason"):
+        summary += "\nStopped accepting commands: " + report["reason"]
+    motion = report.get("motion", {})
+    if "fell" in motion:
+        summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")
+    if "stairs" in motion:
+        stairs = motion["stairs"]
+        summary += (
+            f" | Stair treads: {stairs['distinct_treads']}/3"
+            f" | Finish upright: {stairs['finished_upright']}"
+        )
+    return summary
+
+
+def export_idle(dest, pose="standing", scene=None):
+    """Write the start page: the robot at its initial pose, waiting for Start."""
+    from plant import Plant
+
+    plant = Plant(pose, scene=scene or None, check_fall=False)
+    base, geoms = visible_geoms(plant.model)
+    frame = pose_frame(
+        plant.model, plant.data, base, geoms, plant.data.qpos.copy(), 0.0
+    )
+    return write_page(
+        dest,
+        plant.model,
+        geoms,
+        [frame],
+        "Press Start to run the policy.",
+        live=True,
+    )
+
+
+def export_replay(trace_path, dest):
+    """Build dest/index.html, motion.json, and the STL files the page loads."""
+    trace_path, dest = Path(trace_path), Path(dest)
+    with np.load(trace_path, allow_pickle=False) as trace:
+        qpos = trace["qpos"]
+        times = trace["time"]
+        safety_checks = (
+            bool(trace["safety_checks"]) if "safety_checks" in trace else True
+        )
+        if "model" in trace:
+            model = mujoco.MjModel.from_binary_path(
+                "scene.mjb", {"scene.mjb": trace["model"].tobytes()}
+            )
+        else:
+            model = load_model()
+    if qpos.ndim != 2 or qpos.shape[1] != model.nq or not len(qpos):
+        raise ValueError("trace poses do not match the recorded model")
+    base, geoms = visible_geoms(model)
+    data = mujoco.MjData(model)
+    frames = [
+        pose_frame(model, data, base, geoms, pose, float(time))
+        for pose, time in zip(qpos, times)
+    ]
+    summary = "Safety checks: " + ("ON" if safety_checks else "OFF")
+    report_path = trace_path.parent / "report.json"
+    if report_path.is_file():
+        summary = report_summary(json.loads(report_path.read_text()), safety_checks)
+    return write_page(dest, model, geoms, frames, summary, live=False)
+
+
 def main():
+    if sys.argv[1:2] == ["--idle"]:
+        dest = Path(sys.argv[2])
+        pose = "standing"
+        scene = None
+        args = sys.argv[3:]
+        while args:
+            if args[0] == "--pose" and len(args) > 1:
+                pose = args[1]
+                args = args[2:]
+            elif args[0] == "--scene" and len(args) > 1:
+                scene = args[1] or None
+                args = args[2:]
+            else:
+                print("Usage: view.py --idle DEST [--pose NAME] [--scene XML]", file=sys.stderr)
+                return 2
+        export_idle(dest, pose, scene)
+        print(dest / "index.html")
+        return 0
     trace = (
         Path(sys.argv[1])
         if len(sys.argv) > 1
