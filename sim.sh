@@ -24,6 +24,9 @@ Usage: ./sim.sh [--image NAME] [--scene PATH] [--seconds N]
        ./sim.sh replay [TRACE]
        ./sim.sh stop
 
+On macOS or Windows use ./desktop_sim.sh (same flags). This script's
+ROS path needs Linux network namespaces.
+
 --scene PATH        Load a host-side MuJoCo XML scene and its relative assets.
                     Default: the bundled G1 on a flat floor.
 --safety-checks     Enable safety checks (default).
@@ -50,10 +53,31 @@ fi
 if [[ "${1:-}" == "replay" ]]; then
   trace="${2:-$out_dir/trace.npz}"
   python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
+  if [[ ! -f "$trace" ]]; then
+    echo "Trace not found: $trace" >&2
+    exit 2
+  fi
   "$python" "$repo_dir/containers/sim/view.py" "$trace" "$out_dir/view"
-  echo "Open http://127.0.0.1:8765"
+  port="$("$python" - <<'PY'
+import socket
+for port in range(8765, 8815):
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    else:
+        print(port)
+        break
+    finally:
+        sock.close()
+else:
+    raise SystemExit("no free viewer port")
+PY
+)"
+  echo "Open http://127.0.0.1:$port"
   echo "Left drag orbits, right drag pans, scroll zooms. Space pauses. Ctrl+C stops the viewer."
-  exec python3 -m http.server --bind 127.0.0.1 8765 --directory "$out_dir/view"
+  exec "$python" -m http.server --bind 127.0.0.1 "$port" --directory "$out_dir/view"
 fi
 
 owner="${SUDO_USER:-$USER}"
@@ -204,7 +228,8 @@ if [[ "$local_mode" -eq 1 && -z "$example" ]]; then
   echo "--local requires --example stairs, walker, or balance." >&2
   exit 2
 fi
-out_dir="$(realpath -m -- "$out_dir")"
+mkdir -p "$out_dir"
+out_dir="$(cd -- "$out_dir" && pwd -P)"
 
 if [[ "$stopping" -eq 1 ]]; then
   if [[ "${EUID}" -ne 0 ]]; then
@@ -258,7 +283,7 @@ if [[ -n "$scene" ]]; then
     echo "MuJoCo scene is not a readable file: $scene" >&2
     exit 2
   fi
-  scene="$(realpath -- "$scene")"
+  scene="$(cd -- "$(dirname -- "$scene")" && pwd -P)/$(basename -- "$scene")"
 fi
 
 if [[ "$battery" -eq 1 ]]; then
@@ -319,6 +344,11 @@ if [[ "$local_mode" -eq 1 ]]; then
   exit "$status"
 fi
 
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "The Linux network-namespace sim does not run on $(uname -s)." >&2
+  echo "Use ./desktop_sim.sh with the same flags. --local, --self-test, --circle, --battery, and replay need no Docker." >&2
+  exit 2
+fi
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Sim needs root to enter the isolated network. Re-running with sudo."
   exec sudo --preserve-env=G1_SIM_SECONDS,G1_SIM_PYTHON,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"

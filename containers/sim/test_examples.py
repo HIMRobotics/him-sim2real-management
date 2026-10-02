@@ -92,6 +92,12 @@ class ExampleTests(unittest.TestCase):
                 ).is_file()
             )
             self.assertTrue((context / "project/walker.onnx.data").is_file())
+            import onnx
+
+            prepared_model = onnx.load(
+                context / "project/walker.onnx", load_external_data=False
+            )
+            self.assertLessEqual(prepared_model.ir_version, 8)
             env = {**os.environ, "PYTHONPATH": str(context)}
             proc = subprocess.run(
                 [
@@ -138,6 +144,64 @@ class ExampleTests(unittest.TestCase):
                 run("walker", output, scene=Path(tmp) / "absent.xml")
             self.assertFalse((output / "trace.npz").exists())
             self.assertFalse((output / "report.json").exists())
+
+    def test_desktop_sim_self_test_and_local_example(self):
+        help_proc = subprocess.run(
+            [str(ROOT / "desktop_sim.sh"), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
+        self.assertIn("--local", help_proc.stdout)
+        env = {**os.environ, "G1_SIM_PYTHON": sys.executable}
+        with tempfile.TemporaryDirectory() as tmp:
+            hold = Path(tmp) / "self-test"
+            proc = subprocess.run(
+                [
+                    str(ROOT / "desktop_sim.sh"),
+                    "--self-test",
+                    "--seconds",
+                    "0.04",
+                    "--output",
+                    str(hold),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            report = json.loads((hold / "report.json").read_text())
+            self.assertEqual(report["execution"], "local")
+            self.assertEqual(report["mode"], "self_test")
+            self.assertEqual(report["status"], "within_limits")
+            self.assertGreaterEqual(report["commands"], 1)
+            output = Path(tmp) / "walker"
+            proc = subprocess.run(
+                [
+                    str(ROOT / "desktop_sim.sh"),
+                    "--example",
+                    "walker",
+                    "--local",
+                    "--seconds",
+                    "0.04",
+                    "--no-safety-checks",
+                    "--output",
+                    str(output),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            report = json.loads((output / "report.json").read_text())
+            self.assertEqual(report["execution"], "local")
+            self.assertEqual(report["policy"], "walker")
 
     def test_simulation_state_has_required_frames_and_bounds(self):
         runner = Runner()

@@ -1,0 +1,15 @@
+.git
+.venv
+.venv-policy-safety
+.cache
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.app
+runs
+exports
+containers/sim/output
+containers/upload
+**/__pycache__
+**/*.pyc
+**/.DS_Store

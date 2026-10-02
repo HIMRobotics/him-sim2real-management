@@ -63,7 +63,7 @@ Unchecked runs report `completed`, never `within_limits`. Reports and counterfac
 
 From the repo root:
 
-To run a real policy immediately, use `./sim.sh --example stairs --local --seconds 20 --no-safety-checks --view`, or choose `--example balance`. Omit `--no-safety-checks` to compare against the enabled safety checks. Omit `--local` for the full Docker/ROS path. Complete commands, model requirements, and measured results are in [Runnable simulation policies](examples/README.md).
+To run a real policy immediately on a Mac or Windows laptop, use `./desktop_sim.sh --example walker --view`. That builds the example image, opens the site, and streams the live container after Start. A new submission works the same way: put one `submission.tar` in `containers/upload/` and run `./desktop_sim.sh --view`. `--local` skips Docker and is not the submission path. On the robot Linux host, `./sim.sh --example stairs --view` is the namespace equivalent. Complete commands are in [Runnable simulation policies](examples/README.md).
 
 ```bash
 ./sim.sh --self-test
@@ -105,7 +105,7 @@ Other flags:
 
 `./sim.sh` asks for `sudo` so it can enter the isolated network. `replay` does not.
 
-`./sim.sh` needs Linux network namespaces, so it does not run on macOS or Windows. The desktop entry will be `desktop_sim.sh` at the repo root, with the same flags, using only Docker Compose. The plant, bridge, and viewer stay in `containers/sim/`. That directory will also hold `Dockerfile` and `compose.yaml`: a loopback-only `net` service, a `sim` service on that network publishing `127.0.0.1:8765`, and an optional `linux/arm64` `submission` service. Reports stay in `containers/sim/output/`. Those files are not in the repo yet.
+`./sim.sh` needs Linux network namespaces, so it does not run on macOS or Windows. Use `./desktop_sim.sh` at the repo root, with the same flags. `--local`, `--self-test`, `--circle`, `--battery`, and `replay` run on the host and do not need Docker. The ROS submission path uses only Docker Compose: `containers/sim/Dockerfile` and `compose.yaml` define a loopback-only `net` service, a `sim` service on that network, and an optional `submission` service. The host viewer still serves `http://127.0.0.1:8765`. Reports stay in `containers/sim/output/`.
 
 `--local` also runs without sudo. Local examples use simulated timestamps. Docker/ROS runs enforce wall-clock freshness and action deadlines. The default durations are unchanged. The scene and safety settings apply to both backends and all counterfactual poses.
 

@@ -219,6 +219,14 @@ class SimBridge(Node):
         )
 
 
+def _routable_interfaces():
+    return sorted(
+        name
+        for _, name in socket.if_nameindex()
+        if name != "lo" and name.startswith(("eth", "en", "wl"))
+    )
+
+
 def require_isolated_netns():
     if os.environ.get("G1_SIM_NETNS") != "1":
         print(
@@ -226,9 +234,11 @@ def require_isolated_netns():
             file=sys.stderr,
         )
         return False
-    if {name for _, name in socket.if_nameindex()} != {"lo"}:
+    extra = _routable_interfaces()
+    if extra:
         print(
-            "Refusing to start: the sim network must contain only lo.", file=sys.stderr
+            "Refusing to start: routable interfaces are visible: " + ", ".join(extra),
+            file=sys.stderr,
         )
         return False
     return True

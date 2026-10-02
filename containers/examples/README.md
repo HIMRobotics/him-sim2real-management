@@ -14,18 +14,19 @@ All controllers send a measured-pose hold as their first command. After that, th
 
 Local mode uses the real ONNX models, MuJoCo, and the same `Runner` as the ROS plant. It does not use Docker or ROS. Durations and command timestamps use simulation time, so this mode does not test network latency or wall-clock command deadlines.
 
-From the repository root:
+From the repository root. On a Mac or Windows laptop use `./desktop_sim.sh` with the same flags.
 
 ```bash
 # Stairs, safety enabled. A violation exits with code 1.
-./sim.sh --example stairs --local --seconds 20 --output containers/sim/output/stairs-on
+./desktop_sim.sh --example stairs --local --seconds 20 --output containers/sim/output/stairs-on
+# Same command works as ./sim.sh --example stairs --local ... on Linux.
 
 # Same controller and environment, safety disabled.
-./sim.sh --example stairs --local --seconds 20 --no-safety-checks --output containers/sim/output/stairs-off
+./desktop_sim.sh --example stairs --local --seconds 20 --no-safety-checks --output containers/sim/output/stairs-off
 
 # Balance, both settings.
-./sim.sh --example balance --local --seconds 10 --output containers/sim/output/balance-on
-./sim.sh --example balance --local --seconds 10 --no-safety-checks --output containers/sim/output/balance-off
+./desktop_sim.sh --example balance --local --seconds 10 --output containers/sim/output/balance-on
+./desktop_sim.sh --example balance --local --seconds 10 --no-safety-checks --output containers/sim/output/balance-off
 ```
 
 Each output directory contains `report.json` and `trace.npz`. Named output directories preserve both recordings. Exit code 0 means a checked run passed or an unchecked run completed, code 1 is a safety violation, and code 2 is an execution error or missing commands. A completed unchecked run is not necessarily a successful task.
@@ -61,7 +62,7 @@ Drop `--local`. The script prompts for sudo, prepares the example files, builds 
 ./sim.sh replay containers/sim/output/docker-stairs-off/trace.npz
 ```
 
-The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The image uses ROS 2 Foxy's Python 3.8 and ONNX Runtime 1.18.1, which provides an [ARM64 Python 3.8 wheel](https://pypi.org/project/onnxruntime/1.18.1/). The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The image uses ROS 2 Foxy's Python 3.8 and ONNX Runtime 1.16.3, the last published ARM64 Python 3.8 wheel. Host `--local` can use a newer runtime. `prepare.py` caps the walker graph at ONNX IR 8 so that Foxy image can load it. On a Mac or Windows laptop, `./desktop_sim.sh --example walker --view` builds this image, waits for Start, and streams live poses from the running container. The same `--view` path works for `--image NAME` or one archive in `containers/upload`. The host needs Docker Desktop, `colcon` is not required on the laptop, and `.venv-policy-safety` is used for the viewer.
 
 The generated directories are `.cache/sim_examples/<name>/container` and `.cache/sim_examples/<name>/environment`. The container context includes only controller code, its model, and the ROS message package. The environment is loaded by the host MuJoCo process. The image is tagged `g1-sim-example-<name>:local`.
 

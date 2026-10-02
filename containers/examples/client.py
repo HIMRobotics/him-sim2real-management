@@ -60,13 +60,19 @@ class PolicyNode(Node):
 
 
 def main():
-    if os.environ.get("G1_SIM_NETNS") != "1" or {
-        name for _, name in socket.if_nameindex()
-    } != {"lo"}:
+    extra = [
+        name
+        for _, name in socket.if_nameindex()
+        if name != "lo" and name.startswith(("eth", "en", "wl"))
+    ]
+    if os.environ.get("G1_SIM_NETNS") != "1" or extra:
         raise RuntimeError(
-            "example container requires the loopback-only simulator network"
+            "example container requires the isolated simulator network without eth0"
         )
-    policy = ExamplePolicy(os.environ["G1_SIM_EXAMPLE"], "/example/project")
+    name = os.environ.get("G1_SIM_EXAMPLE") or (
+        "balance" if os.path.isfile("/example/project/balance.onnx") else "walker"
+    )
+    policy = ExamplePolicy(name, "/example/project")
     rclpy.init()
     node = PolicyNode(policy)
     try:

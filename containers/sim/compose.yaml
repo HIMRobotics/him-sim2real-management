@@ -1,0 +1,62 @@
+name: g1-desktop-sim
+
+# Loopback-only ROS graph for Mac/Windows. The net service owns a stack with
+# no eth0. sim and submission share that stack. The host viewer stays outside
+# this network and reads containers/sim/output.
+
+services:
+  net:
+    image: ${G1_SIM_NET_IMAGE:-ros:foxy-ros-base}
+    command: ["sleep", "infinity"]
+    network_mode: none
+    init: true
+
+  sim:
+    build:
+      context: ../..
+      dockerfile: containers/sim/Dockerfile
+    image: g1-desktop-sim:local
+    network_mode: "service:net"
+    depends_on:
+      - net
+    working_dir: /workspace
+    volumes:
+      - ../..:/workspace
+      - ${G1_SIM_OUTPUT:-./output}:/output
+    environment:
+      G1_SIM_NETNS: "1"
+      G1_SIM_POSE: ${G1_SIM_POSE:-standing}
+      G1_SIM_SCENE: ${G1_SIM_SCENE:-}
+      G1_SIM_SAFETY_CHECKS: ${G1_SIM_SAFETY_CHECKS:-1}
+      G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
+      G1_SIM_SECONDS: ${G1_SIM_SECONDS:-10}
+      G1_SIM_REPORT: /output/report.json
+      G1_SIM_READY: /output/ready
+      G1_SIM_TRACE: /output/trace.npz
+      G1_SIM_LIVE: ${G1_SIM_LIVE:-}
+      G1_SIM_PYTHON: /opt/plant/bin/python
+      ROBOT_INTERFACE: lo
+      ROBOT_DOMAIN: "0"
+      ROS_DOMAIN_ID: "97"
+      ROS_LOCALHOST_ONLY: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTRTPS_DEFAULT_PROFILES_FILE: /workspace/containers/sim/fastdds.xml
+      G1_SIM_STARTUP: "30"
+
+  submission:
+    image: ${G1_IMAGE:-submission:local}
+    profiles: ["submission"]
+    network_mode: "service:net"
+    depends_on:
+      - sim
+    volumes:
+      - ./fastdds.xml:/fastdds.xml:ro
+    environment:
+      G1_SIM_NETNS: "1"
+      G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
+      ROBOT_INTERFACE: lo
+      ROBOT_DOMAIN: "0"
+      ROS_DOMAIN_ID: "97"
+      ROS_LOCALHOST_ONLY: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTRTPS_DEFAULT_PROFILES_FILE: /fastdds.xml

@@ -23,6 +23,18 @@ def copy_file(source, target):
     return str(target)
 
 
+def cap_onnx_ir(path, max_ir=8):
+    """Foxy example images use Python 3.8 + onnxruntime 1.16 (max IR 9)."""
+    import onnx
+
+    path = Path(path)
+    model = onnx.load(str(path), load_external_data=False)
+    if model.ir_version <= max_ir:
+        return
+    model.ir_version = max_ir
+    onnx.save(model, str(path))
+
+
 def prepare(name, destination=None):
     """Copy only the files needed by this example, without running Docker."""
     if name not in ("stairs", "walker", "balance"):
@@ -43,9 +55,17 @@ def prepare(name, destination=None):
         copy_file(model, project / "balance.onnx")
         defaults = DEFAULT_JOINT_POSITIONS.tolist()
     else:
+        spec = next(
+            (
+                name
+                for name in ("policy.yaml", "walker.yaml")
+                if (ROOT / "examples" / name).is_file()
+            ),
+            "policy.yaml",
+        )
         missing = [
             filename
-            for filename in ("walker.onnx", "walker.onnx.data", "policy.yaml")
+            for filename in ("walker.onnx", "walker.onnx.data", spec)
             if not (ROOT / "examples" / filename).is_file()
         ]
         if missing:
@@ -53,8 +73,10 @@ def prepare(name, destination=None):
                 "examples/ is the balance submission, not the walker bundle. Missing "
                 + ", ".join(missing)
             )
-        for filename in ("walker.onnx", "walker.onnx.data", "policy.yaml"):
-            copy_file(ROOT / "examples" / filename, project / filename)
+        copy_file(ROOT / "examples" / "walker.onnx", project / "walker.onnx")
+        copy_file(ROOT / "examples" / "walker.onnx.data", project / "walker.onnx.data")
+        copy_file(ROOT / "examples" / spec, project / "policy.yaml")
+        cap_onnx_ir(project / "walker.onnx")
         cfg = yaml.safe_load((project / "policy.yaml").read_text())
         defaults = [j["default_position"] for j in cfg["joints"]]
     env = root / "environment"

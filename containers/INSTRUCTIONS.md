@@ -93,7 +93,7 @@ Ctrl+C stops it. `./setup.sh stop` removes it. The safety service keeps running.
 
 ## MuJoCo
 
-`./sim.sh` loads the same archive and runs it against a simulated G1 on the robot's Linux host. Mac and Windows will use `desktop_sim.sh` at the repo root. That launcher is not in the repo yet. Use this before `./setup.sh`, and for the safety check. It does not use `eth0` and does not stop `g1-safety-stops`. The runner, the report, and the replay controls are in [SIM_RUN.md](SIM_RUN.md).
+`./sim.sh` loads the same archive and runs it against a simulated G1 on the robot's Linux host. Mac and Windows use `desktop_sim.sh` at the repo root, with the same flags. Host modes (`--local`, `--self-test`, `--circle`, `--battery`, `replay`) run MuJoCo without Docker. The ROS submission path uses `containers/sim/Dockerfile` and `compose.yaml`. Use this before `./setup.sh`, and for the safety check. It does not use `eth0` and does not stop `g1-safety-stops`. The runner, the report, and the replay controls are in [SIM_RUN.md](SIM_RUN.md).
 
 ```bash
 ./sim.sh --self-test
