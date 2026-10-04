@@ -11,20 +11,16 @@ Validated on the development ARM64 host with real ONNX inference and MuJoCo, usi
 
 The unchecked stair run demonstrates stair climbing and an upright finish. It did **not** satisfy the stricter no-platform-contact airborne-gap condition, so `course_success` is false. Safety thresholds were not relaxed to obtain a pass.
 
-Regression tests run both real models, verify the stair and balance outcomes, confirm enabled checks reject their commands, export the recorded environment for browser replay, and load the prepared image context independently of repository imports. The balance test skips only when its separately supplied weights are unavailable.
+Regression tests run both real models, verify the stair and balance outcomes, confirm enabled checks reject their commands, export the recorded environment for browser replay, and load the prepared image context independently of repository imports. Both model bundles are committed and required by the example tests.
 
-Correctness validation on October 4, 2026 completed with 119 tests passing and
-six subtests across the simulator and policy-screening suites, with no skips.
-The added counterfactual-summary regression passed separately, for 120 tests in
-total. Ruff checks on changed Python files, shell syntax checks, and workflow
-YAML parsing passed. The separately supplied balance weights were available on
-this host.
+Validation after the example-folder cleanup on October 4, 2026 completed with
+120 tests passing and six subtests across the simulator and policy-screening
+suites, with no skips. Ruff checks on changed Python files, shell syntax checks, and workflow
+YAML parsing passed. Both walker and balance weights were available on this host.
 
 The GitHub Actions simulation job installs the screening package and runs both
 suites on Python 3.12. A clean checkout includes the walker bundle, so missing
-walker files now fail instead of silently skipping screening coverage. The
-GR00T balance rollout remains optional in CI because its weights are not
-committed. The hosted CI job has not yet been run for this change.
+walker files now fail instead of silently skipping screening coverage. The GR00T balance rollout also uses its committed model bundle. The hosted CI job has not yet been run for this change.
 
 Direct circle runs report `completed` and `control_path: direct`, with explicit
 per-check flags. Replay labels submission checks as bypassed even when opened

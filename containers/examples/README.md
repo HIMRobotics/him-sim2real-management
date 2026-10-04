@@ -31,7 +31,7 @@ From the repository root. On a Mac or Windows laptop use `./desktop_sim.sh` with
 
 Each output directory contains `report.json` and `trace.npz`. Named output directories preserve both recordings. Exit code 0 means a checked run passed or an unchecked run completed, code 1 is a safety violation, and code 2 is an execution error or missing commands. A completed unchecked run is not necessarily a successful task.
 
-The balance weights are already cached on the development host at `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx`. On another host, set `HIM_BALANCE_ONNX` to your copy. They are not downloaded or committed by this example. `--example stairs` and `--example walker` use the committed `examples/walker.onnx`, `walker.onnx.data`, and `walker.yaml`. The generated container context names its policy specification `policy.yaml`.
+The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx`. Set `HIM_BALANCE_ONNX` to select another copy. `--example stairs` and `--example walker` use the committed `examples/policies/walker/walker.onnx`, `walker.onnx.data`, and `walker.yaml`. The generated container context names its policy specification `policy.yaml`.
 
 ## View a result
 
@@ -62,7 +62,7 @@ Drop `--local`. The script prompts for sudo, prepares the example files, builds 
 ./sim.sh replay containers/sim/output/docker-stairs-off/trace.npz
 ```
 
-The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The example Dockerfile pins ONNX Runtime 1.18.1 on ROS 2 Foxy's Python 3.8. That image build remains unverified here. The separate `examples/` submission Dockerfile pins 1.16.3. The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The example Dockerfile pins ONNX Runtime 1.18.1 on ROS 2 Foxy's Python 3.8. That image build remains unverified here. The separate `examples/submissions/walker/` test Dockerfile pins 1.16.3. The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
 
 The generated directories are `.cache/sim_examples/<name>/container` and `.cache/sim_examples/<name>/environment`. The container context includes only controller code, its model, and the ROS message package. The environment is loaded by the host MuJoCo process. The image is tagged `g1-sim-example-<name>:local`.
 
@@ -96,4 +96,4 @@ Add `--scene path/to/scene.xml` to any example command to override its prepared 
 
 `report.json` records the safety outcome and independent `motion` measurements. A fall after a safety rejection reflects the subsequent hold or damping response. It is not evidence that the rejected policy continued controlling the robot. For the original stair course, `climbed_stairs` requires foot contact on at least two treads, standing on the top landing, and no fall. `course_success` additionally requires an airborne gap crossing and an upright finish on the finish pad. The stricter gap condition requires no foot contact with any course platform while over the gap.
 
-The restored stair geometry and scripted controller come from this repository's `examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`. The neural model provenance is in [examples/README.md](../../examples/README.md). The GR00T adapter is shared with `robot_safety/balance_policy.py`. Current measured results and remaining integration checks are in [VALIDATION.md](VALIDATION.md).
+The restored stair geometry and scripted controller come from this repository's `examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`. The retained model history is in [the walker bundle README](../../examples/policies/walker/README.md). The GR00T adapter is shared with `robot_safety/balance_policy.py`. Current measured results and remaining integration checks are in [VALIDATION.md](VALIDATION.md).

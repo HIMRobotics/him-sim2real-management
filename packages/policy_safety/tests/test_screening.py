@@ -120,7 +120,7 @@ def test_sample_neural_path_and_embedded_normalization(bundle):
     adapter = G1Walker(bundle / "walker.onnx", sim.robot)
     policy_yaml = (
         Path(__file__).resolve().parents[3]
-        / "examples/walker.yaml"
+        / "examples/policies/walker/walker.yaml"
     )
     config_joints = yaml.safe_load(policy_yaml.read_text())["joints"]
     q, dq, quat, vel = (

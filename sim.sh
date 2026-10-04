@@ -36,9 +36,9 @@ ROS path needs Linux network namespaces.
 --local            Run an example directly in MuJoCo without Docker/ROS/sudo.
 --output DIR       Store this run separately for comparison and replay.
 --circle           Walk with the cached G1 walker. Command file defaults to
-                   examples/circle.yaml. No submission.
---command FILE     Walker command file. examples/stand.yaml stays put.
-                   examples/circle.yaml is the loop. Same runner as --circle.
+                   examples/commands/walker/circle.yaml. No submission.
+--command FILE     Walker command file. examples/commands/walker/stand.yaml stays put.
+                   examples/commands/walker/circle.yaml is the loop. Same runner as --circle.
 --battery          Flat-ground battery: every pose, then 10/50/150 N pelvis
                    pushes. Writes containers/sim/output/battery/report.json.
                    With --circle, the cached walker gaits instead of a hold.
@@ -263,7 +263,7 @@ if [[ "$self_test" -eq 1 && "$seconds_set" -eq 0 ]]; then
   seconds=1
 fi
 if [[ "$circle" -eq 1 && -z "$command_file" ]]; then
-  command_file="$repo_dir/examples/circle.yaml"
+  command_file="$repo_dir/examples/commands/walker/circle.yaml"
 fi
 if [[ -n "$command_file" && ! -f "$command_file" ]]; then
   echo "Walker command file is not readable: $command_file" >&2
@@ -404,7 +404,7 @@ fi
 
 if [[ -n "$example" ]]; then
   python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
-  prepared="$(as_owner env "HIM_BALANCE_ONNX=${HIM_BALANCE_ONNX:-$repo_dir/.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx}" "$python" "$repo_dir/containers/examples/prepare.py" "$example")"
+  prepared="$(as_owner env "HIM_BALANCE_ONNX=${HIM_BALANCE_ONNX:-$repo_dir/examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx}" "$python" "$repo_dir/containers/examples/prepare.py" "$example")"
   [[ -n "$scene" ]] || scene="$prepared/environment/scene.xml"
   image="g1-sim-example-$example:local"
   "$runtime" build -t "$image" "$prepared/container"

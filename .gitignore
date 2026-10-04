@@ -32,7 +32,7 @@ packages/*/dist/
 
 tmp
 
-# Built example image. Rebuild with examples/build.sh.
+# Legacy build artifacts. New example builds use .cache/walker_submission/.
 examples/submission.tar
 examples/.build/
 

@@ -53,11 +53,10 @@ class ExampleTests(unittest.TestCase):
         model = Path(
             os.environ.get(
                 "HIM_BALANCE_ONNX",
-                str(ROOT / ".cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx"),
+                str(ROOT / "examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"),
             )
         )
-        if not model.is_file():
-            self.skipTest("balance weights are not installed")
+        self.assertTrue(model.is_file(), "balance weights are missing")
         with tempfile.TemporaryDirectory() as tmp:
             off = run("balance", Path(tmp) / "off", 10, safety_checks=False)
             self.assertEqual(off["status"], "completed")

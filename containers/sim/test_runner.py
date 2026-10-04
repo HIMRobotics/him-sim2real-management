@@ -137,7 +137,7 @@ class RunnerTest(unittest.TestCase):
         self.assertFalse(report["hardware_authorization"])
 
     def test_circle_walks_without_falling(self):
-        model = ROOT / "examples/walker.onnx"
+        model = ROOT / "examples/policies/walker/walker.onnx"
         if not model.is_file():
             self.skipTest("cached walker weights are not on this machine")
         runner = Runner()
@@ -394,13 +394,13 @@ class RunnerTest(unittest.TestCase):
     def test_example_command_files(self):
         from circle import load_command
 
-        stand = load_command(ROOT / "examples/stand.yaml")
-        circle = load_command(ROOT / "examples/circle.yaml")
+        stand = load_command(ROOT / "examples/commands/walker/stand.yaml")
+        circle = load_command(ROOT / "examples/commands/walker/circle.yaml")
         self.assertTrue(np.allclose(stand, [0.0, 0.0, 0.0]))
         self.assertTrue(np.allclose(circle, [0.45, 0.0, 0.9]))
 
     def test_circle_battery_uses_the_walker_gait(self):
-        model = ROOT / "examples/walker.onnx"
+        model = ROOT / "examples/policies/walker/walker.onnx"
         if not model.is_file():
             self.skipTest("cached walker weights are not on this machine")
         from battery import run_case

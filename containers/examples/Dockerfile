@@ -1,3 +1,4 @@
+# Simulation-only clients for sim.sh --example.
 FROM ros:foxy-ros-base
 SHELL ["/bin/bash", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \

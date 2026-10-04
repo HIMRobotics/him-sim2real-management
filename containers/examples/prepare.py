@@ -45,7 +45,7 @@ def prepare(name, destination=None):
         model = Path(
             os.environ.get(
                 "HIM_BALANCE_ONNX",
-                str(ROOT / ".cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx"),
+                str(ROOT / "examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"),
             )
         )
         if not model.is_file():
@@ -55,27 +55,20 @@ def prepare(name, destination=None):
         copy_file(model, project / "balance.onnx")
         defaults = DEFAULT_JOINT_POSITIONS.tolist()
     else:
-        spec = next(
-            (
-                name
-                for name in ("policy.yaml", "walker.yaml")
-                if (ROOT / "examples" / name).is_file()
-            ),
-            "policy.yaml",
-        )
+        bundle = ROOT / "examples/policies/walker"
         missing = [
             filename
             for filename in ("walker.onnx", "walker.onnx.data", "walker.yaml")
-            if not (ROOT / "examples" / filename).is_file()
+            if not (bundle / filename).is_file()
         ]
         if missing:
             raise ValueError(
-                "Walker bundle missing in examples/: "
+                "Walker bundle missing in examples/policies/walker/: "
                 + ", ".join(missing)
             )
         for filename in ("walker.onnx", "walker.onnx.data"):
-            copy_file(ROOT / "examples" / filename, project / filename)
-        copy_file(ROOT / "examples/walker.yaml", project / "policy.yaml")
+            copy_file(bundle / filename, project / filename)
+        copy_file(bundle / "walker.yaml", project / "policy.yaml")
         cfg = yaml.safe_load((project / "policy.yaml").read_text())
         defaults = [j["default_position"] for j in cfg["joints"]]
     env = root / "environment"
