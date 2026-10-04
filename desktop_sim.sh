@@ -298,7 +298,7 @@ if [[ "$self_test" -eq 1 && "$seconds_set" -eq 0 ]]; then
   seconds=1
 fi
 if [[ "$circle" -eq 1 && -z "$command_file" ]]; then
-  command_file="$repo_dir/examples/circle.yaml"
+  command_file="$repo_dir/examples/commands/walker/circle.yaml"
 fi
 if [[ -n "$command_file" && ! -f "$command_file" ]]; then
   echo "Walker command file is not readable: $command_file" >&2

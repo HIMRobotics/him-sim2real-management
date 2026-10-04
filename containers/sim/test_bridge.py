@@ -2,7 +2,9 @@
 
 import importlib.util
 import json
+import subprocess
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -45,23 +47,91 @@ class BridgeTests(unittest.TestCase):
         bridge = load_bridge()
         node = bridge.SimBridge.__new__(bridge.SimBridge)
         node.finished = False
+        node.created = 1.0
         node.run_started = 1.0
         node.seconds = 10.0
         node.accepted = True
         node.circle = False
         node.clock = lambda: 0.04
         node.plant = Mock()
-        node.plant.call.side_effect = [
-            {"ok": True, "reason": None},
-            {"ok": True, "sim_time": 0.02},
-        ]
+        node.plant.call.return_value = {"ok": True, "reason": None, "sim_time": 0.02}
         node.publish_state = Mock()
         node.lowstate = Mock()
         with patch.object(bridge.time, "monotonic", return_value=1.04):
             node.on_control()
         calls = [c.args[0]["op"] for c in node.plant.call.call_args_list]
-        self.assertEqual(calls, ["step", "feedback"])
+        self.assertEqual(calls, ["step"])
+        self.assertTrue(node.plant.call.call_args.args[0]["feedback"])
         self.assertEqual(node.publish_state.call_args.args[0]["sim_time"], 0.02)
+
+    def test_plant_deadline_handles_missing_and_partial_lines(self):
+        bridge = load_bridge()
+        for output in ("", '{"ok":'):
+            with self.subTest(output=output):
+                proc = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        (
+                            "import sys, time; sys.stdin.readline(); "
+                            f"sys.stdout.write({output!r}); sys.stdout.flush(); time.sleep(10)"
+                        ),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    bufsize=0,
+                )
+                with patch.object(bridge.subprocess, "Popen", return_value=proc):
+                    client = bridge.PlantClient(sys.executable, timeout=0.2)
+                try:
+                    started = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        client.call({"op": "arm"})
+                    self.assertLess(time.monotonic() - started, 2)
+                    with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                        client.call({"op": "arm"})
+                finally:
+                    client.close()
+                self.assertIsNotNone(proc.poll())
+
+    def test_plant_client_exchanges_complete_json_lines(self):
+        bridge = load_bridge()
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                ("import sys; [print(line.strip(), flush=True) for line in sys.stdin]"),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            bufsize=0,
+        )
+        with patch.object(bridge.subprocess, "Popen", return_value=proc):
+            client = bridge.PlantClient(sys.executable, timeout=2)
+        try:
+            for request in ({"op": "arm"}, {"op": "command", "payload": "x" * 100000}):
+                self.assertEqual(client.call(request), request)
+        finally:
+            client.close()
+
+    def test_transport_failure_writes_error_without_another_plant_call(self):
+        import tempfile
+
+        bridge = load_bridge()
+        node = bridge.SimBridge.__new__(bridge.SimBridge)
+        node.finished = False
+        node.plant = Mock()
+        node.latch = Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            node.report_path = Path(tmp) / "report.json"
+            node.finish(error=TimeoutError("plant response timed out"))
+            report = json.loads(node.report_path.read_text())
+        node.plant.call.assert_not_called()
+        node.latch.assert_called_once_with("plant_error")
+        self.assertEqual(report["status"], "error")
+        self.assertEqual(node.exit_code, 2)
 
     def test_extended_state_is_published_with_command_ids(self):
         bridge = load_bridge()

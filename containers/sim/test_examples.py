@@ -28,6 +28,17 @@ from view import export_replay
 
 
 class ExampleTests(unittest.TestCase):
+    def test_walker_makes_forward_progress_with_checks_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run("walker", tmp, 10, safety_checks=False)
+        self.assertEqual(report["status"], "completed")
+        motion = report["motion"]
+        self.assertGreater(
+            motion["final_position"][0] - motion["start_position"][0], 3.0
+        )
+        self.assertFalse(motion["fell"])
+        self.assertTrue(motion["upright_at_end"])
+
     def test_stairs_real_policy_climbs_with_checks_disabled_and_is_rejected_when_enabled(
         self,
     ):
@@ -53,7 +64,10 @@ class ExampleTests(unittest.TestCase):
         model = Path(
             os.environ.get(
                 "HIM_BALANCE_ONNX",
-                str(ROOT / "examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"),
+                str(
+                    ROOT
+                    / "examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"
+                ),
             )
         )
         self.assertTrue(model.is_file(), "balance weights are missing")
@@ -96,7 +110,7 @@ class ExampleTests(unittest.TestCase):
             prepared_model = onnx.load(
                 context / "project/walker.onnx", load_external_data=False
             )
-            self.assertLessEqual(prepared_model.ir_version, 8)
+            self.assertLessEqual(prepared_model.ir_version, 9)
             env = {**os.environ, "PYTHONPATH": str(context)}
             proc = subprocess.run(
                 [
@@ -113,6 +127,17 @@ class ExampleTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("(29,)", proc.stdout)
+
+    def test_local_preparation_skips_container_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = prepare("walker", tmp, container=False)
+            self.assertFalse((project / "container/Dockerfile").exists())
+            self.assertFalse((project / "container/interfaces").exists())
+            self.assertFalse((project / "container/policy_safety").exists())
+            policy = ExamplePolicy("walker", project / "container/project")
+            runner = Runner(scene=project / "environment/scene.xml")
+            state = runner.feedback(0.0)
+            self.assertIsNone(runner.command(policy.command(state), 0.0))
 
     def test_local_cli_without_docker_and_failed_run_does_not_replay_old_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -201,6 +226,31 @@ class ExampleTests(unittest.TestCase):
             report = json.loads((output / "report.json").read_text())
             self.assertEqual(report["execution"], "local")
             self.assertEqual(report["policy"], "walker")
+            circle = Path(tmp) / "circle"
+            proc = subprocess.run(
+                [
+                    str(ROOT / "desktop_sim.sh"),
+                    "--circle",
+                    "--seconds",
+                    "0.04",
+                    "--output",
+                    str(circle),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            report = json.loads((circle / "report.json").read_text())
+            self.assertEqual(report["control_path"], "direct")
+            self.assertEqual(report["status"], "completed")
+            self.assertFalse(report["checks"]["command_protocol"])
+            for directory in (hold, output, circle):
+                with np.load(directory / "trace.npz") as trace:
+                    self.assertGreaterEqual(len(trace["time"]), 3)
+                    self.assertGreater(trace["time"][-1], 0)
 
     def test_simulation_state_has_required_frames_and_bounds(self):
         runner = Runner()

@@ -37,6 +37,8 @@ class MotionMetrics:
         self.min_height = min(self.min_height, z)
         self.max_x = max(self.max_x, x)
         self.fell |= plant.pose == "standing" and (z < 0.28 or upright < 0.3)
+        if not self.platforms:
+            return
         touching = set()
         for contact in plant.data.contact:
             first, second = map(int, contact.geom)

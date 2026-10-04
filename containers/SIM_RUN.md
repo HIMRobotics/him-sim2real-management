@@ -213,3 +213,15 @@ Replay draws mesh geometry, planes, boxes, spheres, ellipsoids, cylinders, capsu
 Ctrl+C stops the page. `./sim.sh --view` opens the page before the run. Press Start, and playback begins at the first frame while the run is going. The camera stays where you leave it. A blue line on the floor is the pelvis path. `./sim.sh --seconds 10 --view --circle` is that page with the cached walker and no submission archive.
 
 `./sim.sh replay path/to/trace.npz` plays a different recording. The page is rebuilt into `containers/sim/output/view/`.
+
+The ROS bridge keeps its Foxy interpreter separate from the MuJoCo process.
+Each active control tick steps physics and returns feedback in one request.
+Pipe requests have a ten-second deadline, including partial responses. A failed
+transport ends the run as `error` and the plant process is cleaned up.
+
+Headless battery cases retain metrics without storing pose history. Live battery
+viewing still streams poses. Local example and Docker runs continue recording
+replay traces. When constructing `Runner` directly, pass `record_trace=True` or
+set `G1_SIM_TRACE` before construction to retain poses for a later report.
+Local examples prepare model and scene assets without staging Docker client
+sources or ROS interfaces.

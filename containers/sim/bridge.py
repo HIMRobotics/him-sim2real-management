@@ -6,6 +6,7 @@ the system ROS 2 Foxy interpreter. They talk over stdin.
 
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -30,7 +31,9 @@ ARM = "/safety/checker/arm"
 
 
 class PlantClient:
-    def __init__(self, python):
+    def __init__(self, python, timeout=10.0):
+        self.timeout = timeout
+        self.failed = False
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(
             [
@@ -45,20 +48,43 @@ class PlantClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=sys.stderr,
-            text=True,
+            bufsize=0,
             cwd=str(REPO),
             env=env,
         )
 
+        os.set_blocking(self.proc.stdin.fileno(), False)
+        os.set_blocking(self.proc.stdout.fileno(), False)
+
     def call(self, request):
-        if self.proc.poll() is not None:
-            raise RuntimeError("mujoco plant exited")
-        self.proc.stdin.write(json.dumps(request) + "\n")
-        self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        if not line:
-            raise RuntimeError("mujoco plant closed its output")
-        return json.loads(line)
+        if self.failed or self.proc.poll() is not None:
+            raise RuntimeError("mujoco plant unavailable")
+        deadline = time.monotonic() + self.timeout
+        pending = (json.dumps(request) + "\n").encode()
+        response = bytearray()
+        try:
+            while pending or b"\n" not in response:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("mujoco plant response timed out")
+                readable, writable, _ = select.select(
+                    [] if pending else [self.proc.stdout],
+                    [self.proc.stdin] if pending else [],
+                    [],
+                    remaining,
+                )
+                if writable:
+                    pending = pending[os.write(self.proc.stdin.fileno(), pending) :]
+                if readable:
+                    chunk = os.read(self.proc.stdout.fileno(), 65536)
+                    if not chunk:
+                        raise RuntimeError("mujoco plant closed its output")
+                    response.extend(chunk)
+            return json.loads(response)
+        except (OSError, ValueError, RuntimeError):
+            # Never reuse a stream after a partial or late response.
+            self.failed = True
+            raise
 
     def close(self):
         if self.proc.poll() is None:
@@ -67,6 +93,9 @@ class PlantClient:
                 self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait()
+        self.proc.stdin.close()
+        self.proc.stdout.close()
 
 
 class SimBridge(Node):
@@ -147,28 +176,23 @@ class SimBridge(Node):
         elif time.monotonic() - self.run_started >= self.seconds:
             self.finish()
             return
-        if self.circle:
-            stepped = self.plant.call({"op": "circle", "time": self.clock()})
-            if stepped.get("reason"):
-                self.latch(stepped["reason"])
-            state = self.plant.call({"op": "feedback", "time": self.clock()})
-            if not state.get("ok"):
-                self.latch(state.get("reason") or "plant_error")
-                self.finish()
-                return
-            self.publish_state(state)
-            return
-        if self.accepted:
-            stepped = self.plant.call({"op": "step", "time": self.clock()})
-            if stepped.get("reason"):
-                self.latch(stepped["reason"])
-        state = self.plant.call({"op": "feedback", "time": self.clock()})
+        request = {"op": "feedback", "time": self.clock()}
+        if self.circle or self.accepted:
+            request.update(
+                op="circle" if self.circle else "step",
+                feedback=True,
+                clock_origin=self.created,
+            )
+        state = self.plant.call(request)
+        if state.get("reason"):
+            self.latch(state["reason"])
         if not state.get("ok"):
             self.latch(state.get("reason") or "plant_error")
             self.finish()
             return
         self.publish_state(state)
-        self.lowstate.publish(state)
+        if not self.circle:
+            self.lowstate.publish(state)
 
     def publish_state(self, state):
         message = RobotFeedback()
@@ -197,13 +221,23 @@ class SimBridge(Node):
         message.reason = self.abort_reason
         self.abort_pub.publish(message)
 
-    def finish(self):
+    def finish(self, error=None):
         if self.finished:
             return
+        if error is None:
+            report = self.plant.call(
+                {"op": "report", "lowstate": bool(getattr(self.lowstate, "ok", False))}
+            )
+        else:
+            self.latch("plant_error")
+            report = {
+                "version": 1,
+                "status": "error",
+                "reason": "plant_error",
+                "detail": str(error),
+                "hardware_authorization": False,
+            }
         self.finished = True
-        report = self.plant.call(
-            {"op": "report", "lowstate": bool(getattr(self.lowstate, "ok", False))}
-        )
         report.update(
             execution="docker_ros", policy=os.environ.get("G1_SIM_EXAMPLE") or None
         )
@@ -219,14 +253,6 @@ class SimBridge(Node):
         )
 
 
-def _routable_interfaces():
-    return sorted(
-        name
-        for _, name in socket.if_nameindex()
-        if name != "lo" and name.startswith(("eth", "en", "wl"))
-    )
-
-
 def require_isolated_netns():
     if os.environ.get("G1_SIM_NETNS") != "1":
         print(
@@ -234,11 +260,9 @@ def require_isolated_netns():
             file=sys.stderr,
         )
         return False
-    extra = _routable_interfaces()
-    if extra:
+    if {name for _, name in socket.if_nameindex()} != {"lo"}:
         print(
-            "Refusing to start: routable interfaces are visible: " + ", ".join(extra),
-            file=sys.stderr,
+            "Refusing to start: the sim network must contain only lo.", file=sys.stderr
         )
         return False
     return True
@@ -260,22 +284,29 @@ def main():
         os.environ.get("ROBOT_DOMAIN", "0"), os.environ.get("ROBOT_INTERFACE", "lo")
     )
     plant = PlantClient(python)
-    armed = plant.call({"op": "arm"})
-    if not armed.get("ok"):
-        plant.close()
-        print(armed, file=sys.stderr)
-        return 2
-    rclpy.init()
-    node = SimBridge(plant, seconds, report, lowstate)
-    ready.parent.mkdir(parents=True, exist_ok=True)
-    ready.write_text("ready\n")
+    node = None
     try:
+        armed = plant.call({"op": "arm"})
+        if not armed.get("ok"):
+            print(armed, file=sys.stderr)
+            return 2
+        rclpy.init()
+        node = SimBridge(plant, seconds, report, lowstate)
+        ready.parent.mkdir(parents=True, exist_ok=True)
+        ready.write_text("ready\n")
         while rclpy.ok() and not node.finished:
             rclpy.spin_once(node, timeout_sec=0.05)
         code = node.exit_code
+    except (OSError, ValueError, RuntimeError) as exc:
+        if node is not None:
+            node.finish(error=exc)
+        else:
+            print(str(exc), file=sys.stderr)
+        code = 2
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+            rclpy.shutdown()
         plant.close()
     return code
 

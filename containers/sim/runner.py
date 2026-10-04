@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def _finite_vector(values):
 class Runner:
     """One simulated session. A failed check latches for the rest of the run."""
 
-    def __init__(self, pose=None, scene=None, safety_checks=True):
+    def __init__(self, pose=None, scene=None, safety_checks=True, *, record_trace=None):
         pose = pose or os.environ.get("G1_SIM_POSE", "standing")
         if pose not in POSES:
             raise ValueError("unknown pose")
@@ -68,6 +69,12 @@ class Runner:
         self.base_over = 0
         self.trace_qpos = []
         self.trace_time = []
+        self.record_trace = (
+            bool(os.environ.get("G1_SIM_TRACE"))
+            if record_trace is None
+            else record_trace
+        )
+        self.live_path = os.environ.get("G1_SIM_LIVE")
         self.metrics = MotionMetrics(self.plant)
         self._live = None
         self._circle = None
@@ -220,9 +227,10 @@ class Runner:
         }
 
     def _remember(self):
-        self.trace_qpos.append(self.plant.data.qpos.copy())
-        self.trace_time.append(self.sim_time)
-        path = os.environ.get("G1_SIM_LIVE")
+        if self.record_trace:
+            self.trace_qpos.append(self.plant.data.qpos.copy())
+            self.trace_time.append(self.sim_time)
+        path = self.live_path
         if not path:
             return
         if self._live is None:
@@ -282,7 +290,7 @@ class Runner:
         if self._live is not None:
             self._live.close()
             self._live = None
-        path = os.environ.get("G1_SIM_LIVE")
+        path = self.live_path
         if path:
             Path(path).unlink(missing_ok=True)
         self.trace_qpos = []
@@ -299,15 +307,23 @@ class Runner:
         if op == "command":
             reason = self.command(request["frame"], request["time"])
             return {"ok": reason is None, "reason": reason, "detail": self.detail}
-        if op == "circle":
-            result = self.circle(request["time"])
-            result["ok"] = result.get("reason") != "plant_error"
+        if op in ("circle", "step"):
+            started = time.monotonic()
+            result = (
+                self.circle(request["time"])
+                if op == "circle"
+                else self.step(request["time"])
+            )
+            result["ok"] = result.get("reason") not in (
+                "plant_error",
+                "nonfinite_simulation",
+            )
             result["detail"] = self.detail
-            return result
-        if op == "step":
-            result = self.step(request["time"])
-            result["ok"] = True
-            result["detail"] = self.detail
+            if request.get("feedback") and result["ok"]:
+                # Both processes share the host monotonic clock.
+                origin = request.get("clock_origin", started - request["time"])
+                issued = time.monotonic() - origin
+                result.update(self.feedback(issued))
             return result
         if op == "report":
             return self.report(request.get("lowstate", False))

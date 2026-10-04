@@ -23,19 +23,7 @@ def copy_file(source, target):
     return str(target)
 
 
-def cap_onnx_ir(path, max_ir=8):
-    """Foxy example images use Python 3.8 + onnxruntime 1.16 (max IR 9)."""
-    import onnx
-
-    path = Path(path)
-    model = onnx.load(str(path), load_external_data=False)
-    if model.ir_version <= max_ir:
-        return
-    model.ir_version = max_ir
-    onnx.save(model, str(path))
-
-
-def prepare(name, destination=None):
+def prepare(name, destination=None, *, container=True):
     """Copy only the files needed by this example, without running Docker."""
     if name not in ("stairs", "walker", "balance"):
         raise ValueError("unknown example")
@@ -98,6 +86,8 @@ def prepare(name, destination=None):
   <option gravity="0 0 -9.81" timestep="0.002"/>
   <worldbody><geom name="safety_floor" type="plane" size="0 0 0.05" friction="1.15"/></worldbody>
 </mujoco>\n""")
+    if not container:
+        return root
     context = root / "container"
     for filename in ("controllers.py", "client.py", "Dockerfile", "entrypoint.sh"):
         copy_file(ROOT / "containers/examples" / filename, context / filename)

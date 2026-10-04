@@ -11,6 +11,7 @@ ros_dir="$repo_dir/containers/sim/.ros"
 net_name=g1-sim-net
 user_name=g1-sim-user
 runtime="${CONTAINER_RUNTIME:-docker}"
+python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
 original_args=("$@")
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -44,15 +45,15 @@ ROS path needs Linux network namespaces.
                    With --circle, the cached walker gaits instead of a hold.
 --push NAME        One battery case: none, small, medium, or heavy.
                    With --view, open the page and press Start to watch it.
---view             Open http://127.0.0.1:8765 first. Press Start to run the
-                   policy and watch the render live. Ctrl+C closes the page.
+--view             Open http://127.0.0.1:8765. Docker and battery runs wait
+                   for Start. --local runs first, then opens the replay.
+                   Ctrl+C closes the viewer.
 HELP
   exit 0
 fi
 
 if [[ "${1:-}" == "replay" ]]; then
   trace="${2:-$out_dir/trace.npz}"
-  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
   if [[ ! -f "$trace" ]]; then
     echo "Trace not found: $trace" >&2
     exit 2
@@ -112,14 +113,13 @@ kill_tree() {
 }
 
 stop_sim() {
-  if [[ -f "$out_dir/bridge.pid" ]]; then
-    kill_tree "$(cat "$out_dir/bridge.pid")"
-    rm -f "$out_dir/bridge.pid"
-  fi
-  if [[ -f "$out_dir/hold.pid" ]]; then
-    kill_tree "$(cat "$out_dir/hold.pid")"
-    rm -f "$out_dir/hold.pid"
-  fi
+  local name
+  for name in bridge hold; do
+    if [[ -f "$out_dir/$name.pid" ]]; then
+      kill_tree "$(cat "$out_dir/$name.pid")"
+      rm -f "$out_dir/$name.pid"
+    fi
+  done
   "$runtime" rm -f "$user_name" "$net_name" >/dev/null 2>&1 || true
 }
 
@@ -136,7 +136,6 @@ start_live_view() {
   mkdir -p "$out_dir"
   chown "$owner" "$out_dir" 2>/dev/null || true
   rm -f "$out_dir/view/start" "$out_dir/live.jsonl"
-  local python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
   local scene_args=()
   [[ -n "$scene" ]] && scene_args=(--scene "$scene")
   as_owner "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose" "${scene_args[@]}"
@@ -287,7 +286,6 @@ if [[ -n "$scene" ]]; then
 fi
 
 if [[ "$battery" -eq 1 ]]; then
-  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
   battery_args=(--output "$out_dir/battery" --seconds "$seconds")
   [[ "$safety_checks" -eq 0 ]] && battery_args+=(--no-safety-checks)
   if [[ -n "$push" || "$pose_set" -eq 1 ]]; then
@@ -307,7 +305,9 @@ if [[ "$battery" -eq 1 ]]; then
       --pose "$pose" \
       >"$out_dir/live-view.log" 2>&1 &
     live_pid=$!
-    trap 'kill_tree "$live_pid"' EXIT INT TERM
+    trap 'kill_tree "$live_pid"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     echo "Open http://127.0.0.1:8765"
     echo "Press Start to run ${pose} / ${push}."
     wait_for_start
@@ -323,7 +323,6 @@ if [[ "$battery" -eq 1 ]]; then
 fi
 
 if [[ "$local_mode" -eq 1 ]]; then
-  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
   local_args=(--example "$example" --seconds "$seconds")
   [[ "$safety_checks" -eq 0 ]] && local_args+=(--no-safety-checks)
   [[ -n "$scene" ]] && local_args+=(--scene "$scene")
@@ -335,7 +334,7 @@ if [[ "$local_mode" -eq 1 ]]; then
   fi
   status=0
   "$python" "$repo_dir/containers/sim/local.py" "${local_args[@]}" --pose "$pose" --output "$out_dir" || status=$?
-  echo "Replay: ./sim.sh replay $out_dir/trace.npz"
+  [[ ! -f "$out_dir/trace.npz" ]] || echo "Replay: ./sim.sh replay $out_dir/trace.npz"
   if [[ "$view" -eq 1 && -f "$out_dir/trace.npz" ]]; then
     "$python" "$repo_dir/containers/sim/view.py" "$out_dir/trace.npz" "$out_dir/view"
     echo "Open http://127.0.0.1:8765"
@@ -403,7 +402,6 @@ if [[ ! -f "$ros_dir/install/setup.bash" ]]; then
 fi
 
 if [[ -n "$example" ]]; then
-  python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
   prepared="$(as_owner env "HIM_BALANCE_ONNX=${HIM_BALANCE_ONNX:-$repo_dir/examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx}" "$python" "$repo_dir/containers/examples/prepare.py" "$example")"
   [[ -n "$scene" ]] || scene="$prepared/environment/scene.xml"
   image="g1-sim-example-$example:local"
@@ -509,12 +507,13 @@ run_session() {
   wait "$(cat "$out_dir/bridge.pid")"
   status=$?
   set -e
-  if [[ -f "$out_dir/hold.pid" ]]; then
-    kill_tree "$(cat "$out_dir/hold.pid")"
-  fi
   "$runtime" logs "$user_name" >"$out_dir/policy.log" 2>&1 || true
-  "$runtime" rm -f "$user_name" "$net_name" >/dev/null 2>&1 || true
-  rm -f "$out_dir/bridge.pid" "$out_dir/hold.pid"
+  stop_sim
+
+  if [[ "$status" -eq 2 && "$self_test" -eq 0 && "$circle" -eq 0 ]]; then
+    echo "Policy container log: $out_dir/policy.log" >&2
+    tail -n 60 "$out_dir/policy.log" >&2
+  fi
 
   if [[ -f "$out_dir/report.json" ]]; then
     echo "Report: $out_dir/report.json"
@@ -554,7 +553,6 @@ for pose in "${poses[@]}"; do
   run_session || true
 done
 out_dir="$base_out"
-python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
 set +e
 as_owner "$python" "$repo_dir/containers/sim/summary.py" "$base_out/poses" "$safety_checks" "$scene" "${poses[@]}"
 status=$?

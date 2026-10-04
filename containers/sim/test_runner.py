@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -161,7 +162,7 @@ class RunnerTest(unittest.TestCase):
 
         from view import export_replay, report_summary
 
-        runner = Runner()
+        runner = Runner(record_trace=True)
         runner.circle(0.0)
         with tempfile.TemporaryDirectory() as tmp:
             trace = Path(tmp) / "trace.npz"
@@ -268,8 +269,33 @@ class RunnerTest(unittest.TestCase):
         runner.step(0.01)
         self.assertEqual(runner.report()["status"], "no_command")
 
+    def test_report_only_run_does_not_retain_poses(self):
+        runner = Runner(record_trace=False)
+        runner.circle(0.0)
+        self.assertEqual(runner.trace_qpos, [])
+        self.assertEqual(runner.trace_time, [])
+        report = runner.report()
+        self.assertIsNone(report["trace"])
+        self.assertGreater(report["seconds"], 0)
+        self.assertIn("minimum_pelvis_height", report["motion"])
+
+    def test_combined_step_issues_observation_after_physics(self):
+        runner = Runner(safety_checks=False)
+        before = runner.feedback(1.0)
+        runner.command(hold(runner, before, 0), 1.0)
+        with patch("runner.time.monotonic", side_effect=[10.04, 10.05]):
+            state = runner.handle(
+                {"op": "step", "time": 1.02, "feedback": True, "clock_origin": 9.0}
+            )
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["observation_id"], before["observation_id"] + 1)
+        self.assertAlmostEqual(runner.observations[state["observation_id"]], 1.05)
+        np.testing.assert_array_equal(state["q"], runner.plant.q())
+        self.assertAlmostEqual(runner.sim_time, 0.02)
+        self.assertIsNone(runner.command(hold(runner, state, 1), 1.06))
+
     def test_trace_records_each_step(self):
-        runner = Runner()
+        runner = Runner(record_trace=True)
         self.assertEqual(len(runner.trace_qpos), 1)
         runner.step(0.01)
         self.assertEqual(len(runner.trace_qpos), 2)
@@ -286,6 +312,8 @@ class RunnerTest(unittest.TestCase):
             try:
                 runner = Runner()
                 runner.step(0.01)
+                self.assertEqual(runner.trace_qpos, [])
+                runner.report()
             finally:
                 os.environ.pop("G1_SIM_LIVE", None)
             lines = path.read_text().splitlines()
@@ -300,7 +328,7 @@ class RunnerTest(unittest.TestCase):
 
         from view import export_replay
 
-        runner = Runner()
+        runner = Runner(record_trace=True)
         runner.step(0.01)
         with tempfile.TemporaryDirectory() as tmp:
             trace = Path(tmp) / "trace.npz"

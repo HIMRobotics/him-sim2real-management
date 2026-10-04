@@ -33,4 +33,4 @@ jobs:
         env:
           G1_SIM_PYTHON: ${{ github.workspace }}/.venv-policy-safety/bin/python
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-      - run: bash -n sim.sh setup.sh examples/submissions/walker/build.sh examples/submissions/walker/entrypoint.sh containers/examples/entrypoint.sh
+      - run: bash -n sim.sh desktop_sim.sh containers/sim/desktop_entry.sh setup.sh examples/submissions/walker/build.sh examples/submissions/walker/entrypoint.sh containers/examples/entrypoint.sh

@@ -53,9 +53,10 @@ scene.add(sun);
 const grid = new THREE.GridHelper(8, 16, 0xbbbbbb, 0xdddddd);
 grid.rotation.x = Math.PI / 2;
 scene.add(grid);
-const trailGeom = new THREE.BufferGeometry();
+let trailGeom = new THREE.BufferGeometry();
 const trail = new THREE.Line(trailGeom, new THREE.LineBasicMaterial({ color: 0x1565c0 }));
 scene.add(trail);
+trail.frustumCulled = false;
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 50);
 camera.up.set(0, 0, 1);
 camera.position.set(2.2, -2.2, 1.4);
@@ -113,21 +114,38 @@ function show(index) {
       0, 0, 0, 1
     );
   });
-  const count = frame + 1;
-  const positions = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const point = motion.focus[i];
-    positions[i * 3] = point[0];
-    positions[i * 3 + 1] = point[1];
-    positions[i * 3 + 2] = 0.02;
-  }
-  trailGeom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  trailGeom.setDrawRange(0, frame + 1);
   const playback = mode === "idle" ? "ready" : mode === "live" ? "live" : (paused ? "paused" : "playing");
   hud.textContent = `${motion.summary}\n${playback}  ${motion.time[frame].toFixed(2)} s  frame ${frame + 1} / ${motion.frames}`;
   hud.style.whiteSpace = "pre-line";
 }
+let trailCount = 0;
+function updateTrail() {
+  let attribute = trailGeom.getAttribute("position");
+  if (!attribute || attribute.count < motion.frames) {
+    const capacity = Math.max(motion.frames, attribute ? attribute.count * 2 : 1);
+    const positions = new Float32Array(capacity * 3);
+    if (attribute) positions.set(attribute.array);
+    trailGeom.dispose();
+    trailGeom = new THREE.BufferGeometry();
+    trail.geometry = trailGeom;
+    attribute = new THREE.BufferAttribute(positions, 3);
+    trailGeom.setAttribute("position", attribute);
+  }
+  for (let i = trailCount; i < motion.frames; i++) {
+    attribute.setXYZ(i, motion.focus[i][0], motion.focus[i][1], 0.02);
+  }
+  if (motion.frames > trailCount) {
+    attribute.addUpdateRange(trailCount * 3, (motion.frames - trailCount) * 3);
+    attribute.needsUpdate = true;
+  }
+  trailCount = motion.frames;
+  trailGeom.setDrawRange(0, Math.min(frame + 1, motion.frames));
+}
+updateTrail();
 function remember(frames, replace) {
   if (replace) {
+    trailCount = 0;
     motion.time = [];
     motion.focus = [];
     for (const geom of motion.geoms) geom.poses = [];
@@ -138,6 +156,7 @@ function remember(frames, replace) {
     item.poses.forEach((pose, index) => motion.geoms[index].poses.push(pose));
   }
   motion.frames = motion.time.length;
+  updateTrail();
 }
 if (motion.live) {
   const start = document.createElement("button");

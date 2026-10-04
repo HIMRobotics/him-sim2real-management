@@ -5,7 +5,7 @@
 | Example | Controller | Environment |
 | --- | --- | --- |
 | `stairs` | The retained walker ONNX plus the original submission's walk, pause, cross, hop, and arm overrides | Restored three low stair treads, top landing, gap, and finish pad |
-| `walker` | The walker ONNX with a 0.3 m/s forward command | Flat floor |
+| `walker` | The walker ONNX with a 0.6 m/s forward command and zero commanded yaw | Flat floor |
 | `balance` | The existing GR00T/Gear WBC lower-body balance ONNX, with arms held at their initial pose | Flat floor |
 
 All controllers send a measured-pose hold as their first command. After that, their targets go directly to the normal sim checks. They do not smooth targets to evade those checks or change safety thresholds. MuJoCo integrates the floating base. The controller never writes root positions.
@@ -39,7 +39,7 @@ The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyC
 ./sim.sh replay containers/sim/output/stairs-off/trace.npz
 ```
 
-Open `http://127.0.0.1:8765`. The replay shows the robot, stairs, safety mode, result, and any rejection reason. Left drag orbits, right drag pans, scroll zooms, and Space pauses. A blue line on the floor is the pelvis path. Ctrl+C stops the server. Use the `stairs-on`, `balance-on`, or `balance-off` trace to view the other runs. With `--local --view`, the run completes before the replay page opens. With Docker/ROS `--view`, the page opens first and waits for Start. `./sim.sh --view --circle` is the same page for one flat circle from the cached walker, with no submission.
+Open `http://127.0.0.1:8765`. The replay shows the robot, stairs, safety mode, result, and any rejection reason. Left drag orbits, right drag pans, scroll zooms, and Space pauses. A blue line on the floor is the pelvis path. Ctrl+C stops the server. Use the `stairs-on`, `balance-on`, or `balance-off` trace to view the other runs. With `sim.sh --local --view`, the run completes before the replay page opens. `desktop_sim.sh --local --view` waits for Start and streams the local run live. With Docker/ROS `--view`, the page opens first and waits for Start. `./sim.sh --view --circle` is the same page for one flat circle from the cached walker, with no submission.
 
 If running on the robot over SSH, forward port 8765 with `ssh -L 8765:127.0.0.1:8765 unitree@<robot>` and open the same URL on your laptop.
 
@@ -62,7 +62,12 @@ Drop `--local`. The script prompts for sudo, prepares the example files, builds 
 ./sim.sh replay containers/sim/output/docker-stairs-off/trace.npz
 ```
 
-The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The example Dockerfile pins ONNX Runtime 1.18.1 on ROS 2 Foxy's Python 3.8. That image build remains unverified here. The separate `examples/submissions/walker/` test Dockerfile pins 1.16.3. The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. Both example Dockerfiles pin ONNX Runtime 1.16.3 for ROS 2 Foxy's Python 3.8 on ARM64. The previous 1.18.1 pin failed because pip could not find a matching distribution for that environment. Rerunning `sim.sh --example` refreshes the build context and rebuilds with the corrected pin. The walker graph uses IR 9 for that runtime. Builds initialize the packaged model and run a test inference before producing the image. Manual Linux Docker results and remaining checks are recorded in [VALIDATION.md](VALIDATION.md). The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+
+On a Mac or Windows laptop, `./desktop_sim.sh --example walker --view` uses
+Docker Compose and waits for Start before streaming the container run. The same
+path accepts `--image NAME` or an archive in `containers/upload`. The laptop needs
+Docker Desktop and the viewer Python environment, but no host ROS or `colcon`.
 
 The generated directories are `.cache/sim_examples/<name>/container` and `.cache/sim_examples/<name>/environment`. The container context includes only controller code, its model, and the ROS message package. The environment is loaded by the host MuJoCo process. The image is tagged `g1-sim-example-<name>:local`.
 

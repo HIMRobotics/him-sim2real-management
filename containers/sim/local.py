@@ -60,10 +60,10 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("seconds must be finite and positive")
     output = _prepare_output(output)
-    project = prepare(name)
+    project = prepare(name, container=False)
     scene = scene or project / "environment/scene.xml"
     policy = ExamplePolicy(name, project / "container/project")
-    runner = Runner(pose, scene=scene, safety_checks=safety_checks)
+    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
 
     def command(current, time, _step):
         state = current.feedback(time)
@@ -87,7 +87,7 @@ def hold(output, seconds=1.0, safety_checks=True, scene=None, pose="standing"):
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("seconds must be finite and positive")
     output = _prepare_output(output)
-    runner = Runner(pose, scene=scene, safety_checks=safety_checks)
+    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
 
     def command(current, time, step):
         state = current.feedback(time)
@@ -119,7 +119,7 @@ def circle(output, seconds=10.0, safety_checks=True, scene=None, pose="standing"
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("seconds must be finite and positive")
     output = _prepare_output(output)
-    runner = Runner(pose, scene=scene, safety_checks=safety_checks)
+    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
 
     def command(current, time, _step):
         current.circle(time)
