@@ -32,6 +32,8 @@ for name in sys.argv[4:]:
                 "reason": report.get("reason"),
                 "fall_check": report.get("fall_check"),
                 "safety_checks": report.get("safety_checks"),
+                "control_path": report.get("control_path"),
+                "checks": report.get("checks"),
                 "scene": report.get("scene"),
                 "commands": report.get("commands"),
                 "policy": report.get("policy"),
@@ -54,7 +56,11 @@ if scene is None:
 summary = {
     "version": 1,
     "status": {
-        0: "within_limits" if safety_checks else "completed",
+        0: (
+            "within_limits"
+            if rows and all(row["status"] == "within_limits" for row in rows)
+            else "completed"
+        ),
         1: "violation",
         2: "error",
     }[worst],

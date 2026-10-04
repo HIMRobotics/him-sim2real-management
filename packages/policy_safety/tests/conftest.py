@@ -17,8 +17,6 @@ def bundle(tmp_path_factory):
     from policy_safety.bundle import prepare_g1
 
     sample = Path(__file__).resolve().parents[3] / "examples"
-    if not (sample / "policy.yaml").is_file():
-        pytest.skip("walker sample bundle is not in examples/")
     output = tmp_path_factory.mktemp("bundles") / "g1"
     prepare_g1(sample, output)
     return output

@@ -57,7 +57,19 @@ With safety checks enabled, `containers/sim/runner.py` checks:
 
 With `--no-safety-checks`, the sim bypasses observation age, action timeout, numeric sanity bounds, joint position/tracking/rate/torque limits, feedforward-torque restrictions, overspeed, and falls. It keeps applying the last command until another arrives. MuJoCo's own physical joint and actuator limits remain part of the model. The ROS protocol still requires a matching session, increasing sequence, and an observation ID issued by the sim. Every command array must contain 29 finite numbers. Malformed commands and non-finite simulation state still terminate acceptance and report `error`.
 
-Unchecked runs report `completed`, never `within_limits`. Reports and counterfactual summaries include `safety_checks` and the selected `scene` path (`null` means the bundled scene). `--safety-checks` explicitly re-enables checking. If both flags are supplied, the last one wins.
+Unchecked runs and direct circle runs report `completed`, never `within_limits`. Reports and counterfactual summaries include `safety_checks` and the selected `scene` path (`null` means the bundled scene). `--safety-checks` explicitly re-enables checking. If both flags are supplied, the last one wins.
+
+`control_path` is `submission` for commands through the normal checks and `direct`
+for `--circle` or `--command`. Reports include a `checks` mapping for command
+protocol, command limits, observation freshness, action timeout, joint speed,
+base angular speed, falls, and finite simulation state. These flags describe
+enabled checks, not proof that every fault condition was exercised.
+
+Direct control bypasses command protocol, command limits, and observation
+freshness checks. With safety enabled, action timeout, speed and standing-fall
+monitoring remain enabled. Its viewer displays `PARTIAL` and explicitly labels
+submission checks as bypassed. This metadata is also stored in the trace so a
+standalone replay retains that distinction.
 
 ## How to use
 
@@ -124,9 +136,9 @@ When `--output` is supplied, these files go in that directory. Docker runs can b
 
 | Status | Meaning |
 | --- | --- |
-| `within_limits` | At least one command was accepted and none failed. |
+| `within_limits` | Submission checks were enabled, at least one command was accepted, and none failed. |
 | `violation` | `reason` is the check that failed. `detail` names the joint when there is one. |
-| `completed` | Commands were accepted with safety checks disabled. This is not a safety pass. |
+| `completed` | Commands ran with safety checks disabled, or through direct circle control without submission validation. This is not a safety pass. |
 | `error` | An unchecked run failed protocol or simulation validation. |
 | `no_command` | Nothing was accepted before the startup wait ended. |
 
