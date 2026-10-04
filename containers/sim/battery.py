@@ -19,8 +19,8 @@ sys.path[:0] = [
     str(Path(__file__).resolve().parent),
 ]
 
-from policy_safety.config import DEFAULT_SUITE
 from plant import CONTROL_DT, POSES
+from policy_safety.config import DEFAULT_SUITE
 from runner import Runner
 
 
@@ -95,6 +95,8 @@ def run_battery(
             raise SystemExit(f"--push must be one of: {names}")
     if circle:
         poses = ("standing",)
+    if not poses:
+        raise ValueError("battery requires at least one pose")
     if any(name not in POSES for name in poses):
         raise SystemExit(f"--pose must be one of: {', '.join(POSES)}")
     minimum = (
@@ -117,6 +119,8 @@ def run_battery(
                     "status": report["status"],
                     "reason": report["reason"],
                     "detail": report["detail"],
+                    "control_path": report["control_path"],
+                    "checks": report["checks"],
                     "fell": report["motion"]["fell"],
                     "upright_at_end": report["motion"]["upright_at_end"],
                     "final_position": report["motion"]["final_position"],
@@ -128,6 +132,11 @@ def run_battery(
         "scene": "flat",
         "policy": "circle" if circle else "battery",
         "safety_checks": bool(safety_checks),
+        "control_path": "direct" if circle else "submission",
+        "checks": {
+            name: all(case["checks"][name] for case in cases)
+            for name in cases[0]["checks"]
+        },
         "seconds": seconds,
         "cases": cases,
     }

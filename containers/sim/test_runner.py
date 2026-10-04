@@ -154,25 +154,48 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(end["upright"], 0.8)
         self.assertGreater(moved, 0.3)
 
-    def test_balance_step_stays_inside_submission_limits(self):
-        import sys
+    def test_circle_reports_partial_checks_in_report_and_standalone_replay(self):
+        import json
+        import os
+        from unittest.mock import patch
 
-        sys.path.insert(0, str(ROOT / "examples"))
-        from policy import COMMAND_STEP, POSITION_LIMIT, TRACKING_LIMIT, limit_targets
+        from view import export_replay, report_summary
 
-        measured = np.zeros(29)
-        desired = np.full(29, 3.0)
-        previous = None
-        for _ in range(40):
-            target = limit_targets(previous, measured, desired)
-            self.assertTrue(np.all(np.abs(target - measured) <= TRACKING_LIMIT * 0.9 + 1e-9))
-            self.assertTrue(np.all(target >= POSITION_LIMIT[:, 0] - 1e-9))
-            self.assertTrue(np.all(target <= POSITION_LIMIT[:, 1] + 1e-9))
-            if previous is not None:
-                self.assertLessEqual(float(np.max(np.abs(target - previous))), COMMAND_STEP + 1e-9)
-            previous = target
-            measured = target.copy()
-        self.assertGreater(float(target[3]), 1.0)
+        runner = Runner()
+        runner.circle(0.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "trace.npz"
+            with patch.dict(os.environ, {"G1_SIM_TRACE": str(trace)}):
+                report = runner.report()
+            self.assertEqual(report["status"], "completed")
+            self.assertEqual(report["control_path"], "direct")
+            self.assertFalse(report["checks"]["command_limits"])
+            self.assertFalse(report["checks"]["command_protocol"])
+            self.assertFalse(report["checks"]["observation_freshness"])
+            self.assertTrue(report["checks"]["joint_speed"])
+            self.assertTrue(report["checks"]["fall"])
+            self.assertIn("PARTIAL", report_summary(report))
+            dest = export_replay(trace, Path(tmp) / "view")
+            motion = json.loads((dest / "motion.json").read_text())
+            self.assertIn("PARTIAL", motion["summary"])
+            self.assertIn("submission checks bypassed", motion["summary"])
+
+    def test_circle_still_checks_falls_and_can_disable_runtime_checks(self):
+        for safety_checks in (True, False):
+            with self.subTest(safety_checks=safety_checks):
+                runner = Runner(safety_checks=safety_checks)
+                runner.circle(0.0)
+                runner.plant.data.qpos[runner.plant.base_qadr + 2] = 0.1
+                mujoco.mj_forward(runner.plant.model, runner.plant.data)
+                runner.circle(0.02)
+                report = runner.report()
+                self.assertEqual(report["checks"]["fall"], safety_checks)
+                self.assertEqual(report["checks"]["joint_speed"], safety_checks)
+                self.assertEqual(
+                    report["status"], "violation" if safety_checks else "completed"
+                )
+                if safety_checks:
+                    self.assertEqual(report["reason"], "fall")
 
     def test_rejected_command_keeps_the_hold(self):
         runner = Runner()
@@ -383,6 +406,8 @@ class RunnerTest(unittest.TestCase):
         from battery import run_case
 
         report = run_case("standing", None, 0.2, circle=True)
+        self.assertEqual(report["status"], "completed")
+        self.assertFalse(report["checks"]["command_limits"])
         self.assertGreaterEqual(report["commands"], 5)
         self.assertGreater(report["motion"]["final_position"][2], 0.5)
 

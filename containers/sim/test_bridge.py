@@ -48,6 +48,7 @@ class BridgeTests(unittest.TestCase):
         node.run_started = 1.0
         node.seconds = 10.0
         node.accepted = True
+        node.circle = False
         node.clock = lambda: 0.04
         node.plant = Mock()
         node.plant.call.side_effect = [

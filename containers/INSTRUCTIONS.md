@@ -7,7 +7,7 @@ A submission is one `linux/arm64` image with its dependencies installed. Models 
 | Packaging | `containers/upload/submission.tar`. One `ENTRYPOINT`. |
 | Inputs | `/safety/robot_feedback` and `rt/lowstate` only. No camera, lidar, or odometry topic. |
 | Outputs | 29-slot `JointCommand` on `/safety/precheck`. Stop on `/safety/abort`. |
-| Limits | Fresh observation within 0.2 s, next command within 0.2 s, targets inside the joint profile. Sim: first command within 10 s, then `--seconds` (default 10). The robot process runs until stop or abort. No memory or CPU quota. |
+| Limits | Fresh observation within 0.2 s, next command within 0.2 s, targets inside the joint profile. Sim: first command within 30 s, then `--seconds` (default 10). The robot process runs until stop or abort. No memory or CPU quota. |
 | Access | State in and joint commands out through the topics below. Not `rt/lowcmd`, `rt/arm_sdk`, or `g1-safety-stops`. |
 
 `./setup.sh` loads that archive and starts the entrypoint. `g1-safety-stops` on the host checks commands and writes motors.
@@ -109,7 +109,7 @@ Submitters may include an `environment/` directory beside `submission.tar`, cont
 
 `./sim.sh --view` opens `http://127.0.0.1:8765` before the run. Press Start and the page plays from the first frame. The camera stays put, and a blue line is the pelvis path. `./sim.sh replay` serves the last recording on that same URL. Left drag orbits, right drag pans, scroll zooms, space pauses, arrow keys step one frame. Replay uses the recorded G1 and environment, including obstacles. The recording is `containers/sim/output/trace.npz`. `./sim.sh --circle` walks one flat circle with the cached walker and does not load a submission.
 
-`./sim.sh stop` removes the sim containers. The report is `containers/sim/output/report.json`. `within_limits` means commands were accepted with checking enabled and no violation. `completed` means the run had commands and checking was disabled. `violation` names a failed check. `error` indicates an unchecked run failed protocol or simulation validation. `no_command` means nothing was accepted. Reports include `safety_checks` and `scene`.
+`./sim.sh stop` removes the sim containers. The report is `containers/sim/output/report.json`. `within_limits` means commands were accepted with checking enabled and no violation. `completed` means the run had commands with checking disabled or used direct circle control without submission validation. `violation` names a failed check. `error` indicates an unchecked run failed protocol or simulation validation. `no_command` means nothing was accepted. Reports include `safety_checks`, `control_path`, per-check `checks` flags, and `scene`. For direct circle control, `safety_checks: true` enables runtime monitoring only and does not establish submission acceptance.
 
 The sim serves `/safety/checker/arm`, publishes `/safety/robot_feedback` and `/safety/policy_observation`, and publishes `rt/lowstate` on `lo` inside that isolated network. `ROBOT_INTERFACE` is `lo`. With checks enabled, a command that fails a joint check is not applied. `/safety/abort` follows, and later commands stay rejected.
 

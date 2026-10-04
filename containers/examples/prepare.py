@@ -65,18 +65,17 @@ def prepare(name, destination=None):
         )
         missing = [
             filename
-            for filename in ("walker.onnx", "walker.onnx.data", spec)
+            for filename in ("walker.onnx", "walker.onnx.data", "walker.yaml")
             if not (ROOT / "examples" / filename).is_file()
         ]
         if missing:
             raise ValueError(
-                "examples/ is the balance submission, not the walker bundle. Missing "
+                "Walker bundle missing in examples/: "
                 + ", ".join(missing)
             )
-        copy_file(ROOT / "examples" / "walker.onnx", project / "walker.onnx")
-        copy_file(ROOT / "examples" / "walker.onnx.data", project / "walker.onnx.data")
-        copy_file(ROOT / "examples" / spec, project / "policy.yaml")
-        cap_onnx_ir(project / "walker.onnx")
+        for filename in ("walker.onnx", "walker.onnx.data"):
+            copy_file(ROOT / "examples" / filename, project / filename)
+        copy_file(ROOT / "examples/walker.yaml", project / "policy.yaml")
         cfg = yaml.safe_load((project / "policy.yaml").read_text())
         defaults = [j["default_position"] for j in cfg["joints"]]
     env = root / "environment"

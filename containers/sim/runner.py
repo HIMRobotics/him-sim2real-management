@@ -44,6 +44,7 @@ class Runner:
         if pose not in POSES:
             raise ValueError("unknown pose")
         self.safety_checks = bool(safety_checks)
+        self.control_path = "submission"
         self.plant = Plant(pose, scene=scene, check_fall=self.safety_checks)
         self.rules = JointRules(self.plant.joint_names)
         self.session_id = "sim-" + uuid.uuid4().hex[:12]
@@ -172,6 +173,20 @@ class Runner:
             "commands": self.commands,
         }
 
+    def checks(self):
+        """Report enabled checks for the control path used by this run."""
+        submission = self.control_path == "submission"
+        return {
+            "command_protocol": submission,
+            "command_limits": submission and self.safety_checks,
+            "observation_freshness": submission and self.safety_checks,
+            "action_timeout": self.safety_checks,
+            "joint_speed": self.safety_checks,
+            "base_angular_speed": self.safety_checks,
+            "fall": self.plant.check_fall,
+            "finite_simulation": True,
+        }
+
     def report(self, lowstate=False):
         if self._live is not None:
             self._live.close()
@@ -181,7 +196,7 @@ class Runner:
         elif self.commands < 1:
             status = "no_command"
         else:
-            status = "within_limits" if self.safety_checks else "completed"
+            status = "within_limits" if self.checks()["command_limits"] else "completed"
         trace = self._write_trace()
         return {
             "version": 1,
@@ -197,6 +212,8 @@ class Runner:
             "pose": self.plant.pose,
             "scene": str(self.plant.scene) if self.plant.scene else None,
             "safety_checks": self.safety_checks,
+            "control_path": self.control_path,
+            "checks": self.checks(),
             "fall_check": self.plant.check_fall,
             "trace": trace,
             "motion": self.metrics.report(),
@@ -230,11 +247,14 @@ class Runner:
             qpos=np.vstack(self.trace_qpos),
             model=model,
             safety_checks=self.safety_checks,
+            control_path=self.control_path,
+            checks=json.dumps(self.checks()),
         )
         return str(target)
 
     def circle(self, time):
         """One walking step of a flat circle. Movement limits are not applied."""
+        self.control_path = "direct"
         try:
             if self._circle is None:
                 from circle import CircleWalker

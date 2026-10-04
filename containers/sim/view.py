@@ -363,7 +363,11 @@ def write_page(dest, model, geoms, frames, summary, live=False):
 def report_summary(report, safety_checks=True):
     """HUD text for a finished run."""
     summary = f"{report.get('policy') or 'Simulation'} | Safety checks: "
-    summary += "ON" if report.get("safety_checks", safety_checks) else "OFF"
+    if report.get("control_path") == "direct":
+        summary += "PARTIAL" if report.get("safety_checks", safety_checks) else "OFF"
+        summary += " (direct control, submission checks bypassed)"
+    else:
+        summary += "ON" if report.get("safety_checks", safety_checks) else "OFF"
     summary += " | " + str(report.get("status", ""))
     if report.get("reason"):
         summary += "\nStopped accepting commands: " + report["reason"]
@@ -407,6 +411,11 @@ def export_replay(trace_path, dest):
         safety_checks = (
             bool(trace["safety_checks"]) if "safety_checks" in trace else True
         )
+        metadata = {"safety_checks": safety_checks}
+        if "control_path" in trace:
+            metadata["control_path"] = str(trace["control_path"])
+        if "checks" in trace:
+            metadata["checks"] = json.loads(str(trace["checks"]))
         if "model" in trace:
             model = mujoco.MjModel.from_binary_path(
                 "scene.mjb", {"scene.mjb": trace["model"].tobytes()}
@@ -421,7 +430,7 @@ def export_replay(trace_path, dest):
         pose_frame(model, data, base, geoms, pose, float(time))
         for pose, time in zip(qpos, times)
     ]
-    summary = "Safety checks: " + ("ON" if safety_checks else "OFF")
+    summary = report_summary(metadata, safety_checks)
     report_path = trace_path.parent / "report.json"
     if report_path.is_file():
         summary = report_summary(json.loads(report_path.read_text()), safety_checks)

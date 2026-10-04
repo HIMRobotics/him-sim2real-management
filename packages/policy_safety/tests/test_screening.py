@@ -14,7 +14,12 @@ pytest.importorskip("onnx")
 
 from policy_safety.adapter import G1Walker, inverse_rotate
 from policy_safety.cli import run_worker
-from policy_safety.config import plan_scenarios, profile_config, scheduled_directions, suite_config
+from policy_safety.config import (
+    plan_scenarios,
+    profile_config,
+    scheduled_directions,
+    suite_config,
+)
 from policy_safety.evaluation import Monitor, run_scenario, summarize_scenarios, verdict
 from policy_safety.simulation import Simulation, mesh_point_in_body
 
@@ -108,7 +113,6 @@ def test_observation_coordinates_history_and_scaling(setup):
 
 def test_sample_neural_path_and_embedded_normalization(bundle):
     import onnx
-
     import yaml
 
     sim = Simulation(bundle / "robot.json")
@@ -116,7 +120,7 @@ def test_sample_neural_path_and_embedded_normalization(bundle):
     adapter = G1Walker(bundle / "walker.onnx", sim.robot)
     policy_yaml = (
         Path(__file__).resolve().parents[3]
-        / "examples/policy.yaml"
+        / "examples/walker.yaml"
     )
     config_joints = yaml.safe_load(policy_yaml.read_text())["joints"]
     q, dq, quat, vel = (

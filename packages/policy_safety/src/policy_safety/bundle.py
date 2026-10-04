@@ -45,12 +45,16 @@ def read_policy_yaml(directory):
     import yaml
 
     directory = Path(directory)
-    files = sorted(directory.glob("*.yaml"))
-    if len(files) != 1:
-        raise ValueError("policy directory needs exactly one YAML file")
-    data = yaml.safe_load(files[0].read_text())
-    if not isinstance(data, dict):
-        raise ValueError("policy YAML must be a mapping")
+    policies = []
+    for path in sorted(directory.glob("*.yaml")):
+        document = yaml.safe_load(path.read_text())
+        if isinstance(document, dict) and any(
+            key in document for key in ("contract", "model", "joints")
+        ):
+            policies.append(document)
+    if len(policies) != 1:
+        raise ValueError("policy directory needs exactly one policy YAML")
+    data = policies[0]
     if data.get("contract") != "g1-walker-99-v1" or data.get("normalization") != "embedded":
         raise ValueError("expected the g1-walker-99-v1 contract with embedded normalization")
     joints = data.get("joints")
