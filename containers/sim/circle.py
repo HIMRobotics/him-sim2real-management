@@ -13,7 +13,7 @@ import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL = ROOT / "examples/walker.onnx"
+DEFAULT_MODEL = ROOT / "examples/policies/walker/walker.onnx"
 
 
 def load_command(path):
@@ -54,7 +54,7 @@ class CircleWalker:
         self.kp = np.array([joint["kp"] for joint in joints], dtype=float)
         self.kd = np.array([joint["kd"] for joint in joints], dtype=float)
         command_path = os.environ.get("G1_SIM_COMMAND") or (
-            ROOT / "examples/circle.yaml"
+            ROOT / "examples/commands/walker/circle.yaml"
         )
         self.command = load_command(command_path)
         self.started = False

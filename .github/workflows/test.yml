@@ -1,4 +1,4 @@
-name: Test recorder and local app
+name: Test recorder and simulation
 on: [push, pull_request]
 permissions:
   contents: read
@@ -18,3 +18,19 @@ jobs:
       - run: uv run --locked --python ${{ matrix.python }} python -m unittest discover -s tests -v
       - run: uv run --locked --python ${{ matrix.python }} python -m py_compile app.py remote.py g1_session.py policy_hook.py
       - run: bash -n OPEN_APP.sh kit.sh start.sh label.sh
+  simulation-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v9.0.0
+      - run: uv venv --python 3.12 .venv-policy-safety
+      - run: uv pip install --python .venv-policy-safety/bin/python './packages/policy_safety[test]'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: .venv-policy-safety/bin/python -m pytest -q containers/sim packages/policy_safety/tests
+        env:
+          G1_SIM_PYTHON: ${{ github.workspace }}/.venv-policy-safety/bin/python
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      - run: bash -n sim.sh setup.sh examples/submissions/walker/build.sh examples/submissions/walker/entrypoint.sh containers/examples/entrypoint.sh

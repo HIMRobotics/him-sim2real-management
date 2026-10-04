@@ -24,7 +24,7 @@ ABORT = "/safety/abort"
 ARM = "/safety/checker/arm"
 SIM_STATE = "/sim/state"
 LOW_STATE = "rt/lowstate"
-ROOT = "/opt/balance"
+ROOT = "/opt/walker"
 
 
 def as_floats(values):
@@ -85,7 +85,10 @@ class WalkerNode(Node):
         domain = int(os.environ.get("ROBOT_DOMAIN", "0"))
         if not interface:
             raise RuntimeError("ROBOT_INTERFACE is not set")
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+        from unitree_sdk2py.core.channel import (
+            ChannelFactoryInitialize,
+            ChannelSubscriber,
+        )
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
 
         ChannelFactoryInitialize(domain, interface)

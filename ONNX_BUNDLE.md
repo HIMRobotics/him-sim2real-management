@@ -2,17 +2,17 @@
 
 This repository does not load a YAML file to run a policy on the robot. Unitree RL Gym and Unitree RL Lab each have their own deploy YAML, and those files belong to those runners. They are not accepted here.
 
-The runnable example in this repo is the balance container in [examples/](examples/). `policy-safety prepare-g1` still reads a directory of `policy.yaml` plus the ONNX files that YAML names. The contract below is `g1-walker-99-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
+The walker test container is in [examples/submissions/walker/](examples/submissions/walker/), and its model bundle is in [examples/policies/walker/](examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `g1-walker-99-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
 
 - Adapter: `packages/policy_safety/src/policy_safety/adapter.py` (`G1Walker`)
 
 ## Walker files the checker expects
 
-Keep the weights file next to the model. ONNX Runtime loads both. These files are not shipped in `examples/` anymore.
+Keep the weights file next to the model. ONNX Runtime loads both. These files are committed in `examples/policies/walker/`.
 
 | File | Role |
 | --- | --- |
-| `policy.yaml` | Observation layout, joint order, defaults, scales, gains, timing |
+| `walker.yaml` | Observation layout, joint order, defaults, scales, gains, timing |
 | `walker.onnx` | 99-input, 29-output float network |
 | `walker.onnx.data` | External weights. Required. |
 
@@ -20,7 +20,7 @@ Screen a directory that contains them with:
 
 ```bash
 policy-safety prepare-g1 \
-  --submission /path/to/g1-walker-bundle \
+  --submission examples/policies/walker \
   --output /tmp/g1-screening-bundle
 policy-safety evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \
@@ -53,6 +53,6 @@ q_target = default_position + raw_output * action_scale
 
 Desired velocity and feedforward torque are zero. The position PD law used in screening is `kp * (q_target - q) - kd * dq`. Control period is 20 ms. Physics period in the checker is 2 ms.
 
-`prepare-g1` copies the defaults, scales, and gains from that directory's `policy.yaml` into `robot.json`.
+`prepare-g1` copies the defaults, scales, and gains from that directory's policy YAML into `robot.json`.
 
 A different network replaces those files and needs its own contract. Matching 99 and 29 is not enough: observation order, frames, normalization, scales, gains, and timing have to match the exported network.
