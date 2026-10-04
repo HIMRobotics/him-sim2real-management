@@ -91,7 +91,7 @@ class SceneTest(unittest.TestCase):
             Plant("supine", scene=self.scene)
 
     def test_replay_retains_scene_after_original_files_are_removed(self):
-        runner = Runner(scene=self.scene, safety_checks=False)
+        runner = Runner(record_trace=True, scene=self.scene, safety_checks=False)
         runner.step(0.0)
         trace = self.root / "trace.npz"
         with patch.dict(os.environ, {"G1_SIM_TRACE": str(trace)}):
@@ -112,7 +112,7 @@ class SceneTest(unittest.TestCase):
         self.assertTrue(any((dest / "meshes").glob("*.stl")))
 
     def test_legacy_trace_still_replays(self):
-        runner = Runner()
+        runner = Runner(record_trace=True)
         trace = self.root / "old.npz"
         np.savez(trace, qpos=np.vstack(runner.trace_qpos), time=runner.trace_time)
         self.assertTrue(
@@ -135,7 +135,7 @@ class SceneTest(unittest.TestCase):
 </mujoco>""",
             )
         )
-        runner = Runner(scene=self.scene)
+        runner = Runner(record_trace=True, scene=self.scene)
         runner.plant.model.hfield_data[:] = [0.0, 0.25, 0.75, 1.0]
         trace = self.root / "terrain.npz"
         with patch.dict(os.environ, {"G1_SIM_TRACE": str(trace)}):

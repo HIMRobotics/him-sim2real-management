@@ -37,7 +37,8 @@ if [[ ! -d "$dds_py" || ! -f "$dds_lib/libddsc.so.0.10.2" ]]; then
 fi
 
 rm -rf "$stage"
-mkdir -p "$stage/interfaces"
+mkdir -p "$stage/interfaces" "$stage/policy_safety"
+cp "$repo/packages/policy_safety/src/policy_safety/"{__init__,adapter,config}.py "$stage/policy_safety/"
 cp "$example/Dockerfile" "$example/entrypoint.sh" "$example/walker_node.py" "$example/policy.py" \
   "$bundle/walker.yaml" "$commands/stand.yaml" "$commands/circle.yaml" "$stage/"
 cp "$model" "$bundle/walker.onnx.data" "$stage/"

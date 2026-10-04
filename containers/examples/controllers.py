@@ -57,9 +57,9 @@ class ExamplePolicy:
             self.policy.reset()
 
     def velocity_command(self, state):
-        """Retain the original stair submission's walk, pause, and cross phases."""
+        """Command forward walking or the stair submission's scripted phases."""
         if self.name == "walker":
-            return np.array([0.3, 0.0, 0.0], dtype=np.float32)
+            return np.array([0.6, 0.0, 0.0], dtype=np.float32)
         x, y, z = state["position"]
         if self.phase == "walk":
             if x >= 1.55 and abs(y) < 0.35 and z > 0.60 and state["upright"] > 0.75:

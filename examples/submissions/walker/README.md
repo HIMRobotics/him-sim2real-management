@@ -17,6 +17,10 @@ Base image `ros:foxy-ros-base`, platform `linux/arm64`. The image installs `rmw_
 | `/safety/precheck` | 29-slot `JointCommand` |
 | `/safety/abort` | Stop publishing |
 
+`policy.py` uses the shared `policy_safety.adapter.G1Walker` inference adapter,
+also used by the simulator circle and example clients. The build stages the
+adapter and its configuration module into the image.
+
 The first command holds the measured joints. Later commands are the walker targets, with gains from `walker.yaml`. Feedforward torque is zero. `WALKER_COMMAND` selects the yaml. The default is `stand.yaml`. A gait step does not fit the submission tracking window, so `./sim.sh --command` applies that yaml on the plant instead of through the image.
 
 `--circle` and `--command` use direct control and report `completed` on success.

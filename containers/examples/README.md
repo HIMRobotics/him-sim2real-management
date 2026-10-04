@@ -5,7 +5,7 @@
 | Example | Controller | Environment |
 | --- | --- | --- |
 | `stairs` | The retained walker ONNX plus the original submission's walk, pause, cross, hop, and arm overrides | Restored three low stair treads, top landing, gap, and finish pad |
-| `walker` | The walker ONNX with a 0.3 m/s forward command | Flat floor |
+| `walker` | The walker ONNX with a 0.6 m/s forward command and zero commanded yaw | Flat floor |
 | `balance` | The existing GR00T/Gear WBC lower-body balance ONNX, with arms held at their initial pose | Flat floor |
 
 All controllers send a measured-pose hold as their first command. After that, their targets go directly to the normal sim checks. They do not smooth targets to evade those checks or change safety thresholds. MuJoCo integrates the floating base. The controller never writes root positions.
@@ -61,7 +61,7 @@ Drop `--local`. The script prompts for sudo, prepares the example files, builds 
 ./sim.sh replay containers/sim/output/docker-stairs-off/trace.npz
 ```
 
-The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The example Dockerfile pins ONNX Runtime 1.18.1 on ROS 2 Foxy's Python 3.8. That image build remains unverified here. The separate `examples/submissions/walker/` test Dockerfile pins 1.16.3. The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. Both example Dockerfiles pin ONNX Runtime 1.16.3 for ROS 2 Foxy's Python 3.8 on ARM64. The previous 1.18.1 pin failed because pip could not find a matching distribution for that environment. Rerunning `sim.sh --example` refreshes the build context and rebuilds with the corrected pin. The walker graph uses IR 9 for that runtime. Builds initialize the packaged model and run a test inference before producing the image. A full integration run with the corrected graph remains unverified here. The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
 
 The generated directories are `.cache/sim_examples/<name>/container` and `.cache/sim_examples/<name>/environment`. The container context includes only controller code, its model, and the ROS message package. The environment is loaded by the host MuJoCo process. The image is tagged `g1-sim-example-<name>:local`.
 

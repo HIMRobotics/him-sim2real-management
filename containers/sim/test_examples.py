@@ -28,6 +28,15 @@ from view import export_replay
 
 
 class ExampleTests(unittest.TestCase):
+    def test_walker_makes_forward_progress_with_checks_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run("walker", tmp, 10, safety_checks=False)
+        self.assertEqual(report["status"], "completed")
+        motion = report["motion"]
+        self.assertGreater(motion["final_position"][0] - motion["start_position"][0], 3.0)
+        self.assertFalse(motion["fell"])
+        self.assertTrue(motion["upright_at_end"])
+
     def test_stairs_real_policy_climbs_with_checks_disabled_and_is_rejected_when_enabled(
         self,
     ):
@@ -107,6 +116,17 @@ class ExampleTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("(29,)", proc.stdout)
+
+    def test_local_preparation_skips_container_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = prepare("walker", tmp, container=False)
+            self.assertFalse((project / "container/Dockerfile").exists())
+            self.assertFalse((project / "container/interfaces").exists())
+            self.assertFalse((project / "container/policy_safety").exists())
+            policy = ExamplePolicy("walker", project / "container/project")
+            runner = Runner(scene=project / "environment/scene.xml")
+            state = runner.feedback(0.0)
+            self.assertIsNone(runner.command(policy.command(state), 0.0))
 
     def test_local_cli_without_docker_and_failed_run_does_not_replay_old_trace(self):
         with tempfile.TemporaryDirectory() as tmp:

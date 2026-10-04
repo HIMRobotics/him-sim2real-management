@@ -29,10 +29,10 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
     output.mkdir(parents=True, exist_ok=True)
     for filename in ("report.json", "trace.npz"):
         (output / filename).unlink(missing_ok=True)
-    project = prepare(name)
+    project = prepare(name, container=False)
     scene = scene or project / "environment/scene.xml"
     policy = ExamplePolicy(name, project / "container/project")
-    runner = Runner(pose, scene=scene, safety_checks=safety_checks)
+    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
     for step in range(math.ceil(seconds / CONTROL_DT)):
         time = step * CONTROL_DT
         if runner.reason is None:
