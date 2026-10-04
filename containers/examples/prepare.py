@@ -109,5 +109,6 @@ def prepare(name, destination=None, *, container=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("example", choices=("stairs", "walker", "balance"))
+    parser.add_argument("--assets-only", action="store_true")
     args = parser.parse_args()
-    print(prepare(args.example))
+    print(prepare(args.example, container=not args.assets_only))

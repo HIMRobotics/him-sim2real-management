@@ -121,6 +121,11 @@ Other flags:
 
 `--local` also runs without sudo. Local examples use simulated timestamps. Docker/ROS runs enforce wall-clock freshness and action deadlines. The default durations are unchanged. The scene and safety settings apply to both backends and all counterfactual poses.
 
+Both entry scripts use the CLI and viewer handling in `sim.sh`. `desktop_sim.sh`
+selects the Compose backend. The backend implementations are
+`containers/sim/namespace.sh` and `containers/sim/compose.sh`. Local runs with
+`--view` also wait for Start and stream live on both platforms.
+
 The run writes:
 
 | File | What it is |
@@ -192,6 +197,19 @@ The scene can change terrain, friction, gravity, obstacles, and passive objects.
 
 ## How to visualize
 
+The first viewer export downloads Three.js r160 and its two addons from the
+upstream release into the ignored `.cache/three-r160/` directory. Each file is
+checked against a pinned SHA-256 hash. To prepare for offline viewing, run once
+while online:
+
+```bash
+python3 containers/sim/viewer_assets.py
+```
+
+Subsequent exports use the verified cache. Each exported page includes local
+copies of the dependencies and their MIT license, so the browser needs no CDN
+connection. Headless simulations do not download viewer assets.
+
 After a run:
 
 ```bash
@@ -212,7 +230,7 @@ Replay draws mesh geometry, planes, boxes, spheres, ellipsoids, cylinders, capsu
 
 Ctrl+C stops the page. `./sim.sh --view` opens the page before the run. Press Start, and playback begins at the first frame while the run is going. The camera stays where you leave it. A blue line on the floor is the pelvis path. `./sim.sh --seconds 10 --view --circle` is that page with the cached walker and no submission archive.
 
-`./sim.sh replay path/to/trace.npz` plays a different recording. The page is rebuilt into `containers/sim/output/view/`.
+`./sim.sh replay path/to/trace.npz` plays a different recording. The page is rebuilt into `view/` beside that trace. Both live and replay servers use the first free port starting at `G1_SIM_VIEW_PORT` (default 8765). Open the URL printed by the launcher.
 
 The ROS bridge keeps its Foxy interpreter separate from the MuJoCo process.
 Each active control tick steps physics and returns feedback in one request.

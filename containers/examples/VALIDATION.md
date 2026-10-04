@@ -37,6 +37,14 @@ ran on the Linux development host and verified multi-frame replay traces. Shell
 syntax, changed-Python lint, and YAML parsing passed. Docker Compose execution
 was not tested because this host does not have the Compose plugin.
 
+After launcher consolidation and replacing vendored viewer sources with a pinned
+download cache, 135 tests and eight subtests passed with no skips (255.16 seconds).
+Live stairs, desktop hold, battery viewing, and multi-frame replay passed HTTP
+smoke checks, including Start gating, matching scene geometry, port fallback,
+and process shutdown. A fresh asset download and offline cache reuse both passed.
+Compose lifecycle tests use a fake runtime and cover failure cleanup and all six
+counterfactual poses. Actual Docker/ROS execution still needs a final rerun.
+
 Additional local checks confirmed:
 
 - Twenty stateful inference calls through the refactored submission produced
@@ -54,7 +62,7 @@ Additional local checks confirmed:
 
 The GitHub Actions simulation job installs the screening package and runs both
 suites on Python 3.12. A clean checkout includes the walker bundle, so missing
-walker files now fail instead of silently skipping screening coverage. The GR00T balance rollout also uses its committed model bundle. The hosted CI job has not yet been run for this change.
+walker files now fail instead of silently skipping screening coverage. The GR00T balance rollout also uses its committed model bundle. Current hosted CI status is tracked on the PR.
 
 Direct circle runs report `completed` and `control_path: direct`, with explicit
 per-check flags. Replay labels submission checks as bypassed even when opened

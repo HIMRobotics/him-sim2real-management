@@ -29,8 +29,9 @@ jobs:
       - run: uv venv --python 3.12 .venv-policy-safety
       - run: uv pip install --python .venv-policy-safety/bin/python './packages/policy_safety[test]'
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: python3 containers/sim/viewer_assets.py
       - run: .venv-policy-safety/bin/python -m pytest -q containers/sim packages/policy_safety/tests
         env:
           G1_SIM_PYTHON: ${{ github.workspace }}/.venv-policy-safety/bin/python
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-      - run: bash -n sim.sh desktop_sim.sh containers/sim/desktop_entry.sh setup.sh examples/submissions/walker/build.sh examples/submissions/walker/entrypoint.sh containers/examples/entrypoint.sh
+      - run: for script in sim.sh desktop_sim.sh containers/sim/*.sh setup.sh examples/submissions/walker/*.sh containers/examples/entrypoint.sh; do bash -n "$script" || exit; done

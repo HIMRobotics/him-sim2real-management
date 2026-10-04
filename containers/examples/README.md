@@ -39,7 +39,7 @@ The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyC
 ./sim.sh replay containers/sim/output/stairs-off/trace.npz
 ```
 
-Open `http://127.0.0.1:8765`. The replay shows the robot, stairs, safety mode, result, and any rejection reason. Left drag orbits, right drag pans, scroll zooms, and Space pauses. A blue line on the floor is the pelvis path. Ctrl+C stops the server. Use the `stairs-on`, `balance-on`, or `balance-off` trace to view the other runs. With `sim.sh --local --view`, the run completes before the replay page opens. `desktop_sim.sh --local --view` waits for Start and streams the local run live. With Docker/ROS `--view`, the page opens first and waits for Start. `./sim.sh --view --circle` is the same page for one flat circle from the cached walker, with no submission.
+Open the printed URL (normally `http://127.0.0.1:8765`). The replay shows the robot, stairs, safety mode, result, and any rejection reason. Left drag orbits, right drag pans, scroll zooms, and Space pauses. A blue line on the floor is the pelvis path. Ctrl+C stops the server. Use the `stairs-on`, `balance-on`, or `balance-off` trace to view the other runs. With either launcher, `--view` waits for Start and streams the run live, including `--local`. `./sim.sh --view --circle` is the same page for one flat circle from the cached walker, with no submission. The [viewer setup](../SIM_RUN.md#how-to-visualize) describes the initial dependency download and offline use.
 
 If running on the robot over SSH, forward port 8765 with `ssh -L 8765:127.0.0.1:8765 unitree@<robot>` and open the same URL on your laptop.
 

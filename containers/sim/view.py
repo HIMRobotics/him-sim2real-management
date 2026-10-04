@@ -12,6 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "robot_safety"))
 
 from plant import load_model
+from viewer_assets import install
 
 PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -340,6 +341,7 @@ def pose_frame(model, data, base, geoms, qpos, time):
 
 def write_page(dest, model, geoms, frames, summary, live=False):
     """Write index.html, motion.json, and the mesh files the page loads."""
+    assets = install()
     dest = Path(dest)
     mesh_dir = dest / "meshes"
     if dest.exists():
@@ -374,8 +376,8 @@ def write_page(dest, model, geoms, frames, summary, live=False):
         payload["geoms"].append(geom)
     dest.joinpath("motion.json").write_text(json.dumps(payload))
     dest.joinpath("index.html").write_text(PAGE)
-    for name in ("three.module.js", "OrbitControls.js", "STLLoader.js"):
-        shutil.copy2(Path(__file__).resolve().parent / "web" / name, dest / name)
+    for asset in assets:
+        shutil.copy2(asset, dest / asset.name)
     return dest
 
 
