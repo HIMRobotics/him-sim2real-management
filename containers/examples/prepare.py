@@ -119,7 +119,7 @@ def prepare(name, destination=None, *, container=True):
     if not container:
         return root
     context = root / "container"
-    for filename in ("controllers.py", "client.py", "Dockerfile", "entrypoint.sh"):
+    for filename in ("controllers.py", "client.py", "trial.py", "Dockerfile", "entrypoint.sh"):
         copy_file(ROOT / "containers/examples" / filename, context / filename)
     for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py"):
         copy_file(ROOT / "robot_safety" / filename, context / "robot_safety" / filename)

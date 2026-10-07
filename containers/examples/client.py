@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from trial import MovementTrial
 
 
 class PolicyNode(Node):
@@ -22,6 +23,10 @@ class PolicyNode(Node):
         super().__init__("example_policy")
         self.policy = policy
         self.mode = mode
+        trial_path = os.environ.get("G1_TRIAL_CONFIG")
+        self.trial = MovementTrial(json.loads(Path(trial_path).read_text())) if trial_path else None
+        if self.trial and (policy.name == "balance" or os.environ.get("G1_THRASH_MODE") != "enforce"):
+            raise ValueError("movement trials require velocity commands and thrash enforcement")
         self.state = None
         self.done = False
         self.last_observation = 0
@@ -91,11 +96,16 @@ class PolicyNode(Node):
             state["task_command"] = [0., 0., 0.]
             if self.policy.name != "balance" and "base_velocity" not in state:
                 raise RuntimeError("policy requires measured base velocity")
+        if self.trial and state.get("control_ready", False):
+            state["task_command"] = self.trial.command(state, time.monotonic())
         frame = self.policy.command(state)
         command = JointCommand()
         for key, value in frame.items():
             setattr(command, key, value)
         self.pub.publish(command)
+        if self.mode != "sim" or self.trial:
+            print(json.dumps({"state": state, "command": frame,
+                              "trial": self.trial.result if self.trial else None}, allow_nan=False), flush=True)
 
     def on_abort(self, message):
         print("Policy abort: " + message.reason, flush=True)

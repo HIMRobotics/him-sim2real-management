@@ -11,7 +11,7 @@ WORKDIR /example
 COPY interfaces /example/interfaces
 RUN source /opt/ros/foxy/setup.bash && colcon build --base-paths interfaces \
     --packages-select him_safety_interfaces
-COPY controllers.py client.py entrypoint.sh /example/
+COPY controllers.py client.py trial.py entrypoint.sh /example/
 COPY robot_safety /example/robot_safety
 COPY policy_safety /example/policy_safety
 COPY project /example/project
