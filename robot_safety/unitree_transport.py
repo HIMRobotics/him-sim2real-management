@@ -2,7 +2,7 @@
 
 import json
 import time
-from threading import Thread
+from threading import Lock, Thread
 
 from .hardware_constants import (
     ARM_INDICES,
@@ -26,10 +26,38 @@ from .hardware_profile import (
 SOFT_RESET_PHRASE = "Soft Reset"
 
 
+class MotorWriterLock:
+    """Exclude other repository motor writers on this host."""
+
+    def __init__(self, path="/tmp/g1-motor-writer.lock"):
+        import fcntl
+        import os
+
+        self.fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.close()
+            raise RuntimeError("another G1 motor writer is active") from None
+
+    def close(self):
+        import os
+
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def __del__(self):
+        if getattr(self, "fd", None) is not None:
+            self.close()
+
+
 class UnitreeArmTransport:
     """Own arm_sdk publication and a separate locomotion RPC client."""
 
     def __init__(self, interface, domain, on_state, on_battery):
+        self.writer_lock = MotorWriterLock()
+        self.write_lock = Lock()
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
             MotionSwitcherClient,
         )
@@ -84,7 +112,8 @@ class UnitreeArmTransport:
                 setattr(motor, field, value)
         message.motor_cmd[ARM_WEIGHT_INDEX].q = weight
         message.crc = self.crc.Crc(message)
-        return self.publisher.Write(message)
+        with self.write_lock:
+            return self.publisher.Write(message)
 
     def release_motion(self):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
@@ -118,24 +147,32 @@ class UnitreeArmTransport:
 
     def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
         """Command 15 lower-body targets and hold the captured arm pose."""
+        targets = {}
+        for index in range(NUM_JOINTS):
+            lower = index in LOWER_BODY_INDICES
+            targets[index] = {
+                "q": float(lower_q[index] if lower else arm_q[index - ARM_INDICES[0]]),
+                "dq": 0.0, "tau": 0.0,
+                "kp": float(leg_kp[index]) if lower else 40.0,
+                "kd": float(leg_kd[index]) if lower else 1.0,
+            }
+        return self.write_body(targets, machine)
+
+    def write_body(self, targets, machine):
+        """Encode a complete, already checked 29-joint command."""
+        if set(targets) != set(range(NUM_JOINTS)):
+            raise ValueError("whole-body output requires all 29 joints")
         message = self.make_command()
         message.mode_pr = 0
         message.mode_machine = machine
-        for index in range(NUM_JOINTS):
+        for index, values in targets.items():
             motor = message.motor_cmd[index]
             motor.mode = 1
-            motor.dq = 0.0
-            motor.tau = 0.0
-            if index in LOWER_BODY_INDICES:
-                motor.q = float(lower_q[index])
-                motor.kp = float(leg_kp[index])
-                motor.kd = float(leg_kd[index])
-            else:
-                motor.q = float(arm_q[index - ARM_INDICES[0]])
-                motor.kp = 40.0
-                motor.kd = 1.0
+            for field in ("q", "dq", "kp", "kd", "tau"):
+                setattr(motor, field, float(values[field]))
         message.crc = self.crc.Crc(message)
-        return self.lowcmd.Write(message)
+        with self.write_lock:
+            return self.lowcmd.Write(message)
 
     def _set_motion_silent(self, silent):
         """Mute the firmware mode announcement. ReleaseMode otherwise says developer mode."""
@@ -193,3 +230,5 @@ class UnitreeArmTransport:
         self.subscriber.Close()
         self.bms_subscriber.Close()
         self.publisher.Close()
+        self.lowcmd.Close()
+        self.writer_lock.close()

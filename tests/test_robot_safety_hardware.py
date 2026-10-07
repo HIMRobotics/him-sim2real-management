@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -808,6 +809,7 @@ class TransportEncodingTests(unittest.TestCase):
 
     def test_only_upper_body_and_weight_slots_are_written_with_crc(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+        transport.write_lock = Lock()
 
         def make_command():
             return SimpleNamespace(
@@ -834,6 +836,43 @@ class TransportEncodingTests(unittest.TestCase):
         self.assertEqual(message.motor_cmd[29].q, 0.2)
         self.assertTrue(all(message.motor_cmd[i].kp == 0 for i in range(12)))
         self.assertEqual(message.crc, 12345)
+
+    def test_body_writer_preserves_all_fields_and_balance_wrapper(self):
+        transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+        transport.write_lock = Lock()
+        transport.make_command = lambda: SimpleNamespace(
+            motor_cmd=[SimpleNamespace() for _ in range(35)])
+        transport.crc = SimpleNamespace(Crc=lambda message: 12345)
+        written = []
+        transport.lowcmd = SimpleNamespace(Write=lambda msg: written.append(msg) or True)
+        targets = {i: {"q": i / 100, "dq": 0.1, "kp": 2., "kd": 0.5, "tau": 0.2} for i in range(29)}
+        self.assertTrue(transport.write_body(targets, 5))
+        msg = written[-1]
+        self.assertEqual((msg.mode_machine, msg.mode_pr, msg.crc), (5, 0, 12345))
+        for i, fields in targets.items():
+            self.assertEqual(msg.motor_cmd[i].mode, 1)
+            for field, value in fields.items():
+                self.assertEqual(getattr(msg.motor_cmd[i], field), value)
+        with self.assertRaises(ValueError):
+            transport.write_body({0: targets[0]}, 5)
+        transport.write_lower_body([0.1] * 15, [0.2] * 14, [3.] * 15, [2.] * 15, 5)
+        for i, motor in enumerate(written[-1].motor_cmd[:29]):
+            self.assertEqual((motor.q, motor.kp, motor.kd),
+                             (0.1, 3., 2.) if i < 15 else (0.2, 40., 1.))
+            self.assertEqual((motor.dq, motor.tau), (0., 0.))
+
+    def test_writer_lock_excludes_and_releases(self):
+        from robot_safety.unitree_transport import MotorWriterLock
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "writer.lock")
+            first = MotorWriterLock(path)
+            try:
+                with self.assertRaises(RuntimeError):
+                    MotorWriterLock(path)
+            finally:
+                first.close()
+            MotorWriterLock(path).close()
 
     def test_soft_reset_mutes_developer_mode_then_speaks(self):
         from robot_safety.unitree_transport import (

@@ -191,6 +191,9 @@ def main():
             "double Start restores stock damp"
         )
 
+    from robot_safety.unitree_transport import MotorWriterLock
+
+    writer_lock = MotorWriterLock()
     publisher = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
     publisher.Init()
     crc = CRC()
@@ -298,6 +301,8 @@ def main():
         print(f"stop_reason {reason['text']}")
         _restore(switcher, locomotion, saved_name)
         subscriber.Close()
+        if not worker.is_alive():
+            writer_lock.close()
 
 
 if __name__ == "__main__":
