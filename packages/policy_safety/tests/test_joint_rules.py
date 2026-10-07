@@ -1,13 +1,13 @@
-"""Exercise joint-rule boundaries and parity with the hardware checker."""
+"""Shared pre-command limits and parity with the hardware checker."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from joint_checks import JointViolation
-from policy_safety.adapter import PolicyViolation
+from joint_checks import JointViolation, check_base_motion
 from policy_safety.joint_rules import DEFAULT_JOINT_PROFILE, JointRules
 
 
@@ -17,169 +17,93 @@ def rules(bundle):
     return JointRules(robot["joint_names"])
 
 
-def command_case(rules, case):
-    q, dq, tau, measured = (np.zeros(29) for _ in range(4))
-    previous = {"target": q.copy(), "velocity": dq.copy()}
-    i = rules.sdk_names.index("left_shoulder_pitch")
-    if case == "position":
-        q[i] = 2.7
-        measured[i] = q[i]
-    elif case == "velocity":
-        dq[i] = 38
-    elif case == "position_delta":
-        q[i] = 0.75
-        measured[i] = q[i]
-    elif case == "velocity_delta":
-        dq[i] = 0.021
-    elif case == "tracking":
-        q[i] = 0.31
-    elif case == "initial_position":
-        q[i] = 0.031
-        previous = None
-    elif case == "initial_velocity":
-        dq[i] = 0.051
-        previous = None
-    elif case == "torque":
-        tau[i] = 0.1
-    elif case == "finite":
-        q[i] = float("nan")
-    return q, dq, tau, measured, previous
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_runtime_gap_has_no_limit_for_every_joint(rules, sign):
+    for i, _name, limits in rules.entries:
+        q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+        q[i] = limits.position_min_rad if sign < 0 else limits.position_max_rad
+        measured[i] = limits.position_max_rad if sign < 0 else limits.position_min_rad
+        np.testing.assert_array_equal(rules.check_command(q, dq, tau, measured), q)
 
 
-@pytest.mark.parametrize(
-    ("case", "reason"),
-    [
-        ("valid", None),
-        ("position", "joint_target_position_limit"),
-        ("velocity", "joint_target_velocity_limit"),
-        ("position_delta", "joint_position_target_change_limit"),
-        ("velocity_delta", "joint_velocity_target_change_limit"),
-        ("tracking", "joint_tracking_error_limit"),
-        ("initial_position", "initial_joint_position_mismatch"),
-        ("initial_velocity", "initial_joint_target_velocity_limit"),
-        ("torque", "nonzero_feedforward_torque"),
-        ("finite", "nonfinite_or_invalid_joint_command"),
-    ],
-)
-def test_hardware_checker_acceptance_matches(rules, case, reason, monkeypatch):
+@pytest.mark.parametrize("gap", [0.4, 0.501])
+def test_hardware_and_simulation_agree(rules, gap, monkeypatch):
     root = Path(__file__).resolve().parents[3]
-    if not (root / "robot_safety").is_dir():
-        pytest.skip("hardware parity test requires the repository")
     monkeypatch.syspath_prepend(str(root))
     from robot_safety.hardware_adapter import G1ArmAdapter
-    from robot_safety.hardware_constants import G1_29_JOINT_NAMES
     from robot_safety.hardware_profile import HardwareProfile
 
-    assert list(G1_29_JOINT_NAMES) == rules.sdk_names
-    q, dq, tau, measured, previous = command_case(rules, case)
-    hardware = G1ArmAdapter(
-        HardwareProfile.load(root / "robot_safety/profiles/g1_type5.template.json")
-    )
+    hardware = G1ArmAdapter(HardwareProfile.load(DEFAULT_JOINT_PROFILE))
+    q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+    q[15], measured[15] = gap, 0
+    # Use a lower gain so this test isolates the command gap from torque.
+    joints = list(hardware.profile.joints)
+    joints[3] = replace(joints[3], kp=1)
+    hardware.profile = replace(hardware.profile, joints=tuple(joints))
     hardware.command = {"q": q, "dq": dq, "tau": tau}
-    hardware.feedback = SimpleNamespace(q=measured, dq=np.zeros(29))
-    hardware.previous_targets = None if previous is None else previous["target"]
-    hardware.previous_velocities = None if previous is None else previous["velocity"]
-    hardware.last_output_secs = None if previous is None else 0.0
-    expected = case == "valid"
-    try:
-        hardware.checked_targets(0.02)
-        accepted = True
-    except ValueError:
-        accepted = False
-    assert accepted == expected
-    if accepted:
-        rules.check_command(q, dq, tau, measured, previous, 0.02)
-    else:
-        with pytest.raises((PolicyViolation, JointViolation), match=reason) as failure:
-            rules.check_command(q, dq, tau, measured, previous, 0.02)
-        if case != "finite":
-            assert failure.value.details["joint"] == "left_shoulder_pitch"
-            assert "limit" in failure.value.details
-
-
-def test_all_joint_velocity_change_boundaries(rules):
-    for i, name, limits in rules.entries:
-        q, dq, tau, measured, previous = command_case(rules, "valid")
-        dq[i] = limits.max_acceleration_rad_secs2 * 0.02
-        rules.check_command(q, dq, tau, measured, previous, 0.02)
-        dq[i] += 1e-6
-        with pytest.raises(
-            JointViolation, match="joint_velocity_target_change_limit"
-        ) as failure:
-            rules.check_command(q, dq, tau, measured, previous, 0.02)
-        assert failure.value.details["joint"] == name
-
-
-def test_tracking_boundaries_and_coverage(rules):
-    for i, name, limits in rules.entries:
-        q, dq, tau, measured, previous = command_case(rules, "valid")
-        q[i] = limits.max_tracking_error_rad
-        previous["target"] = q.copy()
-        rules.check_command(q, dq, tau, measured, previous, 0.02)
-        rules.check_tracking(q, measured)
-        q[i] += 1e-6
-        with pytest.raises(
-            JointViolation, match="joint_tracking_error_limit"
-        ) as failure:
-            rules.check_tracking(q, measured)
-        assert failure.value.details["joint"] == name
-    coverage = rules.coverage()
-    assert len(coverage["covered_joints"]) == 29
-    assert len(coverage["uncovered_joints"]) == 0
-
-
-def test_packaged_profile_matches_standard_template():
-    path = (
-        Path(__file__).resolve().parents[3]
-        / "robot_safety/profiles/g1_type5.template.json"
-    )
-    if not path.is_file():
-        pytest.skip("source template is outside standalone distribution")
-    assert DEFAULT_JOINT_PROFILE.read_bytes() == path.read_bytes()
-
-
-def test_invalid_or_missing_joint_limits_rejected(rules, tmp_path):
-    profile = rules.profile
-    del profile["joints"]["waist_yaw"]
-    path = tmp_path / "incomplete.json"
-    path.write_text(json.dumps(profile))
-    with pytest.raises(ValueError, match="all 29"):
-        JointRules(rules.names, path)
+    hardware.feedback = SimpleNamespace(q=measured, dq=dq)
+    hardware.last_output_secs = 0
+    assert hardware.checked_targets(0.02)[15]["q"] == gap
+    assert rules.check_command(q, dq, tau, measured)[15] == gap
 
 
 @pytest.mark.parametrize("sign", [-1, 1])
-def test_all_joint_torque_boundaries(rules, sign):
+def test_official_velocity_and_torque_boundaries(rules, sign):
+    path = Path(__file__).resolve().parents[3] / "robot_safety/profiles/g1_type5.official_limits.json"
+    ratings = json.loads(path.read_text())["joints"]
     for i, name, limits in rules.entries:
-        torque = np.zeros(29)
-        torque[i] = sign * limits.max_torque_nm
-        rules.check_torque(torque)
-        torque[i] += sign * 1e-6
-        with pytest.raises(JointViolation, match="joint_torque_limit") as failure:
-            rules.check_torque(torque)
-        assert failure.value.details["joint"] == name
+        assert limits.max_velocity_rad_secs == ratings[name]["velocity"]
+        assert limits.max_torque_nm == ratings[name]["effort"]
+        for field, method, reason in (
+            (limits.max_velocity_rad_secs, rules.check_measured_velocity, "joint_velocity_limit"),
+            (limits.max_torque_nm, rules.check_torque, "joint_torque_limit"),
+        ):
+            values = np.zeros(29)
+            values[i] = sign * field
+            method(values)
+            values[i] += sign * 1e-6
+            with pytest.raises(JointViolation, match=reason):
+                method(values)
 
 
-def test_leg_position_delta(rules):
+def test_position_initial_and_finite_checks_remain(rules):
+    q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+    for value, initial, reason in ((0.031, True, "initial_joint_position_mismatch"),
+                                   (float("nan"), False, "nonfinite")):
+        q[15] = value
+        with pytest.raises(ValueError, match=reason):
+            rules.check_command(q, dq, tau, measured, initial=initial)
+
+
+@pytest.mark.parametrize("side", ["position_min_rad", "position_max_rad"])
+def test_position_clipping_warns_and_preserves_proposals(rules, side):
     for i, name, limits in rules.entries:
-        if i >= 12:
-            continue
-        q, dq, tau, measured, previous = command_case(rules, "valid")
-        q[i] = measured[i] = limits.max_velocity_rad_secs * 0.001 + 1e-6
-        with pytest.raises(
-            JointViolation, match="joint_position_target_change_limit"
-        ) as failure:
-            rules.check_command(q, dq, tau, measured, previous, 0.001)
-        assert failure.value.details["joint"] == name
+        bound = getattr(limits, side)
+        q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+        measured[i] = bound
+        q[i] = bound + (-0.02 if side == "position_min_rad" else 0.02)
+        original = q.copy()
+        warnings = {}
+        clipped = rules.check_command(q, dq, tau, measured, initial=True, warnings=warnings)
+        assert clipped[i] == bound
+        np.testing.assert_array_equal(q, original)
+        assert warnings[name]["q_proposed"] == q[i]
+        assert warnings[name]["q_commanded"] == bound
+        assert warnings[name]["count"] == 1
+        rules.check_command(q, dq, tau, measured, warnings=warnings)
+        assert warnings[name]["count"] == 2
+        measured[i] = bound + (0.501 if side == "position_min_rad" else -0.501)
+        assert rules.check_command(q, dq, tau, measured)[i] == bound
 
 
-def test_measured_speed_above_joint_cap_is_rejected(rules):
-    for i, name, limits in rules.entries:
-        assert limits.max_velocity_rad_secs == 9.0
-        speed = np.zeros(29)
-        speed[i] = 9.0
-        rules.check_measured_velocity(speed)
-        speed[i] = 9.0 + 1e-6
-        with pytest.raises(JointViolation, match="joint_velocity_limit") as failure:
-            rules.check_measured_velocity(speed)
-        assert failure.value.details["joint"] == name
-        assert failure.value.details["limit"] == 9.0
+def test_body_limits_are_per_axis_and_tilt_is_optional():
+    check_base_motion([6, 6, 6])
+    with pytest.raises(JointViolation, match="base_angular_speed_limit"):
+        check_base_motion([6.01, 0, 0])
+    with pytest.raises(JointViolation, match="base_tilt_limit"):
+        check_base_motion([0, 0, 0], [0, 1, 0, 0])
+
+
+def test_packaged_profile_matches_standard_template():
+    path = Path(__file__).resolve().parents[3] / "robot_safety/profiles/g1_type5.template.json"
+    assert DEFAULT_JOINT_PROFILE.read_bytes() == path.read_bytes()

@@ -1,6 +1,7 @@
 """Policy contracts, simulation causality and failure reporting."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,8 +15,14 @@ pytest.importorskip("onnx")
 
 from policy_safety.adapter import G1Walker, inverse_rotate
 from policy_safety.cli import run_worker
-from policy_safety.config import plan_scenarios, profile_config, scheduled_directions, suite_config
+from policy_safety.config import (
+    plan_scenarios,
+    profile_config,
+    scheduled_directions,
+    suite_config,
+)
 from policy_safety.evaluation import Monitor, run_scenario, summarize_scenarios, verdict
+from policy_safety.joint_rules import JointRules
 from policy_safety.simulation import Simulation, mesh_point_in_body
 
 
@@ -108,11 +115,16 @@ def test_observation_coordinates_history_and_scaling(setup):
 
 def test_sample_neural_path_and_embedded_normalization(bundle):
     import onnx
+    import yaml
 
     sim = Simulation(bundle / "robot.json")
     sim.reset(0)
     adapter = G1Walker(bundle / "walker.onnx", sim.robot)
-    config = json.loads((bundle / "source_model_config.json").read_text())
+    policy_yaml = (
+        Path(__file__).resolve().parents[3]
+        / "examples/policies/walker/walker.yaml"
+    )
+    config_joints = yaml.safe_load(policy_yaml.read_text())["joints"]
     q, dq, quat, vel = (
         sim.data.qpos[sim.qadr],
         sim.data.qvel[sim.vadr],
@@ -127,7 +139,7 @@ def test_sample_neural_path_and_embedded_normalization(bundle):
             inverse_rotate(quat, [0, 0, -1]),
             q.astype(np.float32)
             - np.array(
-                [config["default_joint_pos"][n] for n in config["joint_names"]],
+                [joint["default_position"] for joint in config_joints],
                 dtype=np.float32,
             ),
             dq,
@@ -271,20 +283,20 @@ def test_counterfactual_initialization(setup, pose):
     q = sim.data.qpos[sim.qadr]
     assert np.all(q >= sim.bounds[:, 0]) and np.all(q <= sim.bounds[:, 1])
     monitor = Monitor(sim, profile)
-    _, _, _, reason = monitor.sample(q, q, np.zeros(29), pose == "standing")
+    _, _, _, reason = monitor.sample(q, q, pose == "standing")
     assert reason != "fall"
     if pose in ("left_side", "right_side"):
         left_axis_height = sim.data.xmat[sim.base].reshape(3, 3)[2, 1]
         assert left_axis_height == pytest.approx(-1 if pose == "left_side" else 1)
     if pose in ("supine", "prone", "left_side", "right_side"):
-        assert monitor.sample(q, q, np.zeros(29), True)[-1] == "fall"
+        assert monitor.sample(q, q, True)[-1] == "fall"
 
 
 @pytest.mark.parametrize(
     ("value", "status", "reason"),
     [
         (float("nan"), "violation", "nonfinite_or_invalid_action"),
-        (1000, "violation", "decoded_target_out_of_range"),
+        (1000, "violation", "joint_torque_limit"),
         (RuntimeError("inference failed"), "error", None),
     ],
 )
@@ -297,9 +309,8 @@ def test_bad_inference_is_reported(setup, tmp_path, value, status, reason):
         assert result["first_violation"]["reason"] == reason
 
 
-def test_oscillating_targets_trigger_rate_limit(setup, tmp_path):
+def test_consecutive_proposals_do_not_trigger_a_rate_limit(setup, tmp_path):
     sim, adapter, profile = setup
-    profile["maxima"]["target_rate"] = 2.0
 
     class OscillatingSession(Session):
         def run(self, names, inputs):
@@ -309,8 +320,7 @@ def test_oscillating_targets_trigger_rate_limit(setup, tmp_path):
 
     adapter.session = OscillatingSession(0.05)
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "rate.npz")
-    assert result["first_violation"]["reason"] == "target_rate_limit"
-    assert result["first_violation"]["time_seconds"] > sim.dt
+    assert result["status"] == "completed"
 
 
 def test_scenario_summary_counts_overlapping_issues():
@@ -343,19 +353,6 @@ def test_scenario_summary_counts_overlapping_issues():
     }
 
 
-def test_flail_ignores_an_impact_shorter_than_50ms():
-    from policy_safety.evaluation import overspeed_held
-
-    counts = np.zeros(1, dtype=int)
-    for _ in range(24):
-        counts, held = overspeed_held(counts, [True], 25)
-        assert not held
-    counts, held = overspeed_held(counts, [True], 25)
-    assert held
-    counts, held = overspeed_held(counts, [False], 25)
-    assert not held and counts[0] == 0
-
-
 def test_verdicts_and_calibration():
     assert verdict([{"status": "completed"}], True) == ("within_limits", 0)
     assert verdict([{"status": "completed"}], False) == ("uncalibrated", 3)
@@ -377,10 +374,10 @@ def test_velocity_threshold_is_enforced_only_when_configured(setup):
     sim, _, profile = setup
     sim.data.qvel[sim.vadr[0]] = 3.0
     q = sim.data.qpos[sim.qadr].copy()
-    assert Monitor(sim, profile).sample(q, q, np.zeros(29), True)[-1] is None
+    assert Monitor(sim, profile).sample(q, q, True)[-1] is None
     profile["maxima"]["joint_velocity"] = 2.0
     assert (
-        Monitor(sim, profile).sample(q, q, np.zeros(29), True)[-1]
+        Monitor(sim, profile).sample(q, q, True)[-1]
         == "joint_velocity_limit"
     )
 
@@ -435,7 +432,7 @@ def test_raw_clipping_is_recorded(setup, tmp_path):
         assert trace["applied_target"].size == 0
     assert result["simulated_seconds"] == 0
     assert result["peaks"]["clipping"] > 0
-    assert result["first_violation"]["reason"] == "decoded_target_out_of_range"
+    assert result["first_violation"]["reason"] == "joint_torque_limit"
 
 
 def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
@@ -449,8 +446,27 @@ def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
         tmp_path / "clipped-command.npz",
         clip_to_stops=True,
     )
-    assert result["first_violation"]["reason"] == "joint_tracking_error_limit"
+    assert result["first_violation"]["reason"] == "joint_torque_limit"
     assert result["status"] == "violation"
+
+
+def test_clipping_is_a_warning_and_trace_records_executed_command(setup, tmp_path, monkeypatch):
+    sim, adapter, profile = setup
+    rules = JointRules(sim.robot["joint_names"])
+    q = sim.data.qpos[sim.qadr].copy()
+    index = rules.sdk_names.index("right_wrist_yaw")
+    bound = q[index] + 0.001
+    rules.entries = [(i, name, replace(limits, position_max_rad=bound)
+                      if i == index else limits) for i, name, limits in rules.entries]
+    q[index] += 0.02
+    monkeypatch.setattr(adapter, "decode", lambda raw: q.copy())
+    result, _ = run_scenario(sim, adapter, profile, scenario(seconds=sim.dt),
+                             tmp_path / "warning.npz", joint_rules=rules)
+    assert result["status"] == "completed"
+    assert result["warnings"]["right_wrist_yaw"]["q_proposed"] == q[index]
+    assert result["warnings"]["right_wrist_yaw"]["q_commanded"] == bound
+    with np.load(tmp_path / "warning.npz") as trace:
+        assert np.all(trace["applied_target"][:, index] == bound)
 
 
 def test_joint_mismatch_rejected_before_actuation(setup, tmp_path):
@@ -491,30 +507,43 @@ def test_branch_restores_joint_command_history(setup, tmp_path):
     assert sim.command_history is None
     sim.restore(snapshots[2], adapter)
     dq = np.zeros(29)
-    dq[15] = 0.021
+    dq[15] = 38.0
     adapter.command_velocity_and_torque = lambda: (dq.copy(), np.zeros(29))
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "branch.npz")
-    assert result["first_violation"]["reason"] == "joint_velocity_target_change_limit"
+    assert result["first_violation"]["reason"] == "joint_target_velocity_limit"
     assert result["simulated_seconds"] == 0
 
 
-def test_tracking_checked_between_policy_updates(setup, tmp_path, monkeypatch):
+@pytest.mark.parametrize("follows_target", [True, False])
+def test_tracking_allows_a_full_interval_to_follow_target(
+    setup, tmp_path, monkeypatch, follows_target,
+):
     from policy_safety import evaluation
+    from policy_safety.joint_rules import JointRules
 
     sim, adapter, profile = setup
-    original_step = evaluation.mujoco.mj_step
+    rules = JointRules(sim.robot["joint_names"])
+    target = sim.data.qpos[sim.qadr].copy()
+    target[15] += 0.06
+    adapter.decode = lambda raw: target.copy()
+    ticks = 0
 
-    def drift_step(model, data):
-        original_step(model, data)
-        data.qpos[sim.qadr[15]] -= 0.31
+    def finish_on_last_tick(model, data):
+        nonlocal ticks
+        ticks += 1
+        data.time += sim.physics_dt
+        if follows_target and ticks == sim.substeps:
+            data.qpos[sim.qadr[15]] = target[15]
 
-    monkeypatch.setattr(evaluation.mujoco, "mj_step", drift_step)
+    monkeypatch.setattr(evaluation.mujoco, "mj_step", finish_on_last_tick)
     result, _ = run_scenario(
-        sim, adapter, profile, scenario(), tmp_path / "tracking.npz"
+        sim, adapter, profile, scenario(seconds=sim.dt), tmp_path / "response.npz",
+        joint_rules=rules,
     )
-    assert result["first_violation"]["reason"] == "joint_tracking_error_limit"
-    assert result["first_violation"]["joint"] == "left_shoulder_pitch"
-    assert result["simulated_seconds"] == sim.physics_dt
+    assert ticks == sim.substeps
+    assert result["simulated_seconds"] == pytest.approx(sim.dt)
+    assert result["status"] == "completed"
+    assert result["peaks"]["response_error"] == pytest.approx(0 if follows_target else 0.06)
 
 
 def test_evaluation_enforces_profile_and_reports_sampled_coverage(
@@ -542,7 +571,7 @@ def test_evaluation_enforces_profile_and_reports_sampled_coverage(
         )
     )
     data = json.loads(DEFAULT_JOINT_PROFILE.read_text())
-    data["joints"]["left_hip_pitch"]["max_tracking_error_rad"] = 0.001
+    data["joints"]["left_hip_pitch"]["max_torque_nm"] = 0.001
     joint_path = tmp_path / "strict-joints.json"
     joint_path.write_text(json.dumps(data))
     output = tmp_path / "result"
@@ -705,7 +734,7 @@ def test_mp4_starts_with_ftyp(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "joint,spin,flail", [(9, 0, False), (9.1, 0, True), (0, 5.4, False), (0, 5.5, True)]
+    "joint,spin,flail", [(32, 0, False), (32.1, 0, True), (0, 6, False), (0, 6.1, True)]
 )
 def test_sustained_speed_monitor_uses_profile_and_body_caps(
     setup, tmp_path, monkeypatch, joint, spin, flail
@@ -725,7 +754,7 @@ def test_sustained_speed_monitor_uses_profile_and_body_caps(
     if flail:
         reason = "joint_velocity_limit" if joint else "base_angular_speed_limit"
         assert result["first_violation"]["reason"] == reason
-        assert result["simulated_seconds"] == pytest.approx(0.05)
+        assert result["simulated_seconds"] == pytest.approx(sim.physics_dt)
     else:
         assert result["status"] == "completed"
 

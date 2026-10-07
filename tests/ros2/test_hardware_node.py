@@ -1,7 +1,7 @@
 """Verify the ROS gate-to-SDK boundary using a fake transport only."""
 
-import time
 import os
+import time
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -28,6 +28,41 @@ from tests.test_robot_safety_hardware import FakeTransport, load_profile, profil
 
 
 class HardwareNodeTests(unittest.TestCase):
+    def test_diagnostics_distinguish_proposed_offsets_from_tracking(self):
+        import json
+
+        from robot_safety.joint_diagnostics import JointDeltaDiagnostics
+
+        diagnostics = JointDeltaDiagnostics()
+        feedback = SimpleNamespace(q=[0.0] * 29, dq=[0.0] * 29)
+        diagnostics.record({"q": [0.1] * 29}, feedback)
+        node = SimpleNamespace(
+            adapter=SimpleNamespace(
+                joint_diagnostics_snapshot=diagnostics.snapshot, abort_reason=None,
+            ),
+            final_diagnostics_logged=False,
+            motor_gate=SimpleNamespace(policy_session_id="test"),
+            joint_diagnostics_publisher=Mock(), get_logger=Mock(),
+        )
+        HardwareMotorGateNode.publish_joint_diagnostics(node)
+        payload = json.loads(node.joint_diagnostics_publisher.publish.call_args[0][0].data)
+        shoulder = payload["joints"]["left_shoulder_roll"]
+        self.assertEqual(shoulder["command_gap_rad"]["max_abs"], 0.1)
+        self.assertEqual(shoulder["response_error_rad"]["samples"], 0)
+        node.get_logger.assert_not_called()
+        diagnostics.record_response({16: 0.05}, feedback)
+        HardwareMotorGateNode.publish_joint_diagnostics(node)
+        self.assertIn("largest=left_shoulder_roll", node.get_logger().info.call_args[0][0])
+        snapshot = diagnostics.snapshot()
+        warning = {"reason": "joint_position_clipped", "q_proposed": 1.2,
+                   "q_commanded": 1.0, "count": 1}
+        snapshot["left_shoulder_roll"]["position_clipping"] = warning
+        node.adapter.joint_diagnostics_snapshot = lambda: snapshot
+        HardwareMotorGateNode.publish_joint_diagnostics(node)
+        payload = json.loads(node.joint_diagnostics_publisher.publish.call_args[0][0].data)
+        self.assertEqual(payload["joints"]["left_shoulder_roll"]["position_clipping"], warning)
+        self.assertIn("Joint position clipped left_shoulder_roll", node.get_logger().warning.call_args[0][0])
+
     def test_startup_ready_requires_warmup_telemetry_and_live_workers(self):
         adapter = SimpleNamespace(
             balance_policy=None, feedback_fresh=Mock(return_value=True),
@@ -140,7 +175,7 @@ class HardwareNodeTests(unittest.TestCase):
                 SimpleNamespace(
                     mode_machine=5,
                     wireless_remote=[0] * 40,
-                    motor_state=[SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)],
+                    motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 )
             )
             self.assertTrue(
@@ -148,6 +183,7 @@ class HardwareNodeTests(unittest.TestCase):
             )
             request = ArmGate.Request()
             request.session_id = "hardware-test"
+            node.adapter.receive_battery(SimpleNamespace(soc=100))
             self.assertTrue(node.on_arm(request, ArmGate.Response()).success)
             command = {field: [0.0] * 29 for field in ("q", "dq", "kp", "kd", "tau")}
             command.update(session="hardware-test", seq=1, state_id=1)

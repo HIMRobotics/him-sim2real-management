@@ -79,8 +79,6 @@ METRICS = {
     "joint_velocity",
     "joint_acceleration",
     "actuator_torque",
-    "tracking_error",
-    "target_rate",
     "base_linear_speed",
     "base_angular_speed",
     "contact_force",

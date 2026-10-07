@@ -13,8 +13,6 @@ class JointHardwareLimits:
     kp: float
     kd: float
     max_velocity_rad_secs: float
-    max_acceleration_rad_secs2: float
-    max_tracking_error_rad: float
     max_torque_nm: float
 
     def __post_init__(self):
@@ -47,10 +45,48 @@ def check_bound(reason, joint, value, limit, units):
         raise JointViolation(reason, joint, value, limit, units)
 
 
-# Below Unitree's 6 rad/s body passive-mode threshold.
-BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4
-# A foot-strike flick is over in well under this. A real flail holds much longer.
-SPEED_HOLD_S = 0.05
+def clip_position(joint, q_proposed, lower, upper, warnings=None):
+    """Bound a finite proposal and summarize clipping per joint."""
+    if not math.isfinite(q_proposed):
+        raise ValueError("nonfinite_or_invalid_joint_command")
+    q_commanded = max(lower, min(upper, q_proposed))
+    if q_commanded != q_proposed and warnings is not None:
+        previous = warnings.get(joint, {})
+        warnings[joint] = {
+            "reason": "joint_position_clipped",
+            "q_proposed": float(q_proposed),
+            "q_commanded": float(q_commanded),
+            "bounds_rad": [float(lower), float(upper)],
+            "count": previous.get("count", 0) + 1,
+            "max_correction_rad": max(previous.get("max_correction_rad", 0),
+                                      abs(float(q_proposed - q_commanded))),
+        }
+    return q_commanded
+
+
+BASE_ANGULAR_SPEED_LIMIT_RAD_S = 6.0
+BASE_TILT_LIMIT_RAD = 1.0
+MOTOR_WINDING_LIMIT_C = 120.0
+MOTOR_CASING_LIMIT_C = 85.0
+MIN_BATTERY_PERCENT = 20.0
+
+
+def check_base_motion(gyro, quat=None):
+    """Check each gyro axis and, when requested, tilt from upright."""
+    if len(gyro) != 3:
+        raise ValueError("invalid_imu")
+    for axis, speed in enumerate(gyro):
+        check_bound("base_angular_speed_limit", str(axis), abs(speed),
+                    BASE_ANGULAR_SPEED_LIMIT_RAD_S, "rad/s")
+    if quat is not None:
+        if len(quat) != 4 or not all(math.isfinite(v) for v in quat):
+            raise ValueError("invalid_imu")
+        norm = sum(v * v for v in quat)
+        if norm <= 0:
+            raise ValueError("invalid_imu")
+        upright = 1 - 2 * (quat[1] ** 2 + quat[2] ** 2) / norm
+        tilt = math.acos(max(-1.0, min(1.0, upright)))
+        check_bound("base_tilt_limit", "base", tilt, BASE_TILT_LIMIT_RAD, "rad")
 
 
 def check_measured_velocity(joint, limits, measured_dq):
@@ -64,80 +100,25 @@ def check_measured_velocity(joint, limits, measured_dq):
     )
 
 
-def check_tracking(joint, limits, target, measured):
-    check_bound(
-        "joint_tracking_error_limit",
-        joint,
-        abs(target - measured),
-        limits.max_tracking_error_rad,
-        "rad",
-    )
-
-
 def check_command(
-    joint,
-    limits,
-    q,
-    dq,
-    tau,
-    measured,
-    previous,
-    dt,
-    initial_position,
-    initial_velocity,
+    joint, limits, q_proposed, dq_proposed, tau, q_measured,
+    initial, initial_position, initial_velocity, warnings=None,
 ):
-    """Apply identical command rules at hardware and simulation boundaries."""
-    if not all(math.isfinite(v) for v in (q, dq, tau, measured)):
+    """Validate a proposal against current measurements before actuation."""
+    if not all(math.isfinite(v) for v in (q_proposed, dq_proposed, tau, q_measured)):
         raise ValueError("nonfinite_or_invalid_joint_command")
-    if not limits.position_min_rad <= q <= limits.position_max_rad:
-        raise JointViolation(
-            "joint_target_position_limit",
-            joint,
-            q,
-            [limits.position_min_rad, limits.position_max_rad],
-            "rad",
-        )
-    check_bound(
-        "joint_target_velocity_limit",
-        joint,
-        abs(dq),
-        limits.max_velocity_rad_secs,
-        "rad/s",
-    )
-    check_bound("nonzero_feedforward_torque", joint, abs(tau), 0, "Nm")
-    check_tracking(joint, limits, q, measured)
-    if previous is None:
-        check_bound(
-            "initial_joint_position_mismatch",
-            joint,
-            abs(q - measured),
-            initial_position,
-            "rad",
-        )
-        check_bound(
-            "initial_joint_target_velocity_limit",
-            joint,
-            abs(dq),
-            initial_velocity,
-            "rad/s",
-        )
-    else:
-        if not math.isfinite(dt) or dt <= 0:
-            raise ValueError("command interval must be finite and positive")
-        check_bound(
-            "joint_position_target_change_limit",
-            joint,
-            abs(q - previous[0]),
-            limits.max_velocity_rad_secs * dt,
-            "rad",
-        )
-        check_bound(
-            "joint_velocity_target_change_limit",
-            joint,
-            abs(dq - previous[1]),
-            limits.max_acceleration_rad_secs2 * dt,
-            "rad/s",
-        )
+    q_commanded = clip_position(joint, q_proposed, limits.position_min_rad,
+                               limits.position_max_rad, warnings)
+    check_bound("joint_target_velocity_limit", joint, abs(dq_proposed),
+                limits.max_velocity_rad_secs, "rad/s")
+    check_bound("joint_feedforward_torque_limit", joint, abs(tau), limits.max_torque_nm, "Nm")
+    command_gap = q_commanded - q_measured
+    if initial:
+        check_bound("initial_joint_position_mismatch", joint, abs(command_gap),
+                    initial_position, "rad")
+        check_bound("initial_joint_target_velocity_limit", joint, abs(dq_proposed),
+                    initial_velocity, "rad/s")
+    return q_commanded
 
 
 def check_torque(joint, limits, torque):

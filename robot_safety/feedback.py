@@ -21,6 +21,8 @@ class FeedbackSample:
     q: tuple
     dq: tuple
     start_button_pressed: bool
+    temperature: tuple = ()
+    tau_est: tuple = ()
 
 
 def feedback_from_sdk(message, received_at_secs):
@@ -33,7 +35,11 @@ def feedback_from_sdk(message, received_at_secs):
     if not all(math.isfinite(value) for value in (received_at_secs,) + q + dq):
         raise ValueError("nonfinite feedback")
     return FeedbackSample(
-        received_at_secs, q, dq, decode_start_pressed(message.wireless_remote)
+        received_at_secs, q, dq, decode_start_pressed(message.wireless_remote),
+        tuple(tuple(float(t) for t in motor.temperature) for motor in motors)
+        if all(hasattr(motor, "temperature") for motor in motors) else (),
+        tuple(float(motor.tau_est) for motor in motors)
+        if all(hasattr(motor, "tau_est") for motor in motors) else (),
     )
 
 

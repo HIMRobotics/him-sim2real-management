@@ -134,11 +134,13 @@ def clip_lower_targets(targets):
 class BalancePolicy:
     """Run the standing network. A zero twist always selects this file, not walk."""
 
-    def __init__(self, model_path):
+    def __init__(self, model_path, session=None):
         import onnxruntime as ort
 
-        self.session = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"]
+        self.session = (
+            session
+            if session is not None
+            else ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         )
         self.input_name = self.session.get_inputs()[0].name
         self.action = np.zeros(NUM_ACTIONS, dtype=np.float32)

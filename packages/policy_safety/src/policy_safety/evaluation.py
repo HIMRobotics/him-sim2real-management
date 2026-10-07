@@ -10,8 +10,8 @@ import numpy as np
 import onnxruntime
 from joint_checks import (
     BASE_ANGULAR_SPEED_LIMIT_RAD_S,
-    SPEED_HOLD_S,
     JointViolation,
+    check_base_motion,
 )
 
 from . import __version__
@@ -64,12 +64,6 @@ def scenario_label(scenario):
             return f"{name} push {level}"
         return f"{name} push"
     return name
-
-
-def overspeed_held(counts, active, hold_steps):
-    """Count consecutive samples over the line. A short impact resets the count."""
-    counts = np.where(np.asarray(active, dtype=bool), np.asarray(counts) + 1, 0)
-    return counts, bool(np.any(counts >= hold_steps))
 
 
 def issue_flags(scenario):
@@ -126,7 +120,7 @@ class Monitor:
         self.previous_velocity = simulation.data.qvel[simulation.vadr].copy()
         self.peaks = {}
 
-    def sample(self, target, applied, target_rate, upright):
+    def sample(self, target, applied, upright):
         sim, d, m = self.sim, self.sim.data, self.sim.model
         q, dq = d.qpos[sim.qadr], d.qvel[sim.vadr]
         acceleration = (dq - self.previous_velocity) / sim.physics_dt
@@ -144,8 +138,6 @@ class Monitor:
             "joint_velocity": float(np.max(np.abs(dq))),
             "joint_acceleration": float(np.max(np.abs(acceleration))),
             "actuator_torque": float(np.max(np.abs(torque))),
-            "tracking_error": float(np.max(np.abs(applied - q))),
-            "target_rate": float(np.max(np.abs(target_rate))),
             "base_linear_speed": float(np.linalg.norm(d.qvel[:3])),
             "base_angular_speed": float(np.linalg.norm(d.qvel[3:6])),
             "contact_force": contact_force,
@@ -200,9 +192,8 @@ def run_scenario(
     joint_rules = joint_rules or JointRules(sim.robot["joint_names"])
     start = float(sim.data.time)
     start_position = sim.data.qpos[:3].copy()
-    previous_target = sim.data.ctrl[sim.actuators].copy()
     snapshots, rows = {}, []
-    result = dict(scenario, status="completed", first_violation=None, peaks={})
+    result = dict(scenario, status="completed", first_violation=None, peaks={}, warnings={})
     steps = round(scenario["seconds"] / sim.dt)
     if steps < 1 or not np.isclose(
         steps * sim.dt, scenario["seconds"], atol=1e-10, rtol=0
@@ -214,9 +205,6 @@ def run_scenario(
     speed_caps = np.full(sim.vadr.size, np.inf)
     for index, _name, limits in joint_rules.entries:
         speed_caps[index] = limits.max_velocity_rad_secs
-    hold_steps = max(1, round(SPEED_HOLD_S / sim.physics_dt))
-    joint_over = np.zeros(sim.vadr.size, dtype=int)
-    base_over = np.zeros(1, dtype=int)
     sustained_flail = False
     initial = sim.snapshot(adapter, command)
     target, applied, velocity, torque_command = (np.empty(0) for _ in range(4))
@@ -237,10 +225,10 @@ def run_scenario(
         result["status"] = "violation"
         result["first_violation"] = entry
 
-    def screen(fn, *args):
+    def screen(fn, *args, **kwargs):
         """Keep a checkpoint run alive after the first failed command."""
         try:
-            fn(*args)
+            fn(*args, **kwargs)
         except (PolicyViolation, JointViolation) as exc:
             if not continue_after_violation:
                 raise
@@ -260,34 +248,28 @@ def run_scenario(
                 zero,
                 zero,
                 sim.data.qpos[sim.qadr],
-                None,
-                sim.dt,
+                initial=True,
             )
             sim.command_history = {"target": hold, "velocity": zero}
         for step in range(steps):
             obs = sim.observation(adapter, command)
             raw = adapter.infer(obs)
             target = adapter.decode(raw)
-            applied = np.clip(target, sim.ctrl_bounds[:, 0], sim.ctrl_bounds[:, 1])
+            applied = joint_rules.clip_positions(target, result["warnings"], sim.ctrl_bounds)
             velocity, torque_command = adapter.command_velocity_and_torque()
             measured_at_command = sim.data.qpos[sim.qadr]
-            commanded = applied if clip_to_stops else target
-            target_rate = (commanded - previous_target) / sim.dt
-            previous_target = commanded.copy()
+            commanded = applied
             monitor.peaks["clipping"] = max(
                 monitor.peaks.get("clipping", 0),
                 float(np.max(np.abs(target - applied))),
             )
-            if not clip_to_stops and np.any(target != applied):
-                screen(raise_violation, "decoded_target_out_of_range")
             screen(
                 joint_rules.check_command,
                 commanded,
                 velocity,
                 torque_command,
                 measured_at_command,
-                sim.command_history,
-                sim.dt,
+                initial=False,
             )
             sim.data.ctrl[sim.actuators] = applied
             sim.command_history = {
@@ -309,7 +291,7 @@ def run_scenario(
                 )
                 mujoco.mj_step(sim.model, sim.data)
                 metrics, acceleration, torque, reason = monitor.sample(
-                    target, applied, target_rate, scenario["upright"]
+                    target, applied, scenario["upright"]
                 )
                 if np.any(sim.data.warning.number > warning_count):
                     reason = "simulator_warning"
@@ -334,22 +316,15 @@ def run_scenario(
                 if reason:
                     screen(raise_violation, reason)
                 measured_dq = sim.data.qvel[sim.vadr]
-                joint_over, joint_held = overspeed_held(
-                    joint_over, np.abs(measured_dq) > speed_caps, hold_steps
-                )
-                base_over, base_held = overspeed_held(
-                    base_over,
-                    [metrics["base_angular_speed"] > BASE_ANGULAR_SPEED_LIMIT_RAD_S],
-                    hold_steps,
-                )
-                if joint_held or base_held:
+                if np.any(np.abs(measured_dq) > speed_caps) or np.any(
+                    np.abs(sim.data.qvel[3:6]) > BASE_ANGULAR_SPEED_LIMIT_RAD_S
+                ):
                     sustained_flail = True
-                if joint_held:
-                    screen(joint_rules.check_measured_velocity, measured_dq)
-                if base_held:
-                    screen(raise_violation, "base_angular_speed_limit")
-                screen(joint_rules.check_tracking, commanded, sim.data.qpos[sim.qadr])
+                screen(joint_rules.check_measured_velocity, measured_dq)
+                screen(check_base_motion, sim.data.qvel[3:6])
                 screen(joint_rules.check_torque, torque)
+            response_error = sim.data.qpos[sim.qadr] - applied
+            monitor.peaks["response_error"] = max(monitor.peaks.get("response_error", 0), float(np.max(np.abs(response_error))))
             if step + 1 in checkpoint_steps:
                 snapshots[step + 1] = sim.snapshot(adapter, command)
     except (PolicyViolation, JointViolation) as exc:
@@ -483,25 +458,25 @@ def evaluate(request):
         "adapter": request["adapter"],
         "tested_behavior": adapter.tested_behavior,
         "hardware_authorization": False,
-        "clip_to_stops": clip_to_stops,
+        "clip_to_stops": True,
         "profile": profile,
         "joint_movement_checks": joint_rules.coverage(),
         "acceptance_checks": {
             "calibrated": profile["calibrated"],
-            "metric_threshold_scope": "Global scalar limits. Per-joint command-delta and tracking limits are listed in joint_movement_checks.",
+            "metric_threshold_scope": "Global scalar limits. Per-joint physical limits and startup checks are listed in joint_movement_checks.",
             "metric_maxima": profile["maxima"],
             "metrics_without_thresholds": sorted(
                 METRICS - set(profile["maxima"]) - {"actuator_torque", "clipping"}
             ),
             "always_checked": [
                 "finite_policy_output",
-                "decoded_target_range",
+                "position_clipping_with_warning",
                 "joint_position_range",
                 "model_torque_range",
                 "profile_torque_demand_and_applied_bounds",
             ],
             "upright_scenarios_only": ["fall_height", "fall_orientation"],
-            "note": "PD torque demand is checked before every physics step against the joint profile, in addition to the applied torque checks. Out-of-range decoded targets are rejected before clipping can hide them.",
+            "note": "Positions are clipped to the intersection of joint-profile and model bounds with per-joint warnings. PD torque checks use the clipped command. Response error uses the command actually applied. Runtime command gaps do not reject commands.",
         },
         "suite": suite,
         "push_sampling": {

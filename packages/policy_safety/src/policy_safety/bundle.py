@@ -1,27 +1,11 @@
-"""Prepare a portable example without executing submission code."""
+"""Prepare a portable screening bundle from a YAML plus ONNX policy."""
 
 import hashlib
 import json
 import shutil
 from pathlib import Path
 
-from .config import read_json
-
-GAINS = {
-    "hip_roll": (99.098, 6.309),
-    "knee": (99.098, 6.309),
-    "hip_pitch": (40.179, 2.558),
-    "hip_yaw": (40.179, 2.558),
-    "waist_yaw": (40.179, 2.558),
-    "ankle": (28.501, 1.814),
-    "waist_pitch": (28.501, 1.814),
-    "waist_roll": (28.501, 1.814),
-    "wrist_pitch": (16.778, 1.068),
-    "wrist_yaw": (16.778, 1.068),
-    "shoulder": (14.251, 0.907),
-    "elbow": (14.251, 0.907),
-    "wrist_roll": (14.251, 0.907),
-}
+ROBOT_DIR = Path(__file__).resolve().parent / "robots" / "g1"
 
 
 def digest(path):
@@ -56,27 +40,54 @@ def model_files(model_path):
     return sorted(paths)
 
 
+def read_policy_yaml(directory):
+    """Load the one policy YAML. Joint gains and scales come from that file."""
+    import yaml
+
+    directory = Path(directory)
+    policies = []
+    for path in sorted(directory.glob("*.yaml")):
+        document = yaml.safe_load(path.read_text())
+        if isinstance(document, dict) and any(
+            key in document for key in ("contract", "model", "joints")
+        ):
+            policies.append(document)
+    if len(policies) != 1:
+        raise ValueError("policy directory needs exactly one policy YAML")
+    data = policies[0]
+    if data.get("contract") != "g1-walker-99-v1" or data.get("normalization") != "embedded":
+        raise ValueError("expected the g1-walker-99-v1 contract with embedded normalization")
+    joints = data.get("joints")
+    if (
+        not isinstance(joints, list)
+        or len(joints) != 29
+        or len({item["name"] for item in joints}) != 29
+    ):
+        raise ValueError("expected 29 unique joints")
+    for item in joints:
+        for key in ("name", "default_position", "action_scale", "kp", "kd"):
+            if key not in item:
+                raise ValueError(f"joint entry missing {key}")
+        if float(item["action_scale"]) <= 0 or float(item["kp"]) <= 0 or float(item["kd"]) < 0:
+            raise ValueError(f"invalid gains or scale for {item['name']}")
+    model_name = data["model"]["file"]
+    model_path = directory / model_name
+    if not model_path.is_file():
+        raise ValueError("policy YAML model file is missing")
+    return data, model_path
+
+
 def prepare_g1(submission, output):
     submission, output = Path(submission).resolve(), Path(output).resolve()
-    cfg = read_json(submission / "policies/model_config.json")
-    names = cfg["joint_names"]
-    if len(names) != 29 or len(set(names)) != 29:
-        raise ValueError("expected 29 unique joints")
-    gains = [
-        next(value for key, value in GAINS.items() if key in name) for name in names
-    ]
-    files = model_files(submission / "policies/walker.onnx")
+    cfg, model_path = read_policy_yaml(submission)
+    joints = cfg["joints"]
+    files = model_files(model_path)
     output.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(submission / "g1_robot.xml", output / "g1_robot.xml")
-    shutil.copytree(submission / "third_party", output / "third_party")
-    shutil.copy2(
-        submission / "THIRD_PARTY_NOTICES.md", output / "THIRD_PARTY_NOTICES.md"
-    )
-    shutil.copy2(
-        submission / "policies/model_config.json", output / "source_model_config.json"
-    )
+    shutil.copy2(ROBOT_DIR / "g1_robot.xml", output / "g1_robot.xml")
+    shutil.copytree(ROBOT_DIR / "third_party", output / "third_party")
+    shutil.copy2(ROBOT_DIR / "THIRD_PARTY_NOTICES.md", output / "THIRD_PARTY_NOTICES.md")
     for source in files:
-        target = output / source.relative_to(submission / "policies")
+        target = output / source.relative_to(submission)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
     (output / "scene.xml").write_text("""<mujoco model="g1_safety_flat">
@@ -87,20 +98,21 @@ def prepare_g1(submission, output):
   </worldbody>
 </mujoco>
 """)
-    model_paths = {output / f.relative_to(submission / "policies") for f in files}
+    model_paths = {output / f.relative_to(submission) for f in files}
+    names = [item["name"] for item in joints]
     robot = {
         "version": 1,
         "contract": "g1-walker-99-v1",
         "normalization": "embedded",
         "scene": "scene.xml",
-        "control_seconds": 0.02,
-        "physics_seconds": 0.002,
+        "control_seconds": float(cfg["control_seconds"]),
+        "physics_seconds": float(cfg["physics_seconds"]),
         "joint_names": names,
         "actuator_names": names,
-        "default_joint_positions": [cfg["default_joint_pos"][n] for n in names],
-        "action_scales": [cfg["action_scales"][n] for n in names],
-        "kp": [g[0] for g in gains],
-        "kd": [g[1] for g in gains],
+        "default_joint_positions": [float(item["default_position"]) for item in joints],
+        "action_scales": [float(item["action_scale"]) for item in joints],
+        "kp": [float(item["kp"]) for item in joints],
+        "kd": [float(item["kd"]) for item in joints],
         "base_body": "pelvis",
         "floor_geom": "safety_floor",
         "standing_height": 0.79,

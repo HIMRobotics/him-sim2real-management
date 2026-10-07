@@ -28,18 +28,19 @@ independent computers or a hardware emergency-stop circuit.
 following the official upper-body example. Indices 12–28 contain waist and arm
 targets. Index 29 carries ownership weight. Legs are not controlled through this
 adapter. Whole-body policy control through `rt/lowcmd` is not implemented.
-Upper-body ownership ramps from zero to one with a smooth cubic curve. The first
-frame uses measured positions. Subsequent frames must satisfy position, velocity,
-velocity-change and tracking bounds. The adapter supplies profile gains and zero
-feedforward torque, rather than forwarding the dry-run producer's placeholder
-gains. Nonzero upper-body feedforward torque is rejected. This gain selection is
-an explicit output policy, not an assertion that arbitrary proposals are safe.
+Upper-body ownership ramps from zero to one with a smooth cubic curve. Commands
+use the profile gains and validated feedforward torque. Proposals are clipped to
+joint-position bounds with warnings in `/safety/joint_diagnostics` and ROS logs.
+The command-to-measurement gap is diagnostic only during runtime.
+Total PD plus feedforward torque and desired speed must satisfy per-joint bounds.
+Initial alignment and stationary-start checks remain enabled.
 
-An abort stops subsequent motion writes. If this process has taken arm ownership
+An abort stops subsequent motion writes. Runtime motion and health faults request
+stock damping directly. For other aborts, if this process has taken arm ownership
 and feedback is fresh, the stop worker keeps publishing the measured upper-body
 pose from the moment of the stop: target speed 0, profile `kp` and `kd`, zero
 feedforward torque, and ownership weight 1. The legs stay in the current standing
-mode. `SetFsmId(1)` runs only when that hold cannot continue: feedback goes
+mode. This hold falls back to `SetFsmId(1)` when feedback goes
 stale, an arm write fails, or the process is exiting. That fallback then writes a
 zero-weight arm release and queries the stock FSM. Repeats continue while the
 process is alive. A zero-weight release alone is not whole-body damping.
@@ -53,11 +54,18 @@ initial-speed bounds, Start and F3 released, and a
 stock FSM included in the explicit profile. It never requests standing, releases
 the stock motion service, changes calibration, or automatically rearms.
 
-While armed, command validation and diagnostics cover all 29 joints, including
-leg tracking, command changes, and estimated torque. The feedback callback also
-checks sustained measured joint speed and body spin using the
-[shared speed checks](../packages/policy_safety/README.md#shared-speed-checks).
-These checks do not add leg motor output to the arm SDK adapter.
+While armed, all 29 proposals are validated, but only waist/arm commands are
+written. Fresh feedback checks model velocity ceilings, total estimated torque,
+available measured torque, 6 rad/s body spin per axis and 1 rad upright tilt.
+Temperature ceilings are 85 C casing and 120 C winding, with a 20% minimum battery
+charge. BMS arrives separately on `rt/lf/bmsstate` with a local 5 s freshness
+limit. Missing health data prevents arming. Runtime motion and health faults
+request damping. The arm SDK path still cannot control the legs.
+
+Diagnostics distinguish pending `command_gap_rad` from `response_error_rad`
+measured after a preceding successful full-weight waist/arm write. Rejected or
+failed writes never become `q_applied`. No response-error threshold stops motion.
+See the [profile guide](profiles/README.md) for state names and exact formulas.
 
 ## Required hardware profile
 
@@ -77,7 +85,7 @@ Required fields:
 - `initial_position_tolerance_rad`: allowed first target/measured-position mismatch.
 - `initial_velocity_tolerance_rad_secs`: required near-stationary start tolerance.
 - `joints`: all 29 named joints, including legs. Each needs a positive `max_torque_nm`, position bounds, positive
-  `kp` and `kd`, maximum velocity and acceleration, and maximum tracking error.
+  `kp` and `kd`, and maximum velocity.
 
 The adapter's feedback deadline is 200 ms. Its output cadence targets 20 ms, matching the operator-tested SDK example.
 The separate stop watchdog polls every 5 ms.
@@ -133,9 +141,8 @@ The profile uses the official revision-1.0 model's position/velocity limits
 for all 17 waist/arm joints.
 The source values and checksum are recorded in
 `robot_safety/profiles/g1_type5.official_limits.json`. Gains still match the tested
-SDK example. Handover, acceleration and tracking thresholds remain local settings
-because the model provides no corresponding values. Model effort limits are
-recorded but are not enforced as total motor-torque limits by this adapter.
+SDK example. Handover settings remain local choices. Model
+effort ceilings are checked against total estimated torque and available torque feedback.
 
 ## Launch the complete physical test
 

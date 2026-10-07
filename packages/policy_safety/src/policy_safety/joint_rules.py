@@ -8,7 +8,7 @@ from joint_checks import (
     check_command,
     check_measured_velocity,
     check_torque,
-    check_tracking,
+    clip_position,
 )
 
 from .adapter import PolicyViolation
@@ -50,52 +50,44 @@ class JointRules:
             "uncovered_joints": [name for name in self.names if name not in covered],
             "profile_values": self.profile,
             "rules": [
-                "target_position",
+                "position_clipping_with_warning",
                 "target_velocity",
-                "position_target_change",
-                "velocity_target_change",
-                "tracking_error",
                 "initial_target_mismatch",
                 "initial_target_velocity",
-                "zero_feedforward_torque",
+                "feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Velocity-change limits apply to commanded dq, not measured or position-derived acceleration. Simulation validates the initial hold, then checks policy motion against that baseline. Profile gains and hardware ownership handover are not imported.",
+            "semantics": "Before actuation: clip proposed position to bounds with a warning and enforce speed and torque limits. Initial alignment is checked only at startup. Command gap and response error are diagnostics, with no runtime delta or consecutive-command change limit.",
         }
 
-    def check_command(self, target, velocity, torque, measured, previous, dt):
-        for values in (target, velocity, torque, measured):
-            if (
-                np.asarray(values).shape != (len(self.names),)
-                or not np.isfinite(values).all()
-            ):
-                raise PolicyViolation("nonfinite_or_invalid_joint_command")
+    def clip_positions(self, q_proposed, warnings=None, bounds=None):
+        """Clip to profile bounds, intersected with model bounds when supplied."""
+        q_commanded = np.asarray(q_proposed, dtype=float).copy()
+        if q_commanded.shape != (len(self.names),) or not np.isfinite(q_commanded).all():
+            raise PolicyViolation("nonfinite_or_invalid_joint_command")
         for i, name, limits in self.entries:
-            prior = (
-                None
-                if previous is None
-                else (previous["target"][i], previous["velocity"][i])
-            )
-            check_command(
-                name,
-                limits,
-                target[i],
-                velocity[i],
-                torque[i],
-                measured[i],
-                prior,
-                dt,
-                self.profile["initial_position_tolerance_rad"],
-                self.profile["initial_velocity_tolerance_rad_secs"],
-            )
+            lower, upper = limits.position_min_rad, limits.position_max_rad
+            if bounds is not None:
+                lower, upper = max(lower, bounds[i, 0]), min(upper, bounds[i, 1])
+                if lower > upper:
+                    raise ValueError(f"disjoint position bounds: {name}")
+            q_commanded[i] = clip_position(name, q_commanded[i], lower, upper, warnings)
+        return q_commanded
+
+    def check_command(self, q_proposed, velocity, torque, q_measured, *, initial=False, warnings=None):
+        for values in (q_proposed, velocity, torque, q_measured):
+            if np.asarray(values).shape != (len(self.names),) or not np.isfinite(values).all():
+                raise PolicyViolation("nonfinite_or_invalid_joint_command")
+        q_commanded = self.clip_positions(q_proposed, warnings)
+        for i, name, limits in self.entries:
+            check_command(name, limits, q_commanded[i], velocity[i], torque[i], q_measured[i],
+                          initial, self.profile["initial_position_tolerance_rad"],
+                          self.profile["initial_velocity_tolerance_rad_secs"])
+        return q_commanded
 
     def check_measured_velocity(self, measured_dq):
         for i, name, limits in self.entries:
             check_measured_velocity(name, limits, measured_dq[i])
-
-    def check_tracking(self, target, measured):
-        for i, name, limits in self.entries:
-            check_tracking(name, limits, target[i], measured[i])
 
     def check_torque(self, torque):
         for i, name, limits in self.entries:
