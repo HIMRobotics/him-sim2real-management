@@ -22,6 +22,7 @@ class StartupBalance:
     def __init__(self, policy=None):
         self.policy = policy
         self.started = None
+        self.stabilizing_since = None
         self.last_sample = None
         self.stable_since = None
         self.ready = False
@@ -50,8 +51,10 @@ class StartupBalance:
             return
         if self.started is None:
             self.started = now
+            self.stabilizing_since = now
             self.phase = "balancing"
-        if now - self.started >= self.timeout_seconds:
+        if (self.stabilizing_since is not None
+                and now - self.stabilizing_since >= self.timeout_seconds):
             self.ready = False
             raise ValueError("startup_balance_timeout")
         if self.last_sample is not None and stamp <= self.last_sample:
@@ -71,6 +74,10 @@ class StartupBalance:
             self.stable_since = stamp
         self.ready = bool(stable and stamp - self.stable_since >= self.stable_seconds
                           and now - self.started >= self.min_seconds)
+        if self.ready:
+            self.stabilizing_since = None
+        elif self.stabilizing_since is None:
+            self.stabilizing_since = now
         self.phase = "ready" if self.ready else "balancing"
 
     def authorize(self, now):

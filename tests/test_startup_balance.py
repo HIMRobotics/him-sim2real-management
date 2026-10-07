@@ -108,3 +108,49 @@ def test_automatic_handoff_obeys_same_stability_gate():
         startup.command(float(now), float(now), state(), submitted(), automatic=True)
     assert startup.handoff >= 2.0
     assert startup.status()['control_ready']
+
+
+def test_stable_wait_does_not_timeout_or_handoff_without_authorization():
+    startup = gate()
+    advance(startup, 65.0)
+    assert startup.ready
+    assert startup.phase == 'ready'
+    assert startup.handoff is None
+    assert not startup.status()['control_ready']
+    assert startup.policy.update.call_count > 3000
+    output = startup.command(65.02, 65.02, state(), submitted())
+    np.testing.assert_allclose(output['q'][:15], 0.1)
+    assert startup.authorize(65.02)
+
+
+def test_losing_stability_after_long_wait_starts_recovery_deadline():
+    startup = gate()
+    advance(startup, 35.0)
+    startup.timeout_seconds = 0.1
+    moving = state()
+    moving['gyro'][0] = 0.4
+    startup.command(35.02, 35.02, moving, submitted())
+    assert not startup.ready
+    assert not startup.authorize(35.02)
+    startup.command(35.04, 35.04, moving, submitted())
+    with pytest.raises(ValueError, match='startup_balance_timeout'):
+        startup.command(35.14, 35.14, moving, submitted())
+
+
+def test_recovered_stability_clears_recovery_deadline():
+    startup = gate()
+    advance(startup)
+    moving = state()
+    moving['dq'][0] = 0.7
+    startup.command(2.12, 2.12, moving, submitted())
+    advance(startup, 65.0, begin=2.14)
+    assert startup.ready
+    assert startup.handoff is None
+
+
+def test_stable_wait_retains_telemetry_deadline():
+    startup = gate()
+    advance(startup)
+    with pytest.raises(ValueError, match='stale_telemetry'):
+        startup.command(2.4, 2.1, state(), submitted())
+    assert not startup.ready

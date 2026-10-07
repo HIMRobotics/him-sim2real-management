@@ -26,9 +26,11 @@ qualification. Stillness does not establish weight-bearing under a gantry.
 
 Hardware continues Balance while waiting for a new left + B press after
 `handoff_ready: true`. Early/held presses cannot queue a launch. Instability
-revokes readiness. The startup session times out after 30 seconds without
-handoff. Targets, desired velocities, feedforward torques and gains blend over
-1 second. Torque checks use the gains actually written. Double Start, health
+revokes readiness. Failure to establish stability within 30 seconds faults.
+Once stable, Balance continues while waiting for authorization without an
+operator-wait timeout. Losing stability starts a new 30-second recovery deadline.
+Health, command and telemetry deadlines remain active throughout. Targets,
+desired velocities, feedforward torques and gains blend over 1 second. Torque checks use the gains actually written. Double Start, health
 checks, command expiry, output watchdogs and fault latching remain active.
 
 `/safety/hardware_status` and `/safety/policy_state` expose `startup_phase`,
