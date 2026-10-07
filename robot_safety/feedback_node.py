@@ -38,6 +38,7 @@ class RobotFeedbackNode(SafetyNode):
         self.sdk_subscriber = None
         self.base_subscriber = None
         self.base = None
+        self.latest_sample = None
         self.pending = {}
         self.hardware_status = {}
         self.publish_policy = self.declare_parameter("publish_policy_state", False).value
@@ -55,7 +56,7 @@ class RobotFeedbackNode(SafetyNode):
         self.create_timer(self.config.period, self.publish_feedback)
 
     def start_sdk(self):
-        """Create only a LowState subscriber, never a command publisher."""
+        """Subscribe to low state and optional measured base state."""
         from unitree_sdk2py.core.channel import (
             ChannelFactoryInitialize,
             ChannelSubscriber,
@@ -76,8 +77,13 @@ class RobotFeedbackNode(SafetyNode):
 
     def on_base_state(self, message):
         try:
-            latest = next(reversed(self.pending.values()), None)
-            sample = base_state_from_sdk(message, time.monotonic(), self.base_frame,
+            latest = self.latest_sample
+            now = time.monotonic()
+            if self.base_frame == "body" and (
+                latest is None or not 0 <= now - latest.received_at_secs < self.config.robot_timeout
+            ):
+                return
+            sample = base_state_from_sdk(message, now, self.base_frame,
                                          latest.quat if latest else ())
             if self.base and sample["base_source_time_secs"] <= self.base["base_source_time_secs"]:
                 raise ValueError("nonadvancing_base_state")
@@ -138,6 +144,7 @@ class RobotFeedbackNode(SafetyNode):
                 self.latch_abort("stale_or_reordered_sdk_feedback")
                 return
             self.time_last_feedback_secs = sample.received_at_secs
+            self.latest_sample = sample
             self.pending[sample.received_at_secs] = sample
             while len(self.pending) > self.config.observation_history_size:
                 del self.pending[next(iter(self.pending))]

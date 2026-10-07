@@ -105,6 +105,11 @@ class HardwareAdapterTests(unittest.TestCase):
         recorded = self.adapter.joint_diagnostics_snapshot()[G1_29_JOINT_NAMES[0]]["applied_command"]
         self.assertEqual(recorded, dict(targets[0], written_at_secs=self.now))
         self.adapter.abort("fault")
+        with patch.object(self.transport, "restore_motion", return_value=7002):
+            self.adapter.stop_once()
+        self.assertTrue(self.adapter.balance_released)
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.assertFalse(self.adapter.arm())
         self.adapter.stop_once()
         self.assertEqual(self.transport.restore_calls, 1)
         self.assertEqual(self.transport.stop_calls, 1)

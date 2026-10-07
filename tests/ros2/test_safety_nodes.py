@@ -392,6 +392,15 @@ class FeedbackBridgeTests(unittest.TestCase):
         now = time.monotonic()
         sample = FeedbackSample(now, (0.,) * 29, (0.,) * 29, False,
                                 quat=(1., 0., 0., 0.), gyro=(0., 0., 0.))
+        bridge.base_frame = "body"
+        base_message = SimpleNamespace(stamp=SimpleNamespace(sec=123, nanosec=0),
+                                       position=(0., 0., 0.8), velocity=(0.1, 0., 0.))
+        bridge.on_base_state(base_message)
+        self.assertIsNone(bridge.base)
+        self.assertIsNone(bridge.abort_reason)
+        bridge.latest_sample = sample
+        bridge.on_base_state(base_message)
+        self.assertEqual(bridge.base["linear_velocity"], (0.1, 0., 0.))
         bridge.pending[now] = sample
         message = RobotFeedback()
         message.received_at_secs, message.observation_id = now, 17
@@ -413,6 +422,16 @@ class FeedbackBridgeTests(unittest.TestCase):
         bridge.on_observation(message)
         self.assertEqual(bridge.abort_reason, "base_feedback_timeout")
         bridge.policy_publisher.publish.assert_not_called()
+
+    def test_frozen_base_source_time_latches_even_with_fresh_receipts(self):
+        bridge = self.bridge
+        bridge.base_frame = "world"
+        message = SimpleNamespace(stamp=SimpleNamespace(sec=123, nanosec=0),
+                                  position=(0., 0., 0.8), velocity=(0.1, 0., 0.))
+        bridge.on_base_state(message)
+        self.assertIsNone(bridge.abort_reason)
+        bridge.on_base_state(message)
+        self.assertEqual(bridge.abort_reason, "nonadvancing_base_state")
 
     def test_stale_sample_latches_and_blocks_recovery(self):
         from robot_safety.feedback import FeedbackSample
