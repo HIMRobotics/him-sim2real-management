@@ -43,10 +43,34 @@ start. The 0.60 m/s comparison establishes that this configuration can produce
 walking, but exceeds the straight-trial lateral tolerance and has clipping
 warnings. None qualifies for hardware advancement. This supports a low-command
 policy-response explanation, not a measured mechanical minimum step size.
-The onset of sustained walking between 0.30 and 0.60 m/s remains unmeasured.
 Reports, traces and hashed `screening.json` records are retained under
 `containers/sim/output/hardware-speed-screen-{020,030,060}`. Hardware trial
 defaults remain unchanged.
+
+At commit `75ae125`, the requested 0.40 and 0.50 m/s comparisons used the same
+model, gains, enforced checks and 40-second duration:
+
+| Command | First reaching 2 m forward | Maximum lateral error before that point | Result |
+| --- | --- | --- | --- |
+| 0.40 m/s | 6.56 s | 0.6043 m | Walking, outside the 0.20 m lateral tolerance |
+| 0.50 m/s | 4.90 s | 0.3255 m | Walking, outside the 0.20 m lateral tolerance |
+
+Both accepted 2,000 commands without safety trips or falls, with clipping
+warnings on both ankle-pitch joints. Unlike the 0.30 m/s case, 0.40 m/s produces
+sustained walking in this setup. Neither run qualifies as a straight trial.
+These were constant-command screens without braking at 2 m, so the table
+reports the first crossing rather than a stopped endpoint. Reports, traces and
+hashed summaries are in `hardware-speed-screen-040` and
+`hardware-speed-screen-050` under the same output directory.
+
+Before a supported hardware straight run, investigate lateral drift and
+clipping, qualify the selected speed and stopping transition, and update the
+trial coordinator's current fixed 0.10 m/s setting. Complete Docker/ROS
+validation, live feedback/inference without output, and the supported ownership,
+zero-command standing, normal/fault stopping and restoration checks in the
+[deployment guide](../../robot_safety/HARDWARE_ADAPTER.md#measured-trial-campaign).
+Required base feedback must remain valid after stock-control release. Physical
+qualification requires the gantry and a second operator controlling stops.
 
 ## Current command-gap and response checks
 
