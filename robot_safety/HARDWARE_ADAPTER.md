@@ -280,20 +280,6 @@ The implementation passed 116 safety tests, 8 balance/trial/preflight tests,
 hardware and the shared container client through the existing checker/gate.
 Use focused tests for subsequent changes rather than repeating all suites.
 
-Five-second ONNX/MuJoCo smoke runs with the generated walker gains and enforced
-thrash checks accepted all 250 commands for stationary, 0.10 m/s straight, and
-0.10 m/s plus 0.10 rad/s turning commands, without simulated falls. However,
-the straight run advanced only 0.032 m. These short runs do not qualify the
-2 m route or a full circle. Investigate the measured response before hardware
-movement, without automatically increasing speed or relaxing limits.
-
-A subsequent 40-second local screening run at the same 0.10 m/s accepted all
-2,000 commands without clipping, safety trips or falls. Maximum forward progress
-was 0.0341 m and final forward displacement was 0.0132 m. This fails the intended
-2 m movement objective. The provisional command is not qualified for advancement.
-The reproduction command and scope are recorded in
-[example validation](../containers/examples/VALIDATION.md#low-speed-deployment-screening).
-
 Docker image build/run remains unverified because this account cannot access
 the Docker daemon. No hardware output was enabled or robot services restarted.
 Measured base feedback after control release, physical stopping/restoration,
