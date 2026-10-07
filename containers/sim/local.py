@@ -15,6 +15,7 @@ sys.path[:0] = [
     str(ROOT / "containers/examples"),
 ]
 
+from command import load_schedule
 from controllers import ExamplePolicy
 from plant import CONTROL_DT, POSES
 from prepare import prepare
@@ -63,17 +64,31 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
     project = prepare(name, container=False)
     scene = scene or project / "environment/scene.xml"
     policy = ExamplePolicy(name, project / "container/project")
-    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
-    task_command = json.loads(os.environ.get("G1_TASK_COMMAND") or "null")
+    # Score and apply this example's gains. The generic template is stiffer
+    # and reports a torque the policy never commanded.
+    previous_profile = os.environ.get("G1_JOINT_PROFILE")
+    os.environ["G1_JOINT_PROFILE"] = str(project / "container/project/joint_profile.json")
+    try:
+        runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
+        task_command = json.loads(os.environ.get("G1_TASK_COMMAND") or "null")
+        command_file = os.environ.get("G1_COMMAND_FILE") or ""
+        schedule = load_schedule(command_file) if command_file else None
 
-    def command(current, time, _step):
-        state = current.feedback(time)
-        if task_command is not None:
-            state["task_command"] = task_command
-        current.command(policy.command(state), time)
-        current.step(time)
+        def command(current, time, _step):
+            state = current.feedback(time)
+            if schedule is not None:
+                state["task_command"] = schedule.at(time).tolist()
+            elif task_command is not None:
+                state["task_command"] = task_command
+            current.command(policy.command(state), time)
+            current.step(time)
 
-    _rollout(runner, seconds, command)
+        _rollout(runner, seconds, command)
+    finally:
+        if previous_profile is None:
+            os.environ.pop("G1_JOINT_PROFILE", None)
+        else:
+            os.environ["G1_JOINT_PROFILE"] = previous_profile
     return _finish(
         runner,
         output,
@@ -81,7 +96,8 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
             "policy": name,
             "requested_seconds": seconds,
             "policy_calls": policy.sequence,
-            "task_command": task_command,
+            "task_command": schedule.at(0.0).tolist() if schedule is not None else task_command,
+            "command_file": command_file or None,
         },
     )
 
@@ -132,7 +148,11 @@ def circle(output, seconds=10.0, safety_checks=True, scene=None, pose="standing"
     return _finish(
         runner,
         output,
-        {"policy": "circle", "requested_seconds": seconds, "mode": "circle"},
+        {
+            "policy": Path(os.environ.get("G1_SIM_COMMAND") or "circle").stem or "circle",
+            "requested_seconds": seconds,
+            "mode": "circle",
+        },
     )
 
 

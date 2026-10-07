@@ -156,32 +156,52 @@ class Plant:
                 "right_side": [root, root, 0, 0],
             }[pose]
         data.ctrl[self.actuators] = data.qpos[self.qadr]
-        if pose != "standing":
-            for _ in range(500):
-                mujoco.mj_forward(self.model, data)
-                distances = [
-                    c.dist
-                    for c in data.contact
-                    if self.floor in c.geom
-                    and any(g in self.robot_geoms for g in c.geom)
-                ]
-                if distances:
-                    data.qpos[self.base_qadr + 2] += -min(distances) + 0.001
-                    break
-                data.qpos[self.base_qadr + 2] -= 0.005
-            else:
-                raise ValueError("could not place counterfactual on the ground")
         mujoco.mj_forward(self.model, data)
-        # The stand keyframe is the sim's normal start. Its feet sit in this
-        # floor. Floor poses are placed to the 5 mm penetration tolerance.
-        if pose != "standing" and any(
-            c.dist < -0.005 and any(g in self.robot_geoms for g in c.geom)
-            for c in data.contact
-        ):
-            raise ValueError(f"invalid {pose} pose: substantial initial penetration")
+        # The bundled stand keyframe already meets the floor and is left as
+        # authored, including a foot already resting on a platform. A rest
+        # pose with no support is lowered until it touches, so the first
+        # step is not a drop. Counterfactuals keep a 1 mm gap above
+        # safety_floor. Placed poses reject more than 5 mm of penetration.
+        unsupported = self.floor >= 0 and not self._support_distances(data)
+        if pose != "standing" or unsupported:
+            self._place_on_floor(
+                data,
+                clearance=0.0 if pose == "standing" else 0.001,
+                floor_only=pose != "standing",
+            )
+            mujoco.mj_forward(self.model, data)
+            if any(
+                c.dist < -0.005 and any(g in self.robot_geoms for g in c.geom)
+                for c in data.contact
+            ):
+                raise ValueError(f"invalid {pose} pose: substantial initial penetration")
         if self.check_fall and self.fallen():
             raise ValueError("stand keyframe starts fallen")
         self._apply_arrays(*self.damping_command(self.q(), self.dq()))
+
+    def _support_distances(self, data, floor_only=False):
+        distances = []
+        for contact in data.contact:
+            geoms = contact.geom
+            if not any(geom in self.robot_geoms for geom in geoms):
+                continue
+            if floor_only:
+                if self.floor in geoms:
+                    distances.append(contact.dist)
+            elif any(geom not in self.robot_geoms for geom in geoms):
+                distances.append(contact.dist)
+        return distances
+
+    def _place_on_floor(self, data, clearance=0.001, floor_only=True):
+        """Lower the pelvis until the robot meets the floor or a platform."""
+        for _ in range(500):
+            mujoco.mj_forward(self.model, data)
+            distances = self._support_distances(data, floor_only=floor_only)
+            if distances:
+                data.qpos[self.base_qadr + 2] += -min(distances) + clearance
+                return
+            data.qpos[self.base_qadr + 2] -= 0.005
+        raise ValueError("could not place the pose on the ground")
 
     def q(self):
         return self.data.qpos[self.qadr].copy()

@@ -270,6 +270,7 @@ def run_scenario(
                 torque_command,
                 measured_at_command,
                 initial=False,
+                warnings=result["warnings"],
             )
             sim.data.ctrl[sim.actuators] = applied
             sim.command_history = {

@@ -171,6 +171,11 @@ class SafetyCheckerNode(SafetyNode):
         self.check_fault()
 
     def on_abort(self, message):
+        if (
+            message.source != self.get_name()
+            and self.supervisor.supervisor_phase == SupervisorPhase.INHIBITED
+        ):
+            return
         if message.source != self.get_name():
             self.supervisor.stop(message.reason or "external_abort", time.monotonic())
             self.check_fault()
@@ -336,13 +341,18 @@ class ControllerStopNode(SafetyNode):
     def on_ready(self, _request, response):
         """Confirm fresh released-Start input before the dry-run producer arms."""
         self.check_freshness()
-        response.success = (
-            self.abort_reason is None
-            and self.received_controller_feedback
+        fresh = (
+            self.received_controller_feedback
+            and time.monotonic() - self.time_last_feedback_secs < self.config.robot_timeout
             and self.double_press_detector.previous_start_pressed is False
         )
-        response.message = (
-            "ready" if response.success else "Controller input is not ready"
+        if fresh and self.abort_reason == "controller_feedback_timeout":
+            self.abort_reason = None
+            self.destroy_publisher(self.abort_publisher)
+            self.abort_publisher = self.create_publisher(Abort, topics.ABORT, self.abort_qos)
+        response.success = self.abort_reason is None and fresh
+        response.message = "ready" if response.success else (
+            self.abort_reason or "Controller input is not ready"
         )
         return response
 

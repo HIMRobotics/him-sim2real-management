@@ -1,0 +1,16 @@
+# Walk, then step the command down to a stop. vy stays 0.
+# Times start when the gait starts. The last command holds for the rest of the run.
+# Yaw cancels this walker's drift at 0.5 m/s and scales down with forward speed.
+# Zero velocity asks the walker to stand. Use --seconds 7 to show the stop.
+segments:
+  - seconds: 2.0
+    command: [0.50, 0.0, -0.127]
+  - seconds: 1.0
+    command: [0.40, 0.0, -0.102]
+  - seconds: 1.0
+    command: [0.30, 0.0, -0.076]
+  - seconds: 1.0
+    command: [0.20, 0.0, -0.051]
+  - seconds: 1.0
+    command: [0.10, 0.0, -0.025]
+  - command: [0.0, 0.0, 0.0]

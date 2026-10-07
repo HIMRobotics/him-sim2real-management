@@ -25,6 +25,7 @@ run_session() {
   export G1_IMAGE="$image" G1_SIM_SECONDS="$seconds" G1_SIM_POSE="$pose"
   export G1_SIM_SCENE="" G1_SIM_SAFETY_CHECKS="$safety_checks"
   export G1_SIM_EXAMPLE="$example" G1_SIM_OUTPUT="$out_dir" G1_SIM_LIVE=""
+  export G1_COMMAND_FILE="${command_file:-}"
   if [[ -n "$scene" ]]; then
     case "$scene" in
       "$repo_dir"/*) export G1_SIM_SCENE="/workspace/${scene#"$repo_dir"/}" ;;

@@ -8,7 +8,7 @@ general-purpose policy deployment image.
 | --- | --- |
 | [policies/walker](policies/walker/) | Walker ONNX graph, external weights, and observation/action specification |
 | [policies/balance](policies/balance/) | GR00T standing-balance model |
-| [commands/walker](commands/walker/) | Stand and circle velocity commands |
+| [commands/walker](commands/walker/) | Stand, circle, and walk-then-stop velocity commands |
 | [submissions/walker](submissions/walker/) | Example walker container, ROS client, and build script |
 
 The shared simulation-only clients for `sim.sh --example walker`, `stairs`, and
@@ -23,11 +23,18 @@ From the repository root:
 ./sim.sh --example walker --local --seconds 10
 ./sim.sh --example balance --local --seconds 10
 ./sim.sh --command examples/commands/walker/circle.yaml --view
-```
+./sim.sh --command examples/commands/walker/forward_stop.yaml --seconds 7 --view
+./sim.sh --example walker --command examples/commands/walker/forward_stop.yaml --seconds 7 --view
 
 The local examples run through submission checks and may report a violation.
-The direct circle path bypasses submission checks and labels runtime monitoring
-as partial. See [simulation instructions](../containers/SIM_RUN.md).
+`--example` selects a policy package under `policies/` and, without `--local`, builds `g1-sim-example-<name>:local`. Its report `policy` field is `walker`, `stairs`, or `balance`.
+
+`--command` alone does not select a package or a container. It plays a file under `commands/walker/` on the cached walker. The report `policy` field is that file name without `.yaml`: `circle.yaml` records `circle`, and `forward_stop.yaml` records `forward_stop`.
+
+`--example walker --command FILE` is the same velocity file inside the walker container. The report `policy` field stays `walker`.
+
+The local examples run through submission checks and may report a violation.
+The direct command path bypasses submission checks and labels runtime monitoring
 
 ## Container roles
 

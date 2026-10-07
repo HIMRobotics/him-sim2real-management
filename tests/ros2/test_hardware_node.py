@@ -137,7 +137,8 @@ class HardwareNodeTests(unittest.TestCase):
         adapter.step()
         self.assertEqual(transport.writes, [])
         self.assertEqual(transport.stop_calls, 0)
-        node.latch_abort.assert_called_once_with("hardware_readiness_rejected")
+        node.latch_abort.assert_not_called()
+        self.assertIsNone(adapter.abort_reason)
 
     def test_arm_checked_command_and_abort_reach_fake_hardware(self):
         rclpy.init(

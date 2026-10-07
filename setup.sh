@@ -106,9 +106,40 @@ if [[ "$mode" == preflight ]]; then
   echo "Preflight complete. No robot processes or container started."
   exit 0
 fi
-if [[ "$mode" == hardware ]] && systemctl --user is-active --quiet g1-safety-stops.service; then
+safety_systemctl() {
+  local service_user uid
+  service_user="${SUDO_USER:-${USER:-}}"
+  if [[ -z "$service_user" || "$service_user" == root ]]; then
+    systemctl --user "$@"
+    return
+  fi
+  uid="$(id -u "$service_user")"
+  runuser -u "$service_user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+    systemctl --user "$@"
+}
+safety_service_active() {
+  safety_systemctl is-active --quiet g1-safety-stops.service
+}
+wait_for_safety_service() {
+  local _attempt
+  for _attempt in $(seq 1 180); do
+    safety_service_active && return 0
+    sleep 1
+  done
+  echo "g1-safety-stops.service did not become active." >&2
+  return 1
+}
+if [[ "$mode" == hardware && "${G1_USE_SAFETY_SERVICE:-}" != 1 ]] && safety_service_active; then
   echo "With the robot supported, deliberately stop g1-safety-stops before selecting this gate." >&2
   exit 2
+fi
+if [[ "$mode" == hardware && "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
+  export ROS_DOMAIN_ID=97
+  if ! safety_service_active; then
+    echo "Starting g1-safety-stops.service. It stays up and is the motor stop."
+    safety_systemctl start g1-safety-stops.service
+    wait_for_safety_service
+  fi
 fi
 thrash="${G1_THRASH_MODE:-monitor}"
 if [[ -n "${G1_TRIAL_CONFIG:-}" && "$thrash" != enforce ]]; then
@@ -118,7 +149,12 @@ set +u
 source /opt/ros/foxy/setup.bash
 source "${HIM_SAFETY_ROS_INSTALL:-$HOME/.him-safety/ros-install}/setup.bash"
 set -u
+export CYCLONEDDS_HOME="${CYCLONEDDS_HOME:-/home/unitree/cyclonedds_ws/install/cyclonedds}"
+export LD_LIBRARY_PATH="$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"
+if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
+  export G1_POLICY_ROS_DOMAIN=97
+fi
 export ROS_DOMAIN_ID="${G1_POLICY_ROS_DOMAIN:-98}" ROS_LOCALHOST_ONLY=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 log_dir="${G1_RUN_LOG:-$repo_dir/.cache/hardware_runs/$(date +%Y%m%d-%H%M%S)}"
@@ -126,39 +162,194 @@ mkdir -p "$log_dir"
 { git -C "$repo_dir" rev-parse HEAD; sha256sum "$profile"; "$runtime" image inspect "$image" --format '{{.Id}}'; } > "$log_dir/configuration.txt"
 cp "$profile" "$log_dir/joint_profile.json"
 pids=()
+stop_session_nodes() {
+  local node_user pid args
+  node_user="${host_user:-${SUDO_USER:-${USER:-}}}"
+  [[ -z "$node_user" || "$node_user" == root ]] && node_user="$(id -un)"
+  # ps truncates args to the terminal width unless -ww is set, which hid these.
+  while read -r pid args; do
+    case "$args" in
+      *safety_node\ checker*|*safety_node\ controller_stop*|*safety_node\ feedback*)
+        kill -KILL "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done < <(ps -ww -u "$node_user" -o pid=,args=)
+}
 cleanup() {
   trap - EXIT INT TERM
   stop_container || true
+  stop_session_nodes
   for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+host_user="${SUDO_USER:-${USER:-}}"
+[[ "$host_user" == root ]] && host_user=""
+as_host_user() {
+  if [[ -n "$host_user" && "$(id -un)" != "$host_user" ]]; then
+    local home uid
+    uid="$(id -u "$host_user")"
+    home="$(getent passwd "$host_user" | cut -d: -f6)"
+    runuser --preserve-environment -u "$host_user" -- \
+      env "HOME=$home" "XDG_RUNTIME_DIR=/run/user/$uid" "$@"
+  else
+    "$@"
+  fi
+}
 launch_node() {
   local role="$1"
   shift
-  /usr/bin/python3 "$repo_dir/ros2/him_safety_nodes/scripts/safety_node" "$role" --ros-args "$@" > "$log_dir/$role.log" 2>&1 &
+  as_host_user /usr/bin/python3 "$repo_dir/ros2/him_safety_nodes/scripts/safety_node" "$role" --ros-args "$@" > "$log_dir/$role.log" 2>&1 &
   pids+=("$!")
 }
-launch_node checker -p "thrash.mode:=$thrash"
-launch_node controller_stop -p startup_timeout_secs:=5.0
-launch_node feedback -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}" \
-  -p "hardware_profile_path:=$profile" \
-  -p publish_policy_state:=true -p "require_base_state:=${G1_REQUIRE_BASE_STATE:-true}" \
-  -p "base_state_topic:=${G1_BASE_STATE_TOPIC:-}" -p "base_velocity_frame:=${G1_BASE_VELOCITY_FRAME:-}"
+read_gate_status() {
+  as_host_user timeout 3 ros2 topic echo --once /safety/hardware_status std_msgs/msg/String 2>/dev/null | python3 -c '
+import json, sys
+text = sys.stdin.read()
+start, end = text.find("{"), text.rfind("}")
+if start < 0 or end < start:
+    raise SystemExit(1)
+print(json.dumps(json.loads(text[start:end + 1])))
+' || true
+}
+gate_is_latched() {
+  [[ -n "${1:-}" ]] || return 1
+  python3 -c '
+import json, sys
+gate = json.loads(sys.argv[1])
+raise SystemExit(0 if gate.get("abort_reason") else 1)
+' "$1"
+}
+# Status is published on change. A settled gate is quiet, so the last syslog
+# line is the only copy of a latched abort. Use grep: sudo's PATH has no rg.
+syslog_abort_reason() {
+  local main_pid child
+  main_pid="$(safety_systemctl show -p MainPID --value g1-safety-stops.service 2>/dev/null || true)"
+  [[ -n "$main_pid" && "$main_pid" != 0 ]] || return 0
+  child="$(ps --ppid "$main_pid" -o pid= 2>/dev/null | awk '{print $1; exit}')"
+  [[ -n "$child" ]] || child="$main_pid"
+  grep -a "run_safety_stops.sh\\[$child\\]" /var/log/syslog 2>/dev/null \
+    | grep -o '"abort_reason": [^,}]*' \
+    | tail -1 \
+    | python3 -c '
+import sys
+line = sys.stdin.read().strip()
+value = line.split(":", 1)[-1].strip() if line else ""
+if len(value) >= 2 and value[0] == value[-1] == "\"":
+    value = value[1:-1]
+if value and value != "null":
+    print(value)
+'
+}
+stop_session_nodes
+for _attempt in 1 2 3 4 5; do
+  if ! ps -ww -u "${host_user:-${SUDO_USER:-unitree}}" -o args= | grep -E 'safety_node (checker|controller_stop|feedback)' >/dev/null; then
+    break
+  fi
+  stop_session_nodes
+  sleep 0.2
+done
 dry_run=false
 [[ "$mode" != dry-run ]] || dry_run=true
-launch_node hardware_gate -p "enable_hardware_output:=$enabled" -p "dry_run:=$dry_run" \
-  -p whole_body_output:=true -p "hardware_profile_path:=$profile" \
+if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
+  # Restart a latched watchdog before any session node subscribes. A checker
+  # that hears the old abort republishes it, and the fresh gate latches it too.
+  wanted_profile="$(realpath "$profile")"
+  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}"
+  current_gate="$(read_gate_status)"
+  needs_reload=0
+  latched_reason=""
+  if [[ -n "$current_gate" ]]; then
+    latched_reason="$(python3 -c '
+import json, sys
+print(json.loads(sys.argv[1]).get("abort_reason") or "")
+' "$current_gate")"
+    needs_reload="$(python3 -c '
+import json, sys
+gate = json.loads(sys.argv[1])
+same = (
+    gate.get("whole_body_output") is True
+    and gate.get("launch_gate") is True
+    and gate.get("hardware_profile_path") == sys.argv[2]
+    and not gate.get("abort_reason")
+)
+print("0" if same else "1")
+' "$current_gate" "$wanted_profile")"
+  else
+    latched_reason="$(syslog_abort_reason || true)"
+    [[ -n "$latched_reason" ]] && needs_reload=1
+  fi
+  if [[ "$needs_reload" == 0 ]]; then
+    service_pid="$(safety_systemctl show -p MainPID --value g1-safety-stops.service || true)"
+    if [[ -n "$service_pid" && "$service_pid" != 0 && (
+      "$repo_dir/robot_safety/hardware_adapter.py" -nt "/proc/$service_pid" ||
+      "$repo_dir/robot_safety/hardware_node.py" -nt "/proc/$service_pid" ||
+      "$repo_dir/robot_safety/ros_nodes.py" -nt "/proc/$service_pid"
+    ) ]]; then
+      needs_reload=1
+    fi
+  fi
+  if [[ "$needs_reload" == 1 ]]; then
+    echo "Reloading g1-safety-stops.service so this same watchdog commands the whole body."
+    if [[ -n "$latched_reason" ]]; then
+      echo "Previous stop: $latched_reason"
+      echo "Keep the robot supported. This reload can damp once, then it stays up."
+    else
+      echo "Keep the robot supported until the service is active again. It stays up for the run."
+    fi
+    safety_systemctl restart g1-safety-stops.service
+    wait_for_safety_service
+    current_gate=""
+    for _attempt in 1 2 3 4 5; do
+      current_gate="$(read_gate_status)"
+      [[ -n "$current_gate" ]] && break
+    done
+  fi
+  if gate_is_latched "$current_gate"; then
+    echo "g1-safety-stops is still latched (${current_gate}). No policy session started." >&2
+    exit 2
+  fi
+  echo "Publishing /safety/precheck only. g1-safety-stops checks those commands and writes the motors."
+fi
+launch_node checker -p "thrash.mode:=$thrash"
+launch_node controller_stop -p startup_timeout_secs:=5.0
+feedback_args=(
   -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
+  -p "hardware_profile_path:=$profile"
+  -p publish_policy_state:=true -p "require_base_state:=${G1_REQUIRE_BASE_STATE:-true}"
+)
+if [[ -n "${G1_BASE_STATE_TOPIC:-}" ]]; then
+  feedback_args+=(
+    -p "base_state_topic:=${G1_BASE_STATE_TOPIC}"
+    -p "base_velocity_frame:=${G1_BASE_VELOCITY_FRAME:?G1_BASE_VELOCITY_FRAME must be world or body}"
+  )
+fi
+launch_node feedback "${feedback_args[@]}"
+if [[ "${G1_USE_SAFETY_SERVICE:-}" != 1 ]]; then
+  launch_node hardware_gate -p "enable_hardware_output:=$enabled" -p "dry_run:=$dry_run" \
+    -p whole_body_output:=true -p "hardware_profile_path:=$profile" \
+    -p "launch_gate:=${G1_LAUNCH_GATE:-false}" \
+    -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
+    -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
+fi
 stop_container
 echo "Starting $image as $container_name on the robot network (interface ${ROBOT_INTERFACE:-eth0}, DDS domain ${ROBOT_DOMAIN:-0})."
-echo "Mode: $mode. Logs: $log_dir. Ctrl+C invokes the selected gate's stop path."
+echo "Mode: $mode. Logs: $log_dir. Ctrl+C stops this session and leaves g1-safety-stops running."
+if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 || "${G1_LAUNCH_GATE:-false}" == true ]]; then
+  echo "The robot eases to the container's first pose. Left + B launches the policy. Double Start damps."
+fi
 
 run_args=(
   --name "$container_name"
   --network host
+  --ipc=host
+)
+if [[ -n "$host_user" ]]; then
+  run_args+=(--user "$(id -u "$host_user"):$(id -g "$host_user")" -e HOME=/tmp)
+fi
+run_args+=(
   -e "ROBOT_INTERFACE=${ROBOT_INTERFACE:-eth0}"
   -e "ROBOT_DOMAIN=${ROBOT_DOMAIN:-0}"
   -e "ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-97}"
@@ -166,8 +357,14 @@ run_args=(
   -e "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
   -e "G1_EXECUTION_MODE=$mode"
   -e "G1_THRASH_MODE=$thrash"
+  -e "G1_SIM_EXAMPLE=${G1_SIM_EXAMPLE:-}"
   -e "G1_TASK_COMMAND=${G1_TASK_COMMAND:-}"
 )
+if [[ -n "${G1_COMMAND_FILE:-}" && -f "${G1_COMMAND_FILE}" ]]; then
+  command_file="$(realpath "$G1_COMMAND_FILE")"
+  cp "$command_file" "$log_dir/command.yaml"
+  run_args+=(-v "$command_file:/command.yaml:ro" -e G1_COMMAND_FILE=/command.yaml)
+fi
 if [[ -n "${G1_TRIAL_CONFIG:-}" ]]; then
   trial_config="$(realpath "$G1_TRIAL_CONFIG")"
   cp "$trial_config" "$log_dir/trial.json"

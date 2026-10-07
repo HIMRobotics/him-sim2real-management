@@ -6,7 +6,9 @@ and produces 29 raw joint actions, decoded using the YAML specification.
 
 The ONNX graph and weights were retained from this repository's
 `examples/sample_submissions/unitree_g1_stairs/policies` before commit `d541eb4`.
-The complete contract is documented in [ONNX_BUNDLE.md](../../../ONNX_BUNDLE.md).
+These weights are temporary. A yaw command of 0 still turns: walking forward at
+0.5 m/s yaws about +0.08 rad/s. A yaw command of about −0.127 rad/s cancels that
+turn in this sim. The complete contract is documented in [ONNX_BUNDLE.md](../../../ONNX_BUNDLE.md).
 
 The graph uses ONNX IR 9 and opset 17 for the Python 3.8 ARM64 container's
 ONNX Runtime 1.16.3. The original IR 10 export was resaved after removing its

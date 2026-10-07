@@ -29,17 +29,16 @@ from view import export_replay
 
 
 class ExampleTests(unittest.TestCase):
-    def test_walker_is_rejected_when_profile_gains_exceed_torque_limit(self):
+    def test_walker_hip_torque_uses_policy_gains_and_does_not_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report = run("walker", tmp, 10, safety_checks=True)
+            report = run("walker", tmp, 1.0, safety_checks=True)
         self.assertTrue(report["checks"]["profile_gains"])
-        self.assertGreater(report["commands"], 0)
-        self.assertLess(report["commands"], 500)
-        self.assertEqual(report["reason"], "joint_torque_limit")
-        self.assertEqual(report["status"], "violation")
-        self.assertEqual(report["detail"]["joint"], "right_hip_pitch")
-        self.assertGreater(report["detail"]["value"], report["detail"]["limit"])
-        self.assertIsNotNone(report["stop_time_seconds"])
+        self.assertGreater(report["commands"], 6)
+        self.assertNotIn(report["reason"], (
+            "joint_torque_limit", "joint_feedforward_torque_limit", "joint_velocity_limit"))
+        hip = report["warnings"].get("right_hip_pitch", {})
+        demands = [item for item in hip.get("limits", []) if item["torque_kind"] == "PD demand"]
+        self.assertEqual(demands, [])
 
     def test_walker_makes_forward_progress_with_checks_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,7 +51,7 @@ class ExampleTests(unittest.TestCase):
         self.assertFalse(motion["fell"])
         self.assertTrue(motion["upright_at_end"])
 
-    def test_stairs_policy_climbs_unchecked_and_rejects_excess_profile_torque(
+    def test_stairs_policy_climbs_unchecked_and_keeps_hip_torque_in_limit(
         self,
     ):
         with tempfile.TemporaryDirectory() as tmp:
@@ -65,12 +64,13 @@ class ExampleTests(unittest.TestCase):
             self.assertTrue(off["motion"]["stairs"]["climbed_stairs"])
             self.assertTrue(off["motion"]["stairs"]["finished_upright"])
             on = run("stairs", root / "on", 0.5, safety_checks=True)
-            self.assertEqual(on["status"], "violation")
-            self.assertEqual(on["reason"], "joint_torque_limit")
-            self.assertEqual(on["detail"]["joint"], "right_hip_pitch")
-            self.assertGreater(on["detail"]["value"], on["detail"]["limit"])
+            self.assertIsNone(on["reason"])
             self.assertGreater(on["commands"], 0)
-            self.assertLess(on["commands"], 25)
+            hip = on["warnings"].get("right_hip_pitch", {})
+            demands = [
+                item for item in hip.get("limits", []) if item["torque_kind"] == "PD demand"
+            ]
+            self.assertEqual(demands, [])
             view = export_replay(root / "off/trace.npz", root / "view")
             motion = json.loads((view / "motion.json").read_text())
             self.assertIn("Safety checks: OFF", motion["summary"])
@@ -150,6 +150,20 @@ class ExampleTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("(29,)", proc.stdout)
 
+    def test_walker_rest_pose_starts_with_feet_on_the_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = prepare("walker", tmp, container=False)
+            plant = Plant(scene=project / "environment/scene.xml", check_fall=False)
+        self.assertLess(float(plant.data.qpos[plant.base_qadr + 2]), 0.78)
+        distances = plant._support_distances(plant.data)
+        self.assertTrue(distances)
+        self.assertGreater(min(distances), -0.005)
+        np.testing.assert_allclose(
+            plant.q()[:6], [-0.312, 0.0, 0.0, 0.669, -0.363, 0.0], atol=1e-6
+        )
+        stock = Plant(check_fall=False)
+        self.assertAlmostEqual(float(stock.data.qpos[2]), 0.79)
+
     def test_local_preparation_skips_container_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = prepare("walker", tmp, container=False)
@@ -187,11 +201,42 @@ class ExampleTests(unittest.TestCase):
             report = json.loads((output / "report.json").read_text())
             self.assertEqual(report["execution"], "local")
             self.assertEqual(report["task_command"], [0.1, 0, 0])
+            self.assertIsNone(report["command_file"])
             self.assertFalse(report["safety_checks"])
             with self.assertRaises(ValueError):
                 run("walker", output, scene=Path(tmp) / "absent.xml")
             self.assertFalse((output / "trace.npz").exists())
             self.assertFalse((output / "report.json").exists())
+
+    def test_walker_container_command_file_is_the_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "forward"
+            proc = subprocess.run(
+                [
+                    str(ROOT / "sim.sh"),
+                    "--example",
+                    "walker",
+                    "--command",
+                    str(ROOT / "examples/commands/walker/forward_stop.yaml"),
+                    "--local",
+                    "--seconds",
+                    "0.04",
+                    "--no-safety-checks",
+                    "--output",
+                    str(output),
+                ],
+                cwd="/tmp",
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = json.loads((output / "report.json").read_text())
+            self.assertEqual(report["policy"], "walker")
+            self.assertEqual(report["task_command"][:2], [0.5, 0.0])
+            self.assertAlmostEqual(report["task_command"][2], -0.127, places=3)
+            self.assertTrue(report["command_file"].endswith("forward_stop.yaml"))
 
     def test_desktop_sim_self_test_and_local_example(self):
         help_proc = subprocess.run(

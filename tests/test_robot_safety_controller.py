@@ -3,7 +3,13 @@
 import unittest
 
 from robot_safety.config import Config
-from robot_safety.controller import StartDoublePressDetector, decode_start_pressed
+from robot_safety.controller import (
+    LeftAndBDetector,
+    StartDoublePressDetector,
+    decode_b_pressed,
+    decode_left_pressed,
+    decode_start_pressed,
+)
 from robot_safety.core import Supervisor
 
 
@@ -20,6 +26,27 @@ class ControllerTests(unittest.TestCase):
         for invalid in (b"short", [256] * 40):
             with self.assertRaises(ValueError):
                 decode_start_pressed(invalid)
+
+    def test_left_and_b_use_the_sdk_joystick_bits(self):
+        payload = bytearray(40)
+        payload[3] = 1 << 7
+        self.assertTrue(decode_left_pressed(payload))
+        self.assertFalse(decode_b_pressed(payload))
+        payload[3] = 1 << 1
+        self.assertTrue(decode_b_pressed(payload))
+        self.assertFalse(decode_left_pressed(payload))
+        payload[3] = (1 << 7) | (1 << 1)
+        self.assertTrue(decode_left_pressed(payload) and decode_b_pressed(payload))
+        self.assertFalse(decode_start_pressed(payload))
+
+    def test_left_and_b_requires_a_rising_combo(self):
+        detector = LeftAndBDetector()
+        self.assertFalse(detector.update(True, True))
+        self.assertFalse(detector.update(True, True))
+        self.assertFalse(detector.update(False, True))
+        self.assertFalse(detector.update(True, False))
+        self.assertTrue(detector.update(True, True))
+        self.assertFalse(detector.update(True, True))
 
     def test_double_press_boundaries(self):
         for second_press, expected in (

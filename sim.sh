@@ -36,15 +36,25 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --safety-checks     Enable safety checks (default).
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
---example NAME     Bundled stairs, walker, or balance controller.
+--example NAME     Policy package: stairs, walker, or balance, from
+                   examples/policies. Builds image g1-sim-example-<name>:local.
+                   The report policy field is that name. This is not a velocity file.
                    walker/thrash: belly-up walker, only thrash stops enabled.
                    walker/thrash-monitor: same experiment, readings without thrash stops.
+--image NAME       Run this container instead of the archive in containers/upload.
 --local            Run an example directly in MuJoCo without Docker/ROS/sudo.
 --output DIR       Store this run separately for comparison and replay.
---circle           Walk with the cached G1 walker. Command file defaults to
-                   examples/commands/walker/circle.yaml. No submission.
---command FILE     Walker command file. examples/commands/walker/stand.yaml stays put.
-                   examples/commands/walker/circle.yaml is the loop. Same runner as --circle.
+--circle           Cached walker in examples/policies/walker. No container.
+                   Command file examples/commands/walker/circle.yaml.
+                   The report policy field is circle.
+--command FILE     Walker velocity file.
+                   Alone, the cached walker plays it on the plant. No container.
+                   The report policy field is the file name without .yaml.
+                   With --example walker, that container plays the same file.
+                   stand.yaml stays put. circle.yaml is the loop.
+                   forward_stop.yaml walks at 0.5 m/s for 2 s, then steps down
+                   0.1 m/s each second. Yaw cancels the walker's drift.
+                   Use --seconds 7.
 --battery          Flat-ground battery: every pose, then 10/50/150 N pelvis
                    pushes. Writes containers/sim/output/battery/report.json.
                    With --circle, the cached walker gaits instead of a hold.
@@ -181,6 +191,7 @@ scene=""
 safety_checks=1
 safety_set=0
 example=""
+example_arg=""
 local_mode=0
 stopping=0
 # Keep this list in step with containers/sim/plant.py POSES.
@@ -195,7 +206,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --self-test) self_test=1; shift ;;
     --circle) circle=1; shift ;;
-    --command) command_file="${2:?--command needs a yaml file}"; circle=1; shift 2 ;;
+    --command) command_file="${2:?--command needs a yaml file}"; shift 2 ;;
     --battery) battery=1; shift ;;
     --push) push="${2:?--push needs none, small, medium, or heavy}"; shift 2 ;;
     --view) view=1; shift ;;
@@ -206,7 +217,7 @@ while [[ $# -gt 0 ]]; do
     --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
     --safety-checks) safety_checks=1; safety_set=1; shift ;;
     --no-safety-checks) safety_checks=0; safety_set=1; shift ;;
-    --example) example="${2:?--example needs a name}"; shift 2 ;;
+    --example) example_arg="${2:?--example needs a name}"; example="$example_arg"; shift 2 ;;
     --local) local_mode=1; shift ;;
     --output) out_dir="${2:?--output needs a directory}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
@@ -223,6 +234,13 @@ if [[ -n "$example" ]]; then
   fi
 fi
 
+if [[ -n "$command_file" && -z "$example" ]]; then
+  circle=1
+fi
+if [[ -n "$command_file" && -n "$example_arg" && "$example_arg" != walker ]]; then
+  echo "--command is a walker velocity file. Use --example walker, or pass --command alone for the direct plant path." >&2
+  exit 2
+fi
 if [[ -n "$example" && ( -n "$image" || "$self_test" -eq 1 || "$circle" -eq 1 ) ]]; then
   echo "Use --example by itself, without --image, --self-test, or --circle." >&2
   exit 2
@@ -341,6 +359,9 @@ if [[ "$local_mode" -eq 1 || ( "$backend" == compose && ( "$self_test" -eq 1 || 
   [[ "$safety_checks" -eq 1 ]] || local_args+=(--no-safety-checks)
   [[ -z "$scene" ]] || local_args+=(--scene "$scene")
   export G1_SIM_COMMAND="$command_file"
+  if [[ -n "$command_file" && -n "$example" ]]; then
+    export G1_COMMAND_FILE="$command_file"
+  fi
   if [[ "$counterfactuals" -eq 1 ]]; then
     for pose in "${poses[@]}"; do
       "$python" "$repo_dir/containers/sim/local.py" "${local_args[@]}" --pose "$pose" --output "$out_dir/poses/$pose" || true
@@ -370,6 +391,7 @@ trap 'stop_sim; stop_view' EXIT
 if [[ -n "$example" ]]; then
   prepared="$(as_owner "$python" "$repo_dir/containers/examples/prepare.py" "$example")"
   [[ -n "$scene" ]] || scene="$prepared/environment/scene.xml"
+  export G1_JOINT_PROFILE="$prepared/container/project/joint_profile.json"
   image="g1-sim-example-$example:local"
   "$runtime" build -t "$image" "$prepared/container"
 elif [[ -z "$image" && "$self_test" -eq 0 && "$circle" -eq 0 ]]; then

@@ -107,7 +107,10 @@ class RobotFeedbackNode(SafetyNode):
             if base and 0 <= time.monotonic() - base["base_received_at_secs"] < self.config.robot_timeout:
                 state.update(base)
                 state["base_velocity"] = (*base["linear_velocity"], *sample.gyro)
-            elif self.require_base:
+            elif not self.require_base:
+                # lowstate has no translation. Angular velocity is the IMU gyro.
+                state["base_velocity"] = (0.0, 0.0, 0.0, *sample.gyro)
+            else:
                 if time.monotonic() - self.time_started_secs >= SDK_DISCOVERY_TIMEOUT_SECS:
                     self.latch_abort("base_feedback_timeout")
                 return
@@ -115,6 +118,8 @@ class RobotFeedbackNode(SafetyNode):
             released = self.hardware_status.get("motion_released_at_secs")
             if self.require_base and released is not None:
                 state["control_ready"] &= bool(base and base["base_received_at_secs"] > released)
+            if self.hardware_status.get("launch_gate"):
+                state["control_ready"] &= bool(self.hardware_status.get("policy_launched"))
             output = String()
             output.data = json.dumps(state, allow_nan=False)
             self.policy_publisher.publish(output)

@@ -45,21 +45,26 @@ def torque_demand(q_des, dq_des, kp, kd, tau, q, dq):
 
 
 def checked_targets(command, entries, q, dq, *, initial,
-                    initial_velocity, warnings=None):
+                    initial_velocity, warnings=None, enforce_torque=True):
     """Clip and screen targets using the profile gains that will be applied."""
     targets = {}
     for index, joint, limits in entries:
-        position = check_command(
+        position, velocity = check_command(
             joint, limits, command["q"][index], command["dq"][index],
             command["tau"][index], q[index], initial,
-            initial_velocity, warnings,
+            initial_velocity, warnings, enforce_torque=enforce_torque,
         )
-        target = {"q": position, "dq": command["dq"][index], "kp": limits.kp,
+        target = {"q": position, "dq": velocity, "kp": limits.kp,
                   "kd": limits.kd, "tau": command["tau"][index]}
-        check_torque(joint, limits, torque_demand(
+        demand = torque_demand(
             position, target["dq"], target["kp"], target["kd"], target["tau"],
             q[index], dq[index],
-        ), kind="PD demand")
+        )
+        if enforce_torque:
+            check_torque(joint, limits, demand, kind="PD demand")
+        else:
+            note_limit(warnings, joint, "joint_torque_limit", abs(demand),
+                       limits.max_torque_nm, "Nm", torque_kind="PD demand")
         targets[index] = target
     return targets
 
@@ -83,14 +88,21 @@ def check_bound(reason, joint, value, limit, units):
         raise JointViolation(reason, joint, value, limit, units)
 
 
+def _warn(warnings, joint, fields):
+    if warnings is None:
+        return
+    previous = warnings.setdefault(joint, {})
+    previous.update(fields)
+
+
 def clip_position(joint, q_proposed, lower, upper, warnings=None):
     """Bound a finite proposal and summarize clipping per joint."""
     if not math.isfinite(q_proposed):
         raise ValueError("nonfinite_or_invalid_joint_command")
     q_commanded = max(lower, min(upper, q_proposed))
-    if q_commanded != q_proposed and warnings is not None:
-        previous = warnings.get(joint, {})
-        warnings[joint] = {
+    if q_commanded != q_proposed:
+        previous = (warnings or {}).get(joint, {})
+        _warn(warnings, joint, {
             "reason": "joint_position_clipped",
             "q_proposed": float(q_proposed),
             "q_commanded": float(q_commanded),
@@ -98,8 +110,29 @@ def clip_position(joint, q_proposed, lower, upper, warnings=None):
             "count": previous.get("count", 0) + 1,
             "max_correction_rad": max(previous.get("max_correction_rad", 0),
                                       abs(float(q_proposed - q_commanded))),
-        }
+        })
     return q_commanded
+
+
+def clip_velocity(joint, dq_proposed, limit, warnings=None):
+    """Cap desired joint speed at the model limit and record a warning."""
+    if not math.isfinite(dq_proposed):
+        raise ValueError("nonfinite_or_invalid_joint_command")
+    dq_commanded = max(-limit, min(limit, dq_proposed))
+    if dq_commanded != dq_proposed:
+        previous = (warnings or {}).get(joint, {})
+        _warn(warnings, joint, {
+            "velocity_reason": "joint_velocity_clipped",
+            "dq_proposed": float(dq_proposed),
+            "dq_commanded": float(dq_commanded),
+            "velocity_limit_rad_secs": float(limit),
+            "velocity_count": previous.get("velocity_count", 0) + 1,
+            "max_velocity_correction_rad_secs": max(
+                previous.get("max_velocity_correction_rad_secs", 0),
+                abs(float(dq_proposed - dq_commanded)),
+            ),
+        })
+    return dq_commanded
 
 
 BASE_ANGULAR_SPEED_LIMIT_RAD_S = 6.0
@@ -127,6 +160,34 @@ def check_base_motion(gyro, quat=None):
         check_bound("base_tilt_limit", "base", tilt, BASE_TILT_LIMIT_RAD, "rad")
 
 
+def note_limit(warnings, joint, reason, value, limit, units, **extra):
+    """Record the worst exceedance of a limit and let the caller continue."""
+    if not math.isfinite(value) or not math.isfinite(limit):
+        raise ValueError("nonfinite_or_invalid_joint_command")
+    if warnings is None or value <= limit:
+        return False
+    entry = warnings.setdefault(joint, {})
+    noted = entry.setdefault("limits", [])
+    kind = extra.get("torque_kind")
+    previous = next((item for item in noted
+                     if item["reason"] == reason and item.get("torque_kind") == kind), None)
+    if previous is None:
+        noted.append({
+            "reason": reason,
+            "value": float(value),
+            "limit": float(limit),
+            "units": units,
+            "count": 1,
+            **extra,
+        })
+        return True
+    previous["count"] += 1
+    if value >= previous["value"]:
+        previous["value"] = float(value)
+        previous.update(extra)
+    return True
+
+
 def check_measured_velocity(joint, limits, measured_dq):
     """Reject a joint that is spinning faster than its allowed speed."""
     check_bound(
@@ -140,20 +201,23 @@ def check_measured_velocity(joint, limits, measured_dq):
 
 def check_command(
     joint, limits, q_proposed, dq_proposed, tau, q_measured,
-    initial, initial_velocity, warnings=None,
+    initial, initial_velocity, warnings=None, *, enforce_torque=True,
 ):
     """Validate a proposal against current measurements before actuation."""
     if not all(math.isfinite(v) for v in (q_proposed, dq_proposed, tau, q_measured)):
         raise ValueError("nonfinite_or_invalid_joint_command")
     q_commanded = clip_position(joint, q_proposed, limits.position_min_rad,
                                limits.position_max_rad, warnings)
-    check_bound("joint_target_velocity_limit", joint, abs(dq_proposed),
-                limits.max_velocity_rad_secs, "rad/s")
-    check_bound("joint_feedforward_torque_limit", joint, abs(tau), limits.max_torque_nm, "Nm")
+    dq_commanded = clip_velocity(joint, dq_proposed, limits.max_velocity_rad_secs, warnings)
+    if enforce_torque:
+        check_bound("joint_feedforward_torque_limit", joint, abs(tau), limits.max_torque_nm, "Nm")
+    else:
+        note_limit(warnings, joint, "joint_feedforward_torque_limit", abs(tau),
+                   limits.max_torque_nm, "Nm", torque_kind="feedforward")
     if initial:
-        check_bound("initial_joint_target_velocity_limit", joint, abs(dq_proposed),
+        check_bound("initial_joint_target_velocity_limit", joint, abs(dq_commanded),
                     initial_velocity, "rad/s")
-    return q_commanded
+    return q_commanded, dq_commanded
 
 
 def check_torque(joint, limits, torque, *, kind=None):

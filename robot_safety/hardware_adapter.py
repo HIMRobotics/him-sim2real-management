@@ -7,7 +7,13 @@ from threading import Event, Lock, RLock, Thread
 
 from .balance_policy import LEG_KD, LEG_KP, MODEL_PATH, BalancePolicy
 from .config import Config
-from .controller import StartDoublePressDetector, decode_f3_pressed
+from .controller import (
+    LeftAndBDetector,
+    StartDoublePressDetector,
+    decode_b_pressed,
+    decode_f3_pressed,
+    decode_left_pressed,
+)
 from .feedback import feedback_from_sdk
 from .hardware_constants import (
     ARM_INDICES,
@@ -42,9 +48,22 @@ from .joint_diagnostics import JointDeltaDiagnostics
 class G1ArmAdapter:
     """Connect approved safety-checker commands to robot motors and request damping."""
 
-    def __init__(self, profile, clock=time.monotonic, *, whole_body=False):
+    def __init__(self, profile, clock=time.monotonic, *, whole_body=False,
+                 launch_gate=False, stance_blend_secs=5.0):
         self.profile = profile
         self.whole_body = whole_body
+        self.launch_gate = bool(launch_gate)
+        if not math.isfinite(stance_blend_secs) or stance_blend_secs < 0:
+            raise ValueError("stance blend duration must be finite and non-negative")
+        self.stance_blend_secs = float(stance_blend_secs)
+        self.policy_launched = not self.launch_gate
+        self.launch_requested = False
+        self.stance_from = None
+        self.stance_q = None
+        self.stance_since = None
+        self.stance_held_announced = False
+        self.launch_announced = False
+        self.launch_detector = LeftAndBDetector()
         self.release_pending = False
         self.motion_released_at_secs = None
         self.clock = clock
@@ -100,6 +119,11 @@ class G1ArmAdapter:
                 soft = self.f3_detector.update(
                     self.f3_pressed, sample.received_at_secs
                 )
+                if self.launch_gate and self.launch_detector.update(
+                    decode_left_pressed(message.wireless_remote),
+                    decode_b_pressed(message.wireless_remote),
+                ):
+                    self.launch_requested = True
                 self.feedback = sample
                 imu = getattr(message, "imu_state", None)
                 if imu is not None:
@@ -285,7 +309,7 @@ class G1ArmAdapter:
             if self.abort_reason is None:
                 self.abort_reason = reason
             self.command = None
-            if request_damping or (self.whole_body and self.armed):
+            if request_damping or (self.whole_body and self.armed and self.ownership_taken):
                 self.hold_failed = True
                 self.walk_stop = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
@@ -373,18 +397,28 @@ class G1ArmAdapter:
             self.release_pending = True
             try:
                 self.walk_rpc_code = self.transport.release_motion()
-                # A failed or timed-out release can still have changed ownership.
-                self.balance_released = True
-                self.motion_released_at_secs = self.clock()
                 if self.walk_rpc_code != 0:
+                    # The stock controller still owns the robot. Put its mode back
+                    # and leave the current pose alone.
+                    try:
+                        self.transport.restore_motion()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.balance_released = False
                     self.abort("hardware_release_failed")
                     return
+                self.balance_released = True
+                self.motion_released_at_secs = self.clock()
             except Exception:  # noqa: BLE001 - An uncertain release requires restoration.
                 self.balance_released = True
                 self.abort("hardware_release_failed")
                 return
             finally:
                 self.release_pending = False
+                with self.lock:
+                    # ReleaseMode blocks longer than the publish gap. The next
+                    # cycle starts from when the RPC returns.
+                    self.last_worker_cycle_secs = self.clock()
             return
         # SDK writes must not hold the feedback lock or delay controller monitoring.
         try:
@@ -420,7 +454,10 @@ class G1ArmAdapter:
         try:
             result = self.joint_diagnostics.snapshot()
             for name, warning in self.position_warnings.items():
-                result[name]["position_clipping"] = warning.copy()
+                if warning.get("reason") == "joint_position_clipped":
+                    result[name]["position_clipping"] = warning.copy()
+                if warning.get("velocity_reason") == "joint_velocity_clipped":
+                    result[name]["velocity_clipping"] = warning.copy()
             if self.q_applied is not None:
                 for index, limits in self._monitored_joints():
                     if index in self.q_applied:
@@ -465,10 +502,42 @@ class G1ArmAdapter:
             *zip(UPPER_BODY_INDICES, self.profile.joints),
         )
 
+    def _stance_command(self, now):
+        """Ease from the measured pose to the first command, then wait for left and B."""
+        if self.stance_from is None:
+            self.stance_from = [float(value) for value in self.feedback.q]
+            self.stance_q = [float(value) for value in self.command["q"]]
+            self.stance_since = now
+        elapsed = now - self.stance_since
+        alpha = 1.0 if self.stance_blend_secs == 0 else min(
+            1.0, max(0.0, elapsed / self.stance_blend_secs)
+        )
+        if alpha >= 1.0 and self.launch_requested:
+            self.policy_launched = True
+            if not self.launch_announced:
+                self.launch_announced = True
+                print("left + B accepted; launching the policy", flush=True)
+            return self.command
+        if alpha >= 1.0 and not self.stance_held_announced:
+            self.stance_held_announced = True
+            print("holding the first pose. press left + B to launch.", flush=True)
+        blended = dict(self.command)
+        blended["q"] = [
+            (1.0 - alpha) * start + alpha * goal
+            for start, goal in zip(self.stance_from, self.stance_q)
+        ]
+        count = len(blended["q"])
+        blended["dq"] = [0.0] * count
+        blended["tau"] = [0.0] * count
+        return blended
+
     def checked_targets(self, now):
         """Check proposals with the profile gains used by the arm controller."""
+        command = self.command
+        if self.launch_gate and not self.policy_launched:
+            command = self._stance_command(now)
         targets = checked_targets(
-            self.command,
+            command,
             ((index, G1_29_JOINT_NAMES[index], limits) for index, limits in self._monitored_joints()),
             self.feedback.q, self.feedback.dq, initial=self.last_output_secs is None,
             initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
@@ -614,24 +683,24 @@ class G1ArmAdapter:
         except Exception:  # noqa: BLE001
             self.reported_fsm_id = None
         if (
-            self.release_damp_when_confirmed
-            and self.damping_rpc_code == 0
+            self.damping_rpc_code == 0
             and self.reported_fsm_id == DAMPING_FSM_ID
             and self.arm_release_written
+            and (self.release_damp_when_confirmed or self.whole_body)
         ):
             self._release_after_confirmed_damp()
 
     def _release_after_confirmed_damp(self):
         """Stop resending damp so a later stand from the remote is left alone."""
-        if self.whole_body:
-            return
         with self.stop_lock:
             self.arm_hold_q = None
             self.hold_failed = False
             self.walk_stop = False
             self.armed = False
+            self.ownership_taken = False
             self.command = None
-            self.abort_reason = None
+            if not self.whole_body:
+                self.abort_reason = None
             self.release_damp_when_confirmed = False
             self.damp_settled = True
             self.stop_requested.clear()
@@ -656,6 +725,7 @@ class G1ArmAdapter:
                     last_progress = self.last_submission_secs
                 if (
                     self.armed
+                    and not self.release_pending
                     and last_progress is not None
                     and now - last_progress >= self.profile.max_publish_gap_secs
                 ):

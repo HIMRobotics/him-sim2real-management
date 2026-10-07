@@ -120,6 +120,104 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.step()
         self.assertEqual(self.transport.write_body.call_count, count)
 
+    def test_slow_motion_release_is_not_an_output_stall(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+
+        def slow_release():
+            self.now += 0.05
+            self.transport.release_calls += 1
+            return 0
+
+        self.transport.release_motion = slow_release
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.15)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertTrue(self.adapter.balance_released)
+        self.state()
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.transport.write_body.assert_called_once()
+
+    def test_whole_body_confirmed_damp_does_not_repeat(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.adapter.step()
+        self.adapter.abort("hardware_output_worker_stalled")
+        self.adapter._request_stock_damping()
+        self.assertEqual(self.adapter.reported_fsm_id, 1)
+        self.assertFalse(self.adapter.stop_requested.is_set())
+        self.assertFalse(self.adapter.ownership_taken)
+        self.assertEqual(self.adapter.abort_reason, "hardware_output_worker_stalled")
+        calls = self.transport.stop_calls
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, calls)
+
+    def test_failed_release_restores_stock_control_without_damping(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+        self.transport.release_motion = lambda: 3104
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(self.adapter.abort_reason, "hardware_release_failed")
+        self.assertEqual(self.transport.restore_calls, 1)
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.assertFalse(self.adapter.balance_released)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 0)
+
+    def test_launch_gate_eases_to_the_first_pose_until_left_and_b(self):
+        self.adapter.whole_body = True
+        self.adapter.launch_gate = True
+        self.adapter.policy_launched = False
+        self.adapter.stance_blend_secs = 1.0
+        self.transport.write_body = Mock(return_value=True)
+        self.assertTrue(self.adapter.arm())
+        self.command["q"] = [0.4] * 29
+
+        def step():
+            self.adapter.submit(self.command, self.now + 0.15)
+            self.adapter.step()
+
+        step()
+        self.assertEqual(self.transport.release_calls, 1)
+        step()
+        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.0)
+        for _ in range(50):
+            self.now += 0.01
+            self.state()
+            step()
+        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.2, places=2)
+        self.command["q"] = [0.9] * 29
+        self.now += 0.01
+        self.state()
+        step()
+        self.assertLess(self.transport.write_body.call_args[0][0][0]["q"], 0.5)
+        self.assertFalse(self.adapter.policy_launched)
+        while self.now < 11.0:
+            self.now += 0.01
+            self.state()
+            step()
+        self.assertFalse(self.adapter.policy_launched)
+        remote = [0] * 40
+        remote[3] = (1 << 7) | (1 << 1)
+        self.adapter.receive_state(SimpleNamespace(
+            motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
+            mode_machine=5,
+            imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
+            wireless_remote=remote,
+        ))
+        self.command["q"] = [0.9] * 29
+        step()
+        self.assertTrue(self.adapter.policy_launched)
+        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.9)
+
     def test_bad_whole_body_command_never_releases_stock_control(self):
         self.adapter.whole_body = True
         self.assertTrue(self.adapter.arm())
@@ -514,17 +612,17 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(len(self.transport.writes), 2)
         self.assertNotIn(3, self.transport.writes[-1][0])
 
-    def test_leg_velocity_limit_is_rejected(self):
+    def test_leg_velocity_above_the_cap_is_clipped_and_warned(self):
         self.run_first()
         self.now += 0.005
         self.command["dq"][3] = 0.101
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
-        self.assertIn(
-            "left_knee: joint_target_velocity_limit",
-            self.adapter.abort_reason,
-        )
-        self.assertEqual(len(self.transport.writes), 1)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 2)
+        warning = self.adapter.position_warnings["left_knee"]
+        self.assertEqual(warning["velocity_reason"], "joint_velocity_clipped")
+        self.assertEqual(warning["dq_commanded"], 0.1)
 
     def test_leg_torque_is_rejected(self):
         legs = list(self.adapter.profile.legs)
@@ -535,14 +633,17 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIn("left_knee: joint_torque_limit", self.adapter.abort_reason)
         self.assertEqual(self.transport.writes, [])
 
-    def test_commanded_speed_is_rejected(self):
+    def test_commanded_speed_above_the_cap_is_clipped(self):
         self.run_first()
         self.now += 0.005
         self.command["dq"][16] = 0.101
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
-        self.assertIsNotNone(self.adapter.abort_reason)
-        self.assertEqual(len(self.transport.writes), 1)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 2)
+        self.assertEqual(
+            self.adapter.position_warnings["left_shoulder_roll"]["dq_commanded"], 0.1
+        )
 
     def test_command_gap_remains_diagnostic_without_rejection(self):
         self.run_first()

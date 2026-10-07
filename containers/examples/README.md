@@ -101,9 +101,9 @@ an explicitly configured measurement source is available and fresh.
 The client uses the session supplied in `/safety/policy_state` or arms through
 the existing readiness and `/safety/checker/arm` services.
 
-`--circle` and `--command` use a separate direct-control path. Successful runs
-report `completed`, with `control_path: direct` and explicit per-check flags.
-They do not establish that the walker passes submission validation.
+`--example` is the policy package. Its report `policy` field is `stairs`, `walker`, or `balance`, and the image tag is `g1-sim-example-<name>:local`. `--image`, or the single archive in `containers/upload`, selects a container instead. `G1_TASK_COMMAND` changes that container's task velocity. It does not change which package was built.
+
+`--circle` and `--command` use a separate direct-control path and do not start either container. The network is `examples/policies/walker`. The report `policy` field is the velocity file name without `.yaml`. Successful runs report `completed`, with `control_path: direct` and explicit per-check flags. They do not establish that the walker passes submission validation.
 
 ## Use another scene and interpret results
 

@@ -50,9 +50,10 @@ change rejection. Custom profiles must remove the obsolete `max_command_gap_rad`
 `max_tracking_error_rad` fields. The removed `initial_position_tolerance_rad` field
 is accepted and ignored when loading legacy hardware profiles.
 
-`max_velocity_rad_secs` checks both the desired velocity field and measured
-velocity using the model values above, immediately on each sample. No 50 ms
-persistence delay remains. `max_torque_nm` bounds feedforward torque, total
+`max_velocity_rad_secs` caps the desired velocity field. A proposal past that
+cap is clipped and recorded as a warning, on the same path as position clipping.
+Measured velocity still rejects immediately, with no 50 ms persistence delay.
+`max_torque_nm` bounds feedforward torque, total
 estimated PD plus feedforward demand, and available measured torque. Simulator
 checks use its actual gains. Checked submissions and the hardware arm adapter use profile gains, which
 are the gains it actually sends, and forwards validated feedforward torque.

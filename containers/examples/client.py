@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import rclpy
+from command import load_schedule
 from controllers import ExamplePolicy
 from him_safety_interfaces.msg import Abort, JointCommand
 from him_safety_interfaces.srv import ArmGate
@@ -25,6 +26,9 @@ class PolicyNode(Node):
         self.mode = mode
         self.task_command = json.loads(os.environ.get("G1_TASK_COMMAND") or
                                        ("null" if mode == "sim" else "[0,0,0]"))
+        command_file = os.environ.get("G1_COMMAND_FILE")
+        self.schedule = load_schedule(command_file) if command_file else None
+        self.command_started = None
         trial_path = os.environ.get("G1_TRIAL_CONFIG")
         self.trial = MovementTrial(json.loads(Path(trial_path).read_text())) if trial_path else None
         if self.trial and (policy.name == "balance" or os.environ.get("G1_THRASH_MODE") != "enforce"):
@@ -61,7 +65,10 @@ class PolicyNode(Node):
                 rclpy.spin_until_future_complete(self, future, timeout_sec=5)
                 result = future.result() if future.done() else None
                 if result is None or not result.success:
-                    raise RuntimeError("arming rejected: " + service)
+                    detail = "" if result is None else (result.message or "")
+                    raise RuntimeError(
+                        "arming rejected: " + service + ((": " + detail) if detail else "")
+                    )
                 return result.message
             finally:
                 self.destroy_client(client)
@@ -102,7 +109,12 @@ class PolicyNode(Node):
         if state["observation_id"] <= self.last_observation:
             return
         self.last_observation = state["observation_id"]
-        if self.task_command is not None:
+        if self.schedule is not None:
+            if self.command_started is None and state.get("control_ready", False):
+                self.command_started = time.monotonic()
+            elapsed = 0.0 if self.command_started is None else time.monotonic() - self.command_started
+            state["task_command"] = self.schedule.at(elapsed).tolist()
+        elif self.task_command is not None:
             state["task_command"] = self.task_command
         if self.trial and state.get("control_ready", False):
             state["task_command"] = self.trial.command(state, time.monotonic())
@@ -121,6 +133,8 @@ class PolicyNode(Node):
                               "trial": self.trial.result if self.trial else None}, allow_nan=False), flush=True)
 
     def on_abort(self, message):
+        if self.session_id is None:
+            return
         print("Policy abort: " + message.reason, flush=True)
         self.done = True
 

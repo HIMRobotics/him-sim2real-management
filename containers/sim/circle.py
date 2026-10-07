@@ -1,11 +1,12 @@
-"""Drive the cached G1 walker around one flat circle.
+"""Drive the cached G1 walker from an example command file.
 
 The balance network is the standing policy. A walking step also exceeds the
 submission tracking window, so this gait is applied directly and the fall
-check still runs.
+check still runs. A file may hold one velocity or a timed list of them.
 """
 
 import os
+import sys
 from pathlib import Path
 
 import mujoco
@@ -14,15 +15,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODEL = ROOT / "examples/policies/walker/walker.onnx"
+sys.path.insert(0, str(ROOT / "containers/examples"))
+from command import load_schedule
 
 
 def load_command(path):
-    """Read vx, vy, yaw_rate from an example command file."""
-    document = yaml.safe_load(Path(path).read_text())
-    command = np.asarray(document.get("command"), dtype=np.float32)
-    if command.shape != (3,) or not np.isfinite(command).all():
-        raise ValueError(f"{path} command must be vx, vy, yaw_rate")
-    return command
+    """Read the command in effect when an example file starts."""
+    return load_schedule(path).at(0.0)
 
 
 class CircleWalker:
@@ -56,8 +55,9 @@ class CircleWalker:
         command_path = os.environ.get("G1_SIM_COMMAND") or (
             ROOT / "examples/commands/walker/circle.yaml"
         )
-        self.command = load_command(command_path)
+        self.schedule = load_schedule(command_path)
         self.started = False
+        self.gait_start = None
 
     def settle(self, plant):
         """Place the walker stance on the floor before the first step."""
@@ -86,11 +86,14 @@ class CircleWalker:
         q = np.asarray(state["q"], dtype=np.float32)
         if not self.started:
             return q.astype(np.float64)
+        now = float(state["sim_time"])
+        if self.gait_start is None:
+            self.gait_start = now
         observation = self.walker.observation(
             q,
             np.asarray(state["dq"], dtype=np.float32),
             state["quat"],
             np.asarray(state["base_velocity"], dtype=np.float32),
-            self.command,
+            self.schedule.at(now - self.gait_start),
         )
         return self.walker.decode(self.walker.infer(observation))

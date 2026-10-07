@@ -1,6 +1,6 @@
 # Walker test submission
 
-This folder contains the code and Dockerfile for one simulation test submission. Models live in `examples/policies/walker/`, and command files live in `examples/commands/walker/`. The network is the G1 walker in `walker.onnx`: 99 inputs, 29 joint targets. `stand.yaml` and `circle.yaml` set `vx`, `vy`, and `yaw_rate`. It does not publish `rt/lowcmd` or `rt/arm_sdk`. The GR00T balance file is not this network and is not loaded.
+This folder contains the code and Dockerfile for one simulation test submission. Models live in `examples/policies/walker/`, and command files live in `examples/commands/walker/`. The network is the G1 walker in `walker.onnx`: 99 inputs, 29 joint targets. `stand.yaml` and `circle.yaml` set a constant `vx`, `vy`, and `yaw_rate`. `forward_stop.yaml` walks at 0.5 m/s for 2 s, then steps the command down by 0.1 m/s each second, with a yaw command that cancels this walker's drift. It does not publish `rt/lowcmd` or `rt/arm_sdk`. The GR00T balance file is not this network and is not loaded.
 
 This is not a general deployment Dockerfile or a validated robot policy launcher. It relies on simulator base velocity. Use it with `sim.sh` to test the submission archive interface.
 
@@ -24,9 +24,12 @@ adapter and its configuration module into the image.
 The first command holds the measured joints. Later commands are the walker targets, with gains from `walker.yaml`. Feedforward torque is zero. `WALKER_COMMAND` selects the yaml. The default is `stand.yaml`. A gait step does not fit the submission tracking window, so `./sim.sh --command` applies that yaml on the plant instead of through the image.
 
 `--circle` and `--command` use direct control and report `completed` on success.
-They do not validate submission commands. With safety enabled, their reports
-list the remaining runtime checks and the viewer labels safety as `PARTIAL`.
-Use the container path or `--example walker` to exercise submission checks.
+They do not start this image. The report `policy` field is the command file
+name (`circle`, `stand`, or `forward_stop`), not this container. With safety
+enabled, their reports list the remaining runtime checks and the viewer labels
+safety as `PARTIAL`. Use this image through `containers/upload` or `--image`,
+or use `--example walker`, to exercise submission checks. `WALKER_COMMAND`
+applies only inside this image.
 
 ## Build
 
@@ -45,4 +48,4 @@ cp .cache/walker_submission/submission.tar containers/upload/submission.tar
 ./sim.sh --seconds 10 --view
 ```
 
-`./sim.sh` attaches the container to a loopback-only network and sets `ROBOT_INTERFACE=lo`. It does not use `eth0`. Safety checks stay on. A target the joint profile rejects ends the run as `violation`. With `--view`, open `http://127.0.0.1:8765` and press Start. Playback starts at the first frame. The camera stays put, and a blue line is the pelvis path. That path is only in the browser. `./sim.sh --command examples/commands/walker/stand.yaml --view` holds the walker stance. `./sim.sh --command examples/commands/walker/circle.yaml --view` is the loop. Neither command loads the GR00T balance file.
+`./sim.sh` attaches the container to a loopback-only network and sets `ROBOT_INTERFACE=lo`. It does not use `eth0`. Safety checks stay on. A target the joint profile rejects ends the run as `violation`. With `--view`, open `http://127.0.0.1:8765` and press Start. Playback starts at the first frame. The camera stays put, and a blue line is the pelvis path. That path is only in the browser. `./sim.sh --command examples/commands/walker/stand.yaml --view` holds the walker stance. `./sim.sh --command examples/commands/walker/circle.yaml --view` is the loop. `./sim.sh --command examples/commands/walker/forward_stop.yaml --seconds 7 --view` walks at 0.5 m/s for 2 s, then steps down to a stop. None of these load the GR00T balance file. The image still packages `stand.yaml` and `circle.yaml`; the walk-then-stop file is played by `--command` on the plant.

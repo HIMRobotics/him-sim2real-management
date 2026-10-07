@@ -114,7 +114,7 @@ class Runner:
             try:
                 frame.update(self.rules.process_command(
                     frame, self.plant.q(), self.plant.dq(), initial=self.active is None,
-                    warnings=self.position_warnings,
+                    warnings=self.position_warnings, enforce_torque=False,
                 ))
             except JointViolation as exc:
                 self._latch(exc.reason, exc.details)
@@ -159,19 +159,21 @@ class Runner:
                 if self.plant.fallen():
                     violation = ("fall", {"height": self.plant.state()["height"]})
                     break
+                self.rules.note_measured_velocity(dq, self.position_warnings)
                 try:
-                    self.rules.check_measured_velocity(dq)
                     check_base_motion(self.plant.data.qvel[
                         self.plant.base_vadr + 3:self.plant.base_vadr + 6])
-                    if self.active is not None and self.control_path == "submission":
-                        tau_demand = self.plant.demand(
-                            self.active["q"], self.active["dq"], self.active["kp"],
-                            self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
-                        self.rules.check_torque(tau_demand, kind="PD demand")
-                        self.rules.check_torque(self.plant.data.qfrc_actuator[self.plant.vadr], kind="applied torque")
                 except JointViolation as exc:
                     violation = (exc.reason, exc.details)
                     break
+                if self.active is not None:
+                    tau_demand = self.plant.demand(
+                        self.active["q"], self.active["dq"], self.active["kp"],
+                        self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
+                    self.rules.note_torque(tau_demand, self.position_warnings, kind="PD demand")
+                    self.rules.note_torque(
+                        self.plant.data.qfrc_actuator[self.plant.vadr],
+                        self.position_warnings, kind="applied torque")
             if self.reason is None and self.commands:
                 reason = self.thrash_detector.observe(dq, self.sim_time)
                 if reason:
@@ -283,8 +285,11 @@ class Runner:
             target.parent.mkdir(parents=True, exist_ok=True)
             self._live = target.open("w")
         qpos = [round(float(value), 5) for value in self.plant.data.qpos]
+        from view import limit_warning_text
+
+        warning = limit_warning_text(self.position_warnings) or None
         self._live.write(json.dumps({"t": self.sim_time, "qpos": qpos, "thrash": telemetry,
-                                    "stop": stop}) + "\n")
+                                    "stop": stop, "warning": warning}) + "\n")
         self._live.flush()
 
     def _write_trace(self):
@@ -309,7 +314,7 @@ class Runner:
         return str(target)
 
     def circle(self, time):
-        """One walking step of a flat circle. Movement limits are not applied."""
+        """One walking step of a flat command. Limit exceedances warn and do not stop."""
         self.control_path = "direct"
         try:
             if self._circle is None:

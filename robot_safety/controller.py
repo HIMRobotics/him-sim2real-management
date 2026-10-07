@@ -3,20 +3,23 @@
 import math
 
 from .hardware_constants import (
+    B_BUTTON_MASK,
+    DPAD_BUTTON_BYTE,
     F3_BUTTON_MASK,
+    LEFT_BUTTON_MASK,
     START_BUTTON_BYTE,
     START_BUTTON_MASK,
     WIRELESS_REMOTE_SIZE,
 )
 
 
-def decode_remote_button(wireless_remote, mask):
+def decode_remote_button(wireless_remote, mask, byte=START_BUTTON_BYTE):
     """Return one button bit from the SDK's 40-byte remote payload."""
     if len(wireless_remote) != WIRELESS_REMOTE_SIZE:
         raise ValueError("expected a 40-byte wireless_remote payload")
     if not all(type(value) is int and 0 <= value <= 255 for value in wireless_remote):
         raise ValueError("remote payload must contain bytes")
-    return bool(wireless_remote[START_BUTTON_BYTE] & mask)
+    return bool(wireless_remote[byte] & mask)
 
 
 def decode_start_pressed(wireless_remote):
@@ -27,6 +30,36 @@ def decode_start_pressed(wireless_remote):
 def decode_f3_pressed(wireless_remote):
     """Return F3's physical state. F3 sits beside Start on the G1 remote."""
     return decode_remote_button(wireless_remote, F3_BUTTON_MASK)
+
+
+def decode_left_pressed(wireless_remote):
+    """Return the left d-pad state. It shares byte 3 with the face buttons."""
+    return decode_remote_button(wireless_remote, LEFT_BUTTON_MASK, DPAD_BUTTON_BYTE)
+
+
+def decode_b_pressed(wireless_remote):
+    """Return B's physical state from the same remote byte as the d-pad."""
+    return decode_remote_button(wireless_remote, B_BUTTON_MASK, DPAD_BUTTON_BYTE)
+
+
+class LeftAndBDetector:
+    """Emit once when left and B rise together. A combo already held is ignored."""
+
+    def __init__(self):
+        self.previous_both = None
+
+    def update(self, left_pressed, b_pressed):
+        """Return whether this sample is the rising edge of both buttons."""
+        if type(left_pressed) is not bool or type(b_pressed) is not bool:
+            self.previous_both = None
+            raise ValueError("expected boolean button states")
+        both = left_pressed and b_pressed
+        if self.previous_both is None:
+            self.previous_both = both
+            return False
+        rising = both and not self.previous_both
+        self.previous_both = both
+        return rising
 
 
 class StartDoublePressDetector:

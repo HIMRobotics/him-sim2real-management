@@ -48,13 +48,16 @@ PAGE = """<!DOCTYPE html>
   #thrash th { position: sticky; top: 0; background: #fff; font-size: 11px; }
   #thrash th:first-child, #thrash td:first-child { text-align: left; }
   #thrash tr.flagged { background: #fff0da; }
-  #stop { position: absolute; left: 12px; bottom: 18px; max-width: min(670px, 75vw);
-    background: #fff4eeed; border-left: 5px solid #b54a22; border-radius: 6px;
-    padding: 12px 16px; font: 14px system-ui, sans-serif; white-space: pre-line; color: #682811; }
+  #stop, #warn { position: absolute; left: 12px; max-width: min(670px, 75vw);
+    border-radius: 6px; padding: 12px 16px; font: 14px system-ui, sans-serif; white-space: pre-line; }
+  #stop { bottom: 18px; background: #fff4eeed; border-left: 5px solid #b54a22; color: #682811; }
+  #warn { bottom: 18px; background: #fff8e8; border-left: 5px solid #c48a12; color: #6a4b08; }
+  #warn.raised { bottom: 108px; }
 </style>
 </head>
 <body>
 <div id="hud">loading</div>
+<div id="warn" role="status" hidden></div>
 <div id="stop" role="status" hidden></div>
 <div id="playback" aria-label="Replay controls">
   <button id="go-start" type="button" title="Jump to the first frame and pause (Home)" aria-keyshortcuts="Home">Go to start · Home</button>
@@ -86,6 +89,15 @@ const motion = await (await fetch("motion.json")).json();
 const hud = document.getElementById("hud");
 motion.thrash ||= [];
 motion.stop ||= [];
+motion.warning ||= [];
+function showWarning(index) {
+  const warning = motion.warning[index] || "";
+  const panel = document.getElementById("warn");
+  const listed = String(motion.summary || "").includes("Limit warning");
+  panel.hidden = !warning || listed;
+  panel.classList.toggle("raised", !document.getElementById("stop").hidden);
+  if (!panel.hidden) panel.textContent = warning;
+}
 function showStop(index) {
   const stop = motion.stop[index] || motion.run_stop;
   const panel = document.getElementById("stop");
@@ -139,7 +151,7 @@ function showThrash(index) {
   if (t) thresholds.textContent = t.weighted_rms_limit == null
     ? "Legacy detector thresholds. Replay preserves its original detections."
     : `Stop threshold: whole-body RMS ≥ ${t.weighted_rms_limit.toFixed(2)} for ${1000 * t.persistence_secs} ms continuously. Timer resets below threshold. No CV or separate joint stop rules.`;
-  if (sample.control_path === "direct") thresholds.textContent += " Direct circle: submission-command checks bypassed.";
+  if (sample.control_path === "direct") thresholds.textContent += " Direct command: submission-command checks bypassed.";
 }
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -223,6 +235,7 @@ function show(index) {
   hud.style.whiteSpace = "pre-line";
   showThrash(frame);
   showStop(frame);
+  showWarning(frame);
 }
 let trailCount = 0;
 function updateTrail() {
@@ -255,6 +268,7 @@ function remember(frames, replace) {
     motion.focus = [];
     motion.thrash = [];
     motion.stop = [];
+    motion.warning = [];
     for (const geom of motion.geoms) geom.poses = [];
   }
   for (const item of frames) {
@@ -262,6 +276,7 @@ function remember(frames, replace) {
     motion.focus.push(item.focus);
     motion.thrash.push(item.thrash || null);
     motion.stop.push(item.stop || null);
+    motion.warning.push(item.warning || "");
     item.poses.forEach((pose, index) => motion.geoms[index].poses.push(pose));
   }
   motion.frames = motion.time.length;
@@ -588,6 +603,25 @@ def describe_stop(stop):
     return dict(stop, description="\n".join(lines))
 
 
+def limit_warning_text(warnings):
+    """One line naming the worst limit exceedance. The run was not stopped for it."""
+    items = []
+    for joint, fields in (warnings or {}).items():
+        if not isinstance(fields, dict):
+            continue
+        for item in fields.get("limits", ()):
+            items.append((joint, item))
+    if not items:
+        return ""
+    joint, item = max(items, key=lambda pair: (
+        pair[1]["value"] / pair[1]["limit"] if pair[1]["limit"] else pair[1]["value"]))
+    kind = item.get("torque_kind")
+    kind_text = f" {kind}" if kind else ""
+    extra = f" and {len(items) - 1} more" if len(items) > 1 else ""
+    return (f"Limit warning: {joint}{kind_text} {item['value']:.4g} > "
+            f"{item['limit']:.4g} {item['units']}{extra}. Run continued.")
+
+
 def report_summary(report, safety_checks=True):
     """HUD text for a finished run."""
     summary = f"{report.get('policy') or 'Simulation'} | Safety checks: "
@@ -606,6 +640,9 @@ def report_summary(report, safety_checks=True):
         summary += "\n" + describe_stop(stop_from_report(report))["description"]
     elif report.get("status") == "no_command":
         summary += "\nNo policy commands were accepted before the run ended."
+    warning = limit_warning_text(report.get("warnings"))
+    if warning:
+        summary += "\n" + warning
     motion = report.get("motion", {})
     if "fell" in motion:
         summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")

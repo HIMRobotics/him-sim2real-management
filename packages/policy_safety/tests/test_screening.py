@@ -506,8 +506,11 @@ def test_branch_restores_joint_command_history(setup, tmp_path):
     dq[15] = 38.0
     adapter.command_velocity_and_torque = lambda: (dq.copy(), np.zeros(29))
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "branch.npz")
-    assert result["first_violation"]["reason"] == "joint_target_velocity_limit"
-    assert result["simulated_seconds"] == 0
+    warning = result["warnings"]["left_shoulder_pitch"]
+    assert warning["velocity_reason"] == "joint_velocity_clipped"
+    assert warning["dq_proposed"] == 38.0
+    assert warning["dq_commanded"] == 37.0
+    assert (result["first_violation"] or {}).get("reason") != "joint_target_velocity_limit"
 
 
 @pytest.mark.parametrize("follows_target", [True, False])

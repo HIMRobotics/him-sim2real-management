@@ -415,6 +415,15 @@ class FeedbackBridgeTests(unittest.TestCase):
         bridge.on_observation(message)
         state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
         self.assertTrue(state["control_ready"])
+        bridge.hardware_status["launch_gate"] = True
+        bridge.hardware_status["policy_launched"] = False
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertFalse(state["control_ready"])
+        bridge.hardware_status["policy_launched"] = True
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertTrue(state["control_ready"])
         self.assertEqual(state["base_velocity"], [0.1, 0., 0., 0., 0., 0.])
         bridge.time_started_secs = now - 6
         bridge.base["base_received_at_secs"] = now - 1

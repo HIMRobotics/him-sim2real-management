@@ -89,7 +89,11 @@ class ExamplePolicy:
         if self.arm_pose is None:
             self.arm_pose = q[15:].copy()
             self.hold_pose = q.copy()
-        if self.sequence == 0 or not state.get("control_ready", True):
+        if not state.get("control_ready", True):
+            # Hardware eases to this pose, then left + B sets control_ready.
+            target = (self.hold_pose if self.name == "balance"
+                      else np.asarray(self.policy.default, dtype=float)).copy()
+        elif self.sequence == 0:
             target = self.hold_pose.copy()
         elif self.name == "balance":
             lower = self.policy.update(q, state["dq"], state["quat"], state["gyro"])

@@ -81,13 +81,13 @@ experiment evaluator still uses its explicit bundle gains and torque-scale
 scenarios. Those configurations and unchecked/direct experiments do not claim
 hardware-equivalent actuation.
 
-With the unified profile gains, a checked walker run accepted six commands
-before rejecting `right_hip_pitch` PD torque demand of 104.9 Nm against an
-88 Nm limit. Reports record the first latch time as `stop_time_seconds`,
-separately from simulation that continues under damping after the rejection.
-The earlier run using policy gains is not a parity baseline for this
-configuration. The checked stairs example also reaches this torque limit
-during startup. No limits were relaxed to make these examples pass.
+In simulation, a joint velocity or torque past the model rating is a warning.
+The command stays applied, MuJoCo still saturates actuator force at the model
+force range, and the report names the worst exceedance. Protocol errors,
+timeouts, non-finite state, the startup speed gate, base angular speed, falls,
+and enforced thrash still stop the run. Hardware checks are separate: measured
+speed and torque still reject there. Reports record a real stop as
+`stop_time_seconds`.
 
 ## Shared thrash detection
 
@@ -181,8 +181,8 @@ With safety checks enabled, `containers/sim/runner.py` checks:
 
 - `session_id` matches the armed session, `sequence` increases, and `observation_id` is still fresh.
 - Targets, gains, and feedforward torque are finite and inside the sanity bounds.
-- The shared processor clips positions and checks target velocity, feedforward torque, and torque demand using profile gains.
-- During each physics step, overspeed latches. A fall latches only from the standing start.
+- The shared processor clips positions and desired joint speed. Feedforward torque, torque demand, applied torque, and measured joint speed are warnings; the startup speed gate still rejects.
+- During each physics step, a fall latches only from the standing start. Joint overspeed is recorded and the step continues.
 
 `hardware_authorization` in the report is always false. A passing sim run is not permission to run on the robot.
 
@@ -197,8 +197,9 @@ base angular speed, falls, and finite simulation state. These flags describe
 enabled checks, not proof that every fault condition was exercised.
 
 Direct control bypasses command protocol, command limits, and observation
-freshness checks. With safety enabled, action timeout, speed and standing-fall
-monitoring remain enabled. Its viewer displays `PARTIAL` and explicitly labels
+freshness checks. With safety enabled, action timeout and standing-fall
+monitoring remain enabled. Measured joint speed and torque past the model
+rating are shown on the viewer and do not stop the run. Its viewer displays `PARTIAL` and explicitly labels
 submission checks as bypassed. This metadata is also stored in the trace so a
 standalone replay retains that distinction.
 
@@ -224,13 +225,25 @@ To run a real policy immediately on a Mac or Windows laptop, use `./desktop_sim.
 
 Each pose writes `containers/sim/output/poses/<pose>/report.json` and a trace. The battery writes `containers/sim/output/poses/summary.json`. Replay one pose with `./sim.sh replay containers/sim/output/poses/supine/trace.npz`. `--self-test --counterfactuals` holds the measured joints of every pose for one second. A floor pose can still fail a joint check while the body settles. That failure is not a fall.
 
+The policy package, the container, and the velocity file are three different choices. `report.json` field `policy` is the name recorded for the run.
+
+| Choice | How to specify it | What runs | `policy` in the report |
+| --- | --- | --- | --- |
+| Policy package | `--example stairs`, `walker`, or `balance` | `examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
+| Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. The walker test image is built by `examples/submissions/walker/build.sh`. Inside it, `WALKER_COMMAND` selects `stand.yaml` or `circle.yaml`. | The image's `G1_SIM_EXAMPLE`, when that variable is set |
+| Velocity file on the plant | `--command examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
+| Same file in the walker container | `--example walker --command examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
+| Circle shortcut | `--circle` | Same cached walker. The velocity file is `examples/commands/walker/circle.yaml`. | `circle` |
+
+`--command` does not select a policy package or start a container. `--example` does not read `examples/commands/walker/`.
+
 Other flags:
 
 | Flag | Effect |
 | --- | --- |
 | `--seconds 10` | Length of the run after the first accepted command. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
-| `--example stairs\|walker\|balance` | Prepare a real ONNX policy, its matching scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
+| `--example stairs\|walker\|balance` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
 | `--local` | Run an `--example` directly against MuJoCo without Docker, ROS, or sudo. |
 | `--output DIR` | Save a run separately so safety-on/off results can both be replayed. |
 | `--scene path/to/scene.xml` | Load a complete MuJoCo G1 scene from the host filesystem. Relative paths use the caller's working directory. |
@@ -241,7 +254,8 @@ Other flags:
 | `--battery` | Flat floor, all six poses, then a 10 N, 50 N, and 150 N pelvis push on each. Writes `containers/sim/output/battery/report.json`. |
 | `--push none\|small\|medium\|heavy` | Run that one battery case. Add `--pose` to pick the start. Add `--view`, press Start, and watch it. |
 | `--battery --circle` | Same pushes while the cached walker circles. Standing only. A gait step is applied directly, and the fall check stays on. |
-| `--circle` | Walk one flat circle with the cached G1 walker. No submission. The fall check stays on. The submission tracking window is not applied, because a gait step does not fit it. |
+| `--circle` | Cached walker, velocity file `circle.yaml`. No container. Report `policy` is `circle`. The fall check stays on. The submission tracking window is not applied, because a gait step does not fit it. |
+| `--command FILE` | Same runner, with that velocity file. No container. Report `policy` is the file name without `.yaml`. `forward_stop.yaml` walks at 0.5 m/s for 2 s, then steps down 0.1 m/s each second to zero. The yaw command cancels this walker's drift and scales down with speed. Use `--seconds 7` to see the stop. |
 | `--view` | Open the page first. Press Start to run, then the recording plays from the first frame. |
 | `replay` | Serve the last recording. Does not start a new run. |
 | `--help` | Show usage without starting Docker or requesting sudo. |

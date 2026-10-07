@@ -27,6 +27,9 @@ source "$install_base/setup.bash"
 
 exec ros2 run him_safety_nodes safety_node hardware_gate --ros-args \
     -p enable_hardware_output:=true \
+    -p whole_body_output:=true \
+    -p launch_gate:=true \
+    -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
     -p "hardware_profile_path:=$profile" \
     -p sdk_interface:=eth0 \
     -p sdk_domain:=0

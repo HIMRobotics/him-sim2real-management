@@ -196,8 +196,8 @@ Two profiles apply by default. `--profile` selects global simulator limits
 Wheel builds include the file's contents, with no repository or ROS dependency
 at runtime.
 
-The joint rules clip out-of-range position proposals with warnings and reject
-excessive desired velocity, feedforward torque or total PD torque demand.
+The joint rules clip out-of-range position proposals and desired joint speeds
+with warnings, and reject feedforward torque or total PD torque demand.
 No initial pose-gap threshold remains. Initial desired speed stays limited to 0.05 rad/s.
 
 ### Shared speed checks

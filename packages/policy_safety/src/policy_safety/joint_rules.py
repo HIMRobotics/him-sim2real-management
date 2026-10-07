@@ -10,6 +10,7 @@ from joint_checks import (
     checked_targets,
     clip_position,
     joint_profile_entries,
+    note_limit,
 )
 
 from .adapter import PolicyViolation
@@ -28,12 +29,13 @@ class JointRules:
         self.sdk_names = [name.removesuffix("_joint") for name in self.names]
         self.entries = joint_profile_entries(self.profile, self.sdk_names)
 
-    def process_command(self, command, q, dq, *, initial=False, warnings=None):
+    def process_command(self, command, q, dq, *, initial=False, warnings=None,
+                        enforce_torque=True):
         """Return a complete command screened with hardware profile gains."""
         targets = checked_targets(
             command, self.entries, q, dq, initial=initial,
             initial_velocity=self.profile["initial_velocity_tolerance_rad_secs"],
-            warnings=warnings,
+            warnings=warnings, enforce_torque=enforce_torque,
         )
         return {field: np.array([targets[i][field] for i in range(len(self.names))])
                 for field in ("q", "dq", "kp", "kd", "tau")}
@@ -47,13 +49,12 @@ class JointRules:
             "profile_values": self.profile,
             "rules": [
                 "position_clipping_with_warning",
-                "target_velocity",
-                "initial_target_velocity",
+                "target_velocity_clipping_with_warning",
                 "initial_target_velocity",
                 "feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Before actuation: clip proposed position to bounds with a warning and enforce speed and torque limits. Command gap and response error are diagnostics only, including at startup. PD torque demand still uses position error.",
+            "semantics": "Before actuation: clip proposed position and desired joint speed to their limits with warnings, and enforce the startup speed gate and torque limits. Command gap and response error are diagnostics only, including at startup. PD torque demand still uses position error.",
         }
 
     def clip_positions(self, q_proposed, warnings=None, bounds=None):
@@ -74,17 +75,32 @@ class JointRules:
         for values in (q_proposed, velocity, torque, q_measured):
             if np.asarray(values).shape != (len(self.names),) or not np.isfinite(values).all():
                 raise PolicyViolation("nonfinite_or_invalid_joint_command")
+        velocity_values = np.asarray(velocity, dtype=float)
         q_commanded = self.clip_positions(q_proposed, warnings)
         for i, name, limits in self.entries:
-            check_command(name, limits, q_commanded[i], velocity[i], torque[i], q_measured[i],
-                          initial,
-                          self.profile["initial_velocity_tolerance_rad_secs"])
+            _, velocity_values[i] = check_command(
+                name, limits, q_commanded[i], velocity_values[i], torque[i], q_measured[i],
+                initial, self.profile["initial_velocity_tolerance_rad_secs"], warnings,
+            )
+        velocity[:] = velocity_values
         return q_commanded
 
     def check_measured_velocity(self, measured_dq):
         for i, name, limits in self.entries:
             check_measured_velocity(name, limits, measured_dq[i])
 
+    def note_measured_velocity(self, measured_dq, warnings):
+        """Record joints spinning past the model rating without stopping."""
+        for i, name, limits in self.entries:
+            note_limit(warnings, name, "joint_velocity_limit", abs(float(measured_dq[i])),
+                       limits.max_velocity_rad_secs, "rad/s")
+
     def check_torque(self, torque, *, kind=None):
         for i, name, limits in self.entries:
             check_torque(name, limits, torque[i], kind=kind)
+
+    def note_torque(self, torque, warnings, *, kind):
+        """Record torque above the model rating without stopping."""
+        for i, name, limits in self.entries:
+            note_limit(warnings, name, "joint_torque_limit", abs(float(torque[i])),
+                       limits.max_torque_nm, "Nm", torque_kind=kind)
