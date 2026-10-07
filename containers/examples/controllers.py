@@ -1,4 +1,4 @@
-"""ONNX examples shared by local and ROS simulation runs."""
+"""ONNX examples shared by simulation and hardware containers."""
 
 from pathlib import Path
 
@@ -58,6 +58,8 @@ class ExamplePolicy:
 
     def velocity_command(self, state):
         """Command forward walking or the stair submission's scripted phases."""
+        if "task_command" in state:
+            return np.asarray(state["task_command"], dtype=np.float32)
         if self.name == "walker":
             return np.array([0.6, 0.0, 0.0], dtype=np.float32)
         x, y, z = state["position"]
@@ -86,8 +88,9 @@ class ExamplePolicy:
         q = np.asarray(state["q"], dtype=float)
         if self.arm_pose is None:
             self.arm_pose = q[15:].copy()
-        if self.sequence == 0:
-            target = q.copy()
+            self.hold_pose = q.copy()
+        if self.sequence == 0 or not state.get("control_ready", True):
+            target = self.hold_pose.copy()
         elif self.name == "balance":
             lower = self.policy.update(q, state["dq"], state["quat"], state["gyro"])
             target = np.concatenate((lower, self.arm_pose))

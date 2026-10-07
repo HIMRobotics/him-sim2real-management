@@ -1,4 +1,4 @@
-"""Run an example policy on the simulation-only ROS state topic."""
+"""Run the same policy container against simulated or measured robot state."""
 
 import json
 import os
@@ -9,15 +9,19 @@ import time
 import rclpy
 from controllers import ExamplePolicy
 from him_safety_interfaces.msg import Abort, JointCommand
+from him_safety_interfaces.srv import ArmGate
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 
 class PolicyNode(Node):
-    def __init__(self, policy):
-        super().__init__("example_sim_policy")
+    def __init__(self, policy, mode="sim"):
+        super().__init__("example_policy")
         self.policy = policy
+        self.mode = mode
+        self.state = None
         self.done = False
         self.last_observation = 0
         self.session_id = None
@@ -25,7 +29,7 @@ class PolicyNode(Node):
         self.pub = self.create_publisher(JointCommand, "/safety/precheck", 1)
         self.create_subscription(
             String,
-            "/sim/state",
+            "/safety/policy_state",
             self.on_state,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT),
         )
@@ -35,19 +39,57 @@ class PolicyNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(Abort, "/safety/abort", self.on_abort, abort_qos)
+        self.abort_pub = self.create_publisher(Abort, "/safety/abort", abort_qos)
+        self.create_timer(0.02, self.publish_command)
+
+    def arm(self):
+        """Use the existing readiness and session services."""
+        def call(service, kind, request):
+            client = self.create_client(kind, service)
+            try:
+                if not client.wait_for_service(timeout_sec=5):
+                    raise RuntimeError("missing service: " + service)
+                future = client.call_async(request)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=5)
+                result = future.result() if future.done() else None
+                if result is None or not result.success:
+                    raise RuntimeError("arming rejected: " + service)
+                return result.message
+            finally:
+                self.destroy_client(client)
+
+        call("/safety/controller_stop/ready", Trigger, Trigger.Request())
+        call("/safety/motor_gate/ready", Trigger, Trigger.Request())
+        session = call("/safety/checker/arm", Trigger, Trigger.Request())
+        request = ArmGate.Request()
+        request.session_id = session
+        call("/safety/motor_gate/arm", ArmGate, request)
+        self.session_id = session
 
     def on_state(self, message):
         if self.done:
             return
         state = json.loads(message.data)
-        if self.session_id is None:
+        if self.session_id is None and self.mode == "sim":
             self.session_id = state["session_id"]
-        if state["session_id"] != self.session_id:
-            raise RuntimeError("simulation session changed")
+        if state["session_id"] and self.session_id and state["session_id"] != self.session_id:
+            raise RuntimeError("policy session changed")
+        self.state = state
+        self.last_received = time.monotonic()
+
+    def publish_command(self):
+        if self.done or not self.session_id or self.state is None:
+            return
+        state = dict(self.state, session_id=self.session_id)
+        if not 0 <= time.monotonic() - state["received_at_secs"] < 0.2:
+            raise RuntimeError("stale policy state")
         if state["observation_id"] <= self.last_observation:
             return
-        self.last_received = time.monotonic()
         self.last_observation = state["observation_id"]
+        if self.mode != "sim":
+            state["task_command"] = [0., 0., 0.]
+            if self.policy.name != "balance" and "base_velocity" not in state:
+                raise RuntimeError("policy requires measured base velocity")
         frame = self.policy.command(state)
         command = JointCommand()
         for key, value in frame.items():
@@ -55,14 +97,17 @@ class PolicyNode(Node):
         self.pub.publish(command)
 
     def on_abort(self, message):
-        print("Simulation abort: " + message.reason, flush=True)
+        print("Policy abort: " + message.reason, flush=True)
         self.done = True
 
 
 def main():
-    if os.environ.get("G1_SIM_NETNS") != "1" or {
+    mode = os.environ.get("G1_EXECUTION_MODE", "sim")
+    if mode not in ("sim", "dry-run", "hardware"):
+        raise RuntimeError("invalid execution mode")
+    if mode == "sim" and (os.environ.get("G1_SIM_NETNS") != "1" or {
         name for _, name in socket.if_nameindex()
-    } != {"lo"}:
+    } != {"lo"}):
         raise RuntimeError(
             "example container requires the loopback-only simulator network"
         )
@@ -71,13 +116,24 @@ def main():
     )
     policy = ExamplePolicy(name, "/example/project")
     rclpy.init()
-    node = PolicyNode(policy)
+    node = PolicyNode(policy, mode)
     try:
+        if mode != "sim":
+            deadline = time.monotonic() + 15
+            while node.state is None and not node.done and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.1)
+            if node.state is None or node.done:
+                raise RuntimeError("no valid policy state before arming")
+            node.arm()
         while rclpy.ok() and not node.done:
             rclpy.spin_once(node, timeout_sec=0.1)
-            if time.monotonic() - node.last_received > 15:
-                raise RuntimeError("no simulation state received for 15 seconds")
+            if time.monotonic() - node.last_received > (0.2 if node.session_id else 15):
+                raise RuntimeError("policy state timeout")
     finally:
+        if node.session_id:
+            abort = Abort()
+            abort.source, abort.reason = node.get_name(), "policy_container_exit"
+            node.abort_pub.publish(abort)
         node.destroy_node()
         rclpy.shutdown()
     return 0

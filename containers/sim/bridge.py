@@ -138,6 +138,7 @@ class SimBridge(Node):
                 RobotFeedback, POLICY_OBSERVATION, self.on_observation, feedback_qos
             )
         self.sim_state_pub = self.create_publisher(String, "/sim/state", feedback_qos)
+        self.policy_state_pub = self.create_publisher(String, "/safety/policy_state", feedback_qos)
         self.abort_pub = self.create_publisher(Abort, ABORT, abort_qos)
         if checker is None:
             self.create_subscription(JointCommand, PRECHECK, self.on_precheck, command_qos)
@@ -196,7 +197,8 @@ class SimBridge(Node):
             self.latch(supervisor.stop_reason)
             return
         if self.auto_arm and supervisor.policy_session_id is None:
-            if self.sim_state_pub.get_subscription_count() == 0:
+            if (self.policy_state_pub.get_subscription_count() == 0
+                    and self.sim_state_pub.get_subscription_count() == 0):
                 return
             response = self.checker.on_arm(Trigger.Request(), Trigger.Response())
             if not response.success:
@@ -212,6 +214,7 @@ class SimBridge(Node):
         sim_message = String()
         sim_message.data = json.dumps(state)
         self.sim_state_pub.publish(sim_message)
+        self.policy_state_pub.publish(sim_message)
 
     def on_postcheck(self, message):
         """Apply only a fresh checked command accepted by the shared motor gate."""
@@ -292,6 +295,7 @@ class SimBridge(Node):
             self.lowstate.publish(state)
 
     def publish_state(self, state):
+        state = dict(state, received_at_secs=time.monotonic(), control_ready=True)
         message = RobotFeedback()
         message.host_boot_id = self.checker.host_boot_id if self.checker else "mujoco-sim"
         message.received_at_secs = time.monotonic() if self.checker else self.clock()
@@ -310,6 +314,7 @@ class SimBridge(Node):
         sim_message = String()
         sim_message.data = json.dumps(state)
         self.sim_state_pub.publish(sim_message)
+        self.policy_state_pub.publish(sim_message)
 
     def latch(self, reason, detail=None):
         if self.abort_reason is None:

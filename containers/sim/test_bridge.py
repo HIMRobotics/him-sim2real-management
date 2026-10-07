@@ -140,7 +140,8 @@ class BridgeTests(unittest.TestCase):
         node = bridge.SimBridge.__new__(bridge.SimBridge)
         node.clock = lambda: 0.0
         node.checker = None
-        node.feedback_pub, node.observation_pub, node.sim_state_pub = (
+        node.feedback_pub, node.observation_pub, node.sim_state_pub, node.policy_state_pub = (
+            Mock(),
             Mock(),
             Mock(),
             Mock(),
@@ -155,7 +156,11 @@ class BridgeTests(unittest.TestCase):
         }
         node.publish_state(state)
         message = node.sim_state_pub.publish.call_args.args[0]
-        self.assertEqual(json.loads(message.data), state)
+        published = json.loads(message.data)
+        self.assertEqual({key: published[key] for key in state}, state)
+        self.assertTrue(published["control_ready"])
+        self.assertGreater(published["received_at_secs"], 0)
+        node.policy_state_pub.publish.assert_called_once_with(message)
 
     def test_namespace_guard_uses_actual_interfaces(self):
         bridge = load_bridge()

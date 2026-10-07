@@ -173,7 +173,7 @@ class SimGatewayGraphTests(unittest.TestCase):
         with patch.dict(os.environ, {"G1_SIM_EXAMPLE": "walker"}):
             self.bridge = SimBridge(plant, 10, Path(self.tmp.name) / "report.json", Mock(), self.checker)
         self.policy = self.bridge.create_publisher(JointCommand, "/safety/precheck", self.checker.command_qos)
-        self.bridge.create_subscription(String, "/sim/state", self.on_state, self.checker.feedback_qos)
+        self.bridge.create_subscription(String, "/safety/policy_state", self.on_state, self.checker.feedback_qos)
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.checker)
         self.executor.add_node(self.bridge)

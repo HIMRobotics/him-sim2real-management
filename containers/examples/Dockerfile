@@ -1,9 +1,9 @@
-# Simulation-only clients for sim.sh --example.
+# Shared clients for simulation and explicitly enabled hardware execution.
 FROM ros:foxy-ros-base
 SHELL ["/bin/bash", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake python3-pip python3-colcon-common-extensions \
-    ros-foxy-rosidl-default-generators ros-foxy-rmw-fastrtps-cpp \
+    ros-foxy-rosidl-default-generators ros-foxy-rmw-fastrtps-cpp ros-foxy-std-srvs \
     && rm -rf /var/lib/apt/lists/*
 # Match the Python 3.8 ARM64 runtime used by the walker submission image.
 RUN python3 -m pip install --no-cache-dir numpy==1.24.4 onnxruntime==1.16.3 PyYAML==6.0.2
