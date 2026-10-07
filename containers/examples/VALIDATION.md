@@ -29,6 +29,25 @@ This screens inference and physics using simulated timestamps. It does not
 validate Docker/ROS transport, wall-clock deadlines, qualified ramps/braking,
 or physical stopping. No speed, gain, model or safety limit was changed.
 
+Follow-up screening at commit `310c01e` changed only the simulated forward
+command, retaining the same model gains and enforced checks:
+
+| Command | Duration | Maximum forward progress | Final lateral displacement | Clipping |
+| --- | --- | --- | --- | --- |
+| 0.20 m/s | 40 s | 0.0668 m | 0.0030 m | None |
+| 0.30 m/s | 40 s | 0.1001 m | -0.0024 m | None |
+| 0.60 m/s | 5 s | 2.6451 m | 0.3552 m | Both ankle-pitch targets |
+
+All three stayed upright without safety trips. The first two settled near the
+start. The 0.60 m/s comparison establishes that this configuration can produce
+walking, but exceeds the straight-trial lateral tolerance and has clipping
+warnings. None qualifies for hardware advancement. This supports a low-command
+policy-response explanation, not a measured mechanical minimum step size.
+The onset of sustained walking between 0.30 and 0.60 m/s remains unmeasured.
+Reports, traces and hashed `screening.json` records are retained under
+`containers/sim/output/hardware-speed-screen-{020,030,060}`. Hardware trial
+defaults remain unchanged.
+
 ## Current command-gap and response checks
 
 Position proposals are clipped to the joint bounds with per-joint warnings.
