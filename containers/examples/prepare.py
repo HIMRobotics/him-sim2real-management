@@ -1,6 +1,8 @@
 """Prepare a portable example image context and matching MuJoCo scene."""
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -12,7 +14,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from robot_safety.balance_policy import DEFAULT_JOINT_POSITIONS
+from robot_safety.balance_policy import DEFAULT_JOINT_POSITIONS, LEG_KD, LEG_KP
+from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 
 # Simulation presets reuse the existing controller and model bundle.
 SCENARIOS = {
@@ -57,6 +60,7 @@ def prepare(name, destination=None, *, container=True):
             )
         copy_file(model, project / "balance.onnx")
         defaults = DEFAULT_JOINT_POSITIONS.tolist()
+        gains = list(zip(list(LEG_KP) + [40.] * 14, list(LEG_KD) + [1.] * 14))
     else:
         bundle = ROOT / "examples/policies/walker"
         missing = [
@@ -74,6 +78,17 @@ def prepare(name, destination=None, *, container=True):
         copy_file(bundle / "walker.yaml", project / "policy.yaml")
         cfg = yaml.safe_load((project / "policy.yaml").read_text())
         defaults = [j["default_position"] for j in cfg["joints"]]
+        names = [j["name"].replace("_joint", "") for j in cfg["joints"]]
+        if names != list(G1_29_JOINT_NAMES):
+            raise ValueError("policy joints must follow the G1 SDK order")
+        gains = [(j["kp"], j["kd"]) for j in cfg["joints"]]
+    profile = json.loads((ROOT / "robot_safety/profiles/g1_type5.template.json").read_text())
+    for joint, (kp, kd) in zip(G1_29_JOINT_NAMES, gains):
+        profile["joints"][joint].update(kp=float(kp), kd=float(kd))
+    (project / "joint_profile.json").write_text(json.dumps(profile, indent=2) + "\n")
+    hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in sorted(project.iterdir()) if p.is_file() and p.name != "hashes.json"}
+    (project / "hashes.json").write_text(json.dumps(hashes, indent=2) + "\n")
     env = root / "environment"
     robot = ROOT / "packages/policy_safety/src/policy_safety/robots/g1"
     shutil.copytree(

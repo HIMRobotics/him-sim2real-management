@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -97,16 +98,22 @@ class ExampleTests(unittest.TestCase):
             self.assertIsNone(on["reason"])
 
     def test_first_command_holds_pose_and_policy_does_not_modify_state(self):
-        project = prepare("walker")
-        policy = ExamplePolicy("walker", project / "container/project")
-        runner = Runner(scene=project / "environment/scene.xml")
-        state = runner.feedback(0.0)
-        before = json.dumps(state, sort_keys=True)
-        frame = policy.command(state)
-        self.assertEqual(frame["q"], state["q"])
-        self.assertIsNone(runner.command(frame, 0.0))
-        policy.command(state)
-        self.assertEqual(json.dumps(state, sort_keys=True), before)
+        for name in ("walker", "balance"):
+            with self.subTest(policy=name):
+                project = prepare(name)
+                bundle = project / "container/project"
+                policy = ExamplePolicy(name, bundle)
+                with patch.dict(os.environ, {"G1_JOINT_PROFILE": str(bundle / "joint_profile.json")}):
+                    runner = Runner(scene=project / "environment/scene.xml")
+                state = runner.feedback(0.0)
+                before = json.dumps(state, sort_keys=True)
+                frame = policy.command(state)
+                self.assertEqual(frame["q"], state["q"])
+                self.assertIsNone(runner.command(frame, 0.0))
+                np.testing.assert_allclose(runner.active["kp"], policy.kp)
+                np.testing.assert_allclose(runner.active["kd"], policy.kd)
+                policy.command(state)
+                self.assertEqual(json.dumps(state, sort_keys=True), before)
 
     def test_prepared_environment_and_image_context_are_portable(self):
         with tempfile.TemporaryDirectory() as tmp:

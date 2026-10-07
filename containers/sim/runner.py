@@ -46,7 +46,9 @@ class Runner:
         self.plant = Plant(pose, scene=scene, check_fall=self.safety_checks)
         if config.joints != len(self.plant.joint_names):
             raise ValueError("simulation config must match the G1 joint count")
-        self.rules = JointRules(self.plant.joint_names)
+        profile = os.environ.get("G1_JOINT_PROFILE")
+        self.rules = (JointRules(self.plant.joint_names, profile) if profile
+                      else JointRules(self.plant.joint_names))
         self.session_id = "sim-" + uuid.uuid4().hex[:12]
         self.observation_id = 0
         self.observations = {}

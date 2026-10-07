@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import time
+from pathlib import Path
 
 import rclpy
 from controllers import ExamplePolicy
@@ -115,6 +116,9 @@ def main():
         "balance" if os.path.isfile("/example/project/balance.onnx") else "walker"
     )
     policy = ExamplePolicy(name, "/example/project")
+    hashes = Path("/example/project/hashes.json")
+    if hashes.exists():
+        print("Bundle hashes: " + hashes.read_text(), flush=True)
     rclpy.init()
     node = PolicyNode(policy, mode)
     try:
