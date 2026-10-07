@@ -3,6 +3,7 @@
 # The image's own entrypoint decides what to execute. This script does not
 # interpret models. Host nodes own checked motor output.
 set -euo pipefail
+trap 'launch_status=$?; echo "setup.sh failed at line $LINENO (exit $launch_status)." >&2' ERR
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 upload_dir="$repo_dir/containers/upload"
@@ -257,15 +258,9 @@ launch_node() {
   pids+=("$!")
 }
 read_gate_status() {
-  as_host_user timeout 3 ros2 topic echo --once /safety/hardware_status std_msgs/msg/String 2>/dev/null | python3 -c '
-import json, sys
-text = sys.stdin.read()
-start, end = text.find("{"), text.rfind("}")
-if start < 0 or end < start:
-    raise SystemExit(1)
-print(json.dumps(json.loads(text[start:end + 1])))
-' || true
+  as_host_user timeout 5 /usr/bin/python3 -m robot_safety.read_hardware_status || true
 }
+
 gate_is_latched() {
   [[ -n "${1:-}" ]] || return 1
   python3 -c '
@@ -274,8 +269,8 @@ gate = json.loads(sys.argv[1])
 raise SystemExit(0 if gate.get("abort_reason") else 1)
 ' "$1"
 }
-# Status is published on change. A settled gate is quiet, so the last syslog
-# line is the only copy of a latched abort. Use grep: sudo's PATH has no rg.
+# If live status is unavailable, show the previous stop from syslog.
+# Use grep because sudo's PATH may not contain rg.
 syslog_abort_reason() {
   local main_pid child
   main_pid="$(safety_systemctl show -p MainPID --value g1-safety-stops.service 2>/dev/null || true)"
@@ -355,6 +350,7 @@ print("0" if same else "1")
     fi
     safety_systemctl restart g1-safety-stops.service
     wait_for_safety_service
+    echo "Safety service is active. Reading its startup gate status."
     current_gate=""
     for _attempt in 1 2 3 4 5; do
       current_gate="$(read_gate_status)"

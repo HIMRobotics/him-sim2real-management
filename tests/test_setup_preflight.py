@@ -75,3 +75,18 @@ def test_example_preflight_preserves_explicit_profile(tmp_path):
         'build -t g1-example-walker:local ' + str(ROOT / '.cache/sim_examples/walker/container'),
         'image inspect g1-example-walker:local --format {{.Id}}',
     ]
+
+
+def test_runtime_failure_reports_exit_status(tmp_path):
+    runtime = tmp_path / 'runtime'
+    runtime.write_text('#!/bin/sh\nexit 42\n')
+    runtime.chmod(0o700)
+    result = subprocess.run(
+        [str(ROOT / 'setup.sh'), '--image', 'test-policy'],
+        env={**os.environ, 'CONTAINER_RUNTIME': str(runtime),
+             'G1_IMAGE': '', 'G1_COMMAND_FILE': ''},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 42
+    assert 'setup.sh failed at line' in result.stderr
+    assert '(exit 42)' in result.stderr
