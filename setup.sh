@@ -8,22 +8,21 @@ repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 upload_dir="$repo_dir/containers/upload"
 container_name=g1-user-container
 runtime="${CONTAINER_RUNTIME:-}"
+original_args=("$@")
 
-if [[ -z "$runtime" ]]; then
-  if command -v docker >/dev/null 2>&1; then
-    runtime=docker
-  elif command -v podman >/dev/null 2>&1; then
-    runtime=podman
-  else
-    echo "Install Docker or Podman on this G1 before running setup.sh." >&2
-    exit 1
-  fi
-fi
+show_help() {
+  cat <<'HELP'
+Usage: ./setup.sh [--mode preflight|dry-run|hardware] [--enable-hardware-output]
+                  [--image NAME | --example NAME] [--command FILE] [--profile FILE]
+                  [--] [container args...]
+       ./setup.sh stop
 
-if [[ "${EUID}" -ne 0 && ! -w /var/run/docker.sock && "$runtime" == docker ]]; then
-  echo "Docker socket is not writable. Run with Docker access as the robot user." >&2
-  exit 1
-fi
+Canonical hardware supervisor. Prefer ./submit.sh --mode real for deployment.
+Hardware always uses g1-safety-stops.service. Startup runs GR00T Balance
+until measured stability, then waits for left + B before policy handoff.
+Double Start still requests damping. Preflight never starts robot processes.
+HELP
+}
 
 stop_container() {
   if "$runtime" ps -a --format '{{.Names}}' | grep -qx "$container_name"; then
@@ -31,10 +30,10 @@ stop_container() {
   fi
 }
 
-if [[ "${1:-}" == "stop" ]]; then
-  stop_container
-  echo "Stopped $container_name."
-  exit 0
+stopping=0
+if [[ "${1:-}" == stop ]]; then
+  stopping=1
+  shift
 fi
 
 detach=0
@@ -42,10 +41,17 @@ mode=preflight
 enabled=false
 profile="${G1_JOINT_PROFILE:-}"
 image="${G1_IMAGE:-}"
+example=""
+command_file="${G1_COMMAND_FILE:-}"
+python="${G1_SIM_PYTHON:-$repo_dir/.venv-policy-safety/bin/python}"
+[[ -n "${G1_SIM_PYTHON:-}" || -x "$python" ]] || python="${PYTHON:-python3}"
 extra=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h) show_help; exit 0 ;;
     --detach) detach=1; shift ;;
+    --example) example="${2:?--example needs a name}"; shift 2 ;;
+    --command) command_file="${2:?--command needs a YAML file}"; shift 2 ;;
     --image) image="${2:?--image needs a name}"; shift 2 ;;
     --mode) mode="${2:?--mode needs preflight, dry-run or hardware}"; shift 2 ;;
     --profile) profile="${2:?--profile needs a JSON file}"; shift 2 ;;
@@ -64,6 +70,52 @@ fi
 if [[ "$detach" == 1 ]]; then
   echo "Use a foreground session so its safety processes remain supervised." >&2; exit 2
 fi
+if [[ -n "$example" && -n "$image" ]]; then
+  echo "Use --example or --image, not both." >&2
+  exit 2
+fi
+if [[ -n "$command_file" && ! -f "$command_file" ]]; then
+  echo "Command file is not readable: $command_file" >&2
+  exit 2
+fi
+if [[ -n "$example" ]]; then
+  case "$example" in walker|stairs|balance) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
+fi
+if [[ -z "$runtime" ]]; then
+  if command -v docker >/dev/null 2>&1; then runtime=docker
+  elif command -v podman >/dev/null 2>&1; then runtime=podman
+  else echo "Install Docker or Podman." >&2; exit 1
+  fi
+fi
+if [[ "$runtime" == docker && "${EUID}" -ne 0 && ! -w /var/run/docker.sock ]]; then
+  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
+fi
+if [[ "$stopping" -eq 1 ]]; then
+  stop_container
+  echo "Stopped $container_name."
+  exit 0
+fi
+if [[ -n "$example" ]]; then
+  prepared="$("$python" "$repo_dir/containers/examples/prepare.py" "$example")"
+  image="g1-example-${example}:local"
+  "$runtime" build -t "$image" "$prepared/container"
+  [[ -n "$profile" ]] || profile="$prepared/container/project/joint_profile.json"
+  export G1_SIM_EXAMPLE="$example"
+fi
+profile="${profile:-$repo_dir/robot_safety/profiles/g1_type5.template.json}"
+if [[ -n "$command_file" ]]; then
+  export G1_COMMAND_FILE="$(realpath "$command_file")"
+fi
+# Every real entry point selects the same long-lived motor writer.
+if [[ "$mode" == hardware ]]; then
+  export G1_USE_SAFETY_SERVICE=1 G1_POLICY_ROS_DOMAIN=97
+else
+  export G1_USE_SAFETY_SERVICE=0
+fi
+if [[ -z "${G1_BASE_STATE_TOPIC:-}" ]]; then
+  export G1_REQUIRE_BASE_STATE=false
+fi
+
 [[ -f "$profile" ]] || { echo "Supply --profile with the approved joint profile." >&2; exit 2; }
 profile="$(realpath "$profile")"
 PYTHONPATH="$repo_dir" /usr/bin/python3 -c 'import sys; from robot_safety.hardware_profile import HardwareProfile; HardwareProfile.load(sys.argv[1])' "$profile"
@@ -109,7 +161,7 @@ fi
 safety_systemctl() {
   local service_user uid
   service_user="${SUDO_USER:-${USER:-}}"
-  if [[ -z "$service_user" || "$service_user" == root ]]; then
+  if [[ "$EUID" -ne 0 || -z "$service_user" || "$service_user" == root ]]; then
     systemctl --user "$@"
     return
   fi
@@ -129,10 +181,6 @@ wait_for_safety_service() {
   echo "g1-safety-stops.service did not become active." >&2
   return 1
 }
-if [[ "$mode" == hardware && "${G1_USE_SAFETY_SERVICE:-}" != 1 ]] && safety_service_active; then
-  echo "With the robot supported, deliberately stop g1-safety-stops before selecting this gate." >&2
-  exit 2
-fi
 if [[ "$mode" == hardware && "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
   export ROS_DOMAIN_ID=97
   if ! safety_service_active; then
@@ -189,11 +237,11 @@ host_user="${SUDO_USER:-${USER:-}}"
 [[ "$host_user" == root ]] && host_user=""
 as_host_user() {
   if [[ -n "$host_user" && "$(id -un)" != "$host_user" ]]; then
-    local home uid
+    local host_home uid
     uid="$(id -u "$host_user")"
-    home="$(getent passwd "$host_user" | cut -d: -f6)"
+    host_home="$(getent passwd "$host_user" | cut -d: -f6)"
     runuser --preserve-environment -u "$host_user" -- \
-      env "HOME=$home" "XDG_RUNTIME_DIR=/run/user/$uid" "$@"
+      env "HOME=$host_home" "XDG_RUNTIME_DIR=/run/user/$uid" "$@"
   else
     "$@"
   fi
@@ -270,7 +318,8 @@ print(json.loads(sys.argv[1]).get("abort_reason") or "")
 import json, sys
 gate = json.loads(sys.argv[1])
 same = (
-    gate.get("whole_body_output") is True
+    gate.get("startup_balance_required") is True
+    and gate.get("whole_body_output") is True
     and gate.get("launch_gate") is True
     and gate.get("hardware_profile_path") == sys.argv[2]
     and not gate.get("abort_reason")
@@ -279,11 +328,12 @@ print("0" if same else "1")
 ' "$current_gate" "$wanted_profile")"
   else
     latched_reason="$(syslog_abort_reason || true)"
-    [[ -n "$latched_reason" ]] && needs_reload=1
+    needs_reload=1
   fi
   if [[ "$needs_reload" == 0 ]]; then
     service_pid="$(safety_systemctl show -p MainPID --value g1-safety-stops.service || true)"
     if [[ -n "$service_pid" && "$service_pid" != 0 && (
+      "$repo_dir/robot_safety/startup_balance.py" -nt "/proc/$service_pid" ||
       "$repo_dir/robot_safety/hardware_adapter.py" -nt "/proc/$service_pid" ||
       "$repo_dir/robot_safety/hardware_node.py" -nt "/proc/$service_pid" ||
       "$repo_dir/robot_safety/ros_nodes.py" -nt "/proc/$service_pid"
@@ -306,6 +356,19 @@ print("0" if same else "1")
       current_gate="$(read_gate_status)"
       [[ -n "$current_gate" ]] && break
     done
+  fi
+  if [[ -z "$current_gate" ]] || ! python3 -c '
+import json, sys
+gate = json.loads(sys.argv[1])
+raise SystemExit(0 if (
+    gate.get("startup_balance_required") is True
+    and gate.get("whole_body_output") is True
+    and gate.get("launch_gate") is True
+    and gate.get("hardware_profile_path") == sys.argv[2]
+) else 1)
+' "$current_gate" "$wanted_profile"; then
+    echo "Safety service startup gate and profile could not be verified. No policy session started." >&2
+    exit 2
   fi
   if gate_is_latched "$current_gate"; then
     echo "g1-safety-stops is still latched (${current_gate}). No policy session started." >&2
@@ -338,7 +401,7 @@ stop_container
 echo "Starting $image as $container_name on the robot network (interface ${ROBOT_INTERFACE:-eth0}, DDS domain ${ROBOT_DOMAIN:-0})."
 echo "Mode: $mode. Logs: $log_dir. Ctrl+C stops this session and leaves g1-safety-stops running."
 if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 || "${G1_LAUNCH_GATE:-false}" == true ]]; then
-  echo "The robot eases to the container's first pose. Left + B launches the policy. Double Start damps."
+  echo "GR00T Balance stabilizes the robot first. Once stable, left + B authorizes policy handoff. Double Start damps."
 fi
 
 run_args=(

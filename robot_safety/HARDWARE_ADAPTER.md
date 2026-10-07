@@ -7,6 +7,79 @@ as the middleman between the safety checker and the actual robot motors.
 nodes keep using the same topics and arm service. The default dry-run launcher
 still starts only the diagnostic gate. Never run both gates together.
 
+## Consolidated policy deployment
+
+The supported policy route is `real.sh` → `submit.sh --mode real` → `setup.sh`
+→ Docker policy container → checker → `g1-safety-stops.service` → the existing
+single motor writer. The container publishes `/safety/precheck`. The host runs
+startup Balance and applies joint commands. Uploaded images use this same gate.
+The arm-only manual examples below retain stock leg control and are not this
+whole-body policy deployment route.
+
+Every whole-body deployment runs the bundled official GR00T Balance checkpoint
+before submitted actions reach the motors. The gate requires at least 2 seconds
+of Balance and a continuous 1-second window with tilt at most 0.15 rad, gyro norm
+at most 0.25 rad/s, and every joint speed at most 0.6 rad/s. Samples must be finite
+and younger than 200 ms. Repeated timestamps or SDK ticks do not advance the
+window. These provisional thresholds passed local simulation, not physical
+qualification. Stillness does not establish weight-bearing under a gantry.
+
+Hardware continues Balance while waiting for a new left + B press after
+`handoff_ready: true`. Early/held presses cannot queue a launch. Instability
+revokes readiness. The startup session times out after 30 seconds without
+handoff. Targets, desired velocities, feedforward torques and gains blend over
+1 second. Torque checks use the gains actually written. Double Start, health
+checks, command expiry, output watchdogs and fault latching remain active.
+
+`/safety/hardware_status` and `/safety/policy_state` expose `startup_phase`,
+`startup_stable`, `handoff_ready` and `policy_handoff_at_secs`. `control_ready`
+marks authorized policy handoff. Local, container and direct simulation use the
+same stability gate and authorize automatically after stability. The shared
+example client warms inference/history using live state with zero velocity
+before handoff. Command schedules and trial clocks start at handoff. Uploaded
+clients must honor `control_ready` for their own clocks and maintain observation
+history while waiting. The host inhibits their output regardless of compliance.
+
+### Operator commands
+
+Prepare and build without starting robot processes:
+
+```bash
+cd /home/unitree/him-sim2real-management
+.venv-policy-safety/bin/python containers/examples/prepare.py walker
+sudo docker build -t g1-example-walker:local .cache/sim_examples/walker/container
+sudo ./setup.sh --mode preflight --image g1-example-walker:local \
+  --profile .cache/sim_examples/walker/container/project/joint_profile.json
+```
+
+Start the zero-velocity commissioning session yourself, with the robot in its
+accepted ready mode, feet weight-bearing and fall-arrest support available:
+
+```bash
+sudo ./submit.sh --mode real --image g1-example-walker:local \
+  --profile .cache/sim_examples/walker/container/project/joint_profile.json \
+  --command examples/commands/walker/stand.yaml
+```
+
+This command enables joint output for startup Balance immediately after arming.
+Left + B gates policy handoff, not the initial Balance actuation. Watch for
+`startup_phase: ready`, then release and press left + B. The supervisor may
+reload the older safety service to install this gate and select the requested
+profile. This reload belongs to the operator-run procedure.
+
+After reviewing zero-command takeover and controller stopping, use the same
+launch command with `--command examples/commands/walker/first_steps.yaml`.
+It requests 2 seconds standing, 1 second at 0.05 m/s, 2 seconds at 0.10 m/s,
+1 second at 0.05 m/s, then zero velocity indefinitely. Zero velocity retains
+Balance control. Double Start requests damping. End the container with Ctrl+C
+or `sudo ./submit.sh --mode real stop` after the operator has secured the robot.
+The long-lived safety service stays running.
+
+Do not launch the image with a standalone `docker run`: the supervisor supplies
+host checks, service configuration, command mounts and logs. Logs are under
+`.cache/hardware_runs/`. Dry-run rejects `--enable-hardware-output` and disables
+transport writes/control RPCs. Preflight starts no robot processes.
+
 ## Output and stop paths
 
 ```text
@@ -223,13 +296,12 @@ both. Unsupported sensor contracts need a bridge extension, not guessed data.
 ./setup.sh --image g1-policy:local --profile "$G1_JOINT_PROFILE"   --mode hardware --enable-hardware-output
 ```
 
-The launcher uses a separate localhost ROS domain (98 by default), starts the
-existing feedback, checker, controller-stop and hardware-gate roles, and records
-their logs under `.cache/hardware_runs`. Dry-run leaves the background service
-alone. Hardware mode refuses an active `g1-safety-stops.service`; transition it
-manually while the robot is supported. The gate and direct balance launcher
-share `/tmp/g1-motor-writer.lock`. Already-running older software must be stopped
-before relying on this exclusion. No service is automatically restarted.
+Hardware uses localhost ROS domain 97 and the persistent safety service. Dry-run
+uses domain 98 by default and leaves that service alone. The supervisor records
+logs under `.cache/hardware_runs` and reloads an outdated or latched service
+during an operator-run hardware launch. It verifies the startup gate and exact
+profile before opening a policy session. The gate and direct balance launcher
+share `/tmp/g1-motor-writer.lock`.
 
 Without a trial file the example requests zero task velocity and maintains
 policy control until stopped. `G1_TASK_COMMAND` selects the same explicit task
@@ -278,12 +350,27 @@ and on faults. Proposed container commands are logged at inference cadence.
 
 ## Implementation validation
 
-The implementation passed 116 safety tests, 8 balance/trial/preflight tests,
-72 simulation tests, and 26 distinct ROS integration tests. These include fake
-hardware and the shared container client through the existing checker/gate.
-Use focused tests for subsequent changes rather than repeating all suites.
+Startup-gate unit tests cover persistence, early authorization, instability,
+repeated/stale telemetry, timeout, invalid telemetry, missing models, inference
+failure, blended gains and latched faults. Fake hardware tests cover actual-gain
+torque checks, repeated SDK ticks, aborts during Balance/handoff and blocked
+writes. Launcher tests use inert runtimes. Four ROS hardware-node tests passed
+with fake SDK transport on reserved localhost domain 191.
 
-Docker image build/run remains unverified because this account cannot access
-the Docker daemon. No hardware output was enabled or robot services restarted.
-Measured base feedback after control release, physical stopping/restoration,
-and the supported qualification campaign remain to be validated on the robot.
+Local walker, scheduled walker, direct walker and Balance simulations completed
+10 seconds without a fall. Handoff occurred after 2 seconds of measured
+stability. The 12-second first-steps command simulation also completed without
+faults or a fall. Reports/traces are in `.cache/startup-validation/`.
+These results do not qualify physical takeover or stopping.
+
+Known regression: the legacy stairs example reaches the three treads but falls
+later in its 20-second unchecked rollout with startup Balance. Its existing
+course-completion test remains failing. Do not use the walker validation as
+qualification for that policy. The universal gate remains enforced for stairs
+and uploaded policies, whose behavior requires separate requalification.
+
+The host Python 3.8 Balance inference warmup passed with the bundled model,
+whose SHA256 matches `examples/policies/walker/provenance.json`. The running
+hardware service was inspected but not restarted. Docker build/run remains
+unverified because the account lacks Docker socket access. No physical joint
+commands were sent. The operator runs the build and hardware commands above.

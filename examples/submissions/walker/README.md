@@ -15,8 +15,9 @@ The preferred shared submission entry point is:
 
 Drop `--local` to build and run the shared ROS container in isolated simulation.
 For hardware, use `./submit.sh --mode real --example walker --command FILE`.
-`real.sh` is a compatibility wrapper. The existing standing safety gate still
-waits for left + B and double Start requests damping. Simulation validation
+`real.sh` is a compatibility wrapper. The host runs GR00T Balance until measured stability, then requires a fresh
+left + B press and blends into the policy. Double Start requests damping.
+See [operator commands](../../../robot_safety/HARDWARE_ADAPTER.md#operator-commands). Simulation validation
 is not hardware qualification.
 
 `build.sh` preserves the separate legacy submission packaging workflow:

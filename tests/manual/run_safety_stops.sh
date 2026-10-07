@@ -16,7 +16,7 @@ export ROS_DOMAIN_ID=97
 export ROS_LOCALHOST_ONLY=1
 export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
-export HIM_BALANCE_ONNX="$repo_dir/.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx"
+export HIM_BALANCE_ONNX="${HIM_BALANCE_ONNX:-$repo_dir/examples/policies/walker/balance.onnx}"
 
 mkdir -p "$install_base"
 colcon --log-base "$HOME/.him-safety/ros-log" build --base-paths ros2 \

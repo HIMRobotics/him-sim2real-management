@@ -85,20 +85,21 @@ def test_real_alias_preserves_gate_and_container_arguments(launchers, script, ar
         "--mode",
         "hardware",
         "--enable-hardware-output",
-        "--profile",
-        "explicit.json",
         "--image",
         "test-policy",
+        "--command",
+        str(command),
+        "--profile",
+        "explicit.json",
         "--",
         "--policy-flag",
     ]
-    assert data["gate"] == "1"
-    assert data["command"] == str(command)
+    assert data["command"] == ""
 
 
 @pytest.mark.parametrize(
     "args",
-    [["--mode", "invalid"], ["--mode", "real", "--example", "walker", "--image", "x"]],
+    [["--mode", "invalid"]],
 )
 def test_invalid_submission_is_rejected(launchers, args):
     result = call(launchers, "submit.sh", args)
