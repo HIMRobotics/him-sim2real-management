@@ -132,6 +132,15 @@ class SafetyGraphTests(unittest.TestCase):
                 client.publish_command()
                 self.wait_for(lambda index=index: self.motor.motor_gate.last_command_sequence == index)
                 self.assertEqual(self.motor.motor_gate.last_checked_command["q"], frame["q"])
+                policy.name = "walker"
+                with self.assertRaisesRegex(RuntimeError, "measured base velocity"):
+                    client.on_state(message)
+                state["base_velocity"] = [0.] * 6
+                message.data = json.dumps(state)
+                client.on_state(message)
+                client.trial = Mock()
+                with self.assertRaisesRegex(RuntimeError, "measured base position"):
+                    client.on_state(message)
             finally:
                 self.executor.remove_node(client)
                 client.destroy_node()

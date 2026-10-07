@@ -128,11 +128,13 @@ cp "$profile" "$log_dir/joint_profile.json"
 pids=()
 cleanup() {
   trap - EXIT INT TERM
-  stop_container
+  stop_container || true
   for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 launch_node() {
   local role="$1"
   shift
