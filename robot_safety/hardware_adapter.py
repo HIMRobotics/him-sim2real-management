@@ -46,6 +46,7 @@ class G1ArmAdapter:
         self.profile = profile
         self.whole_body = whole_body
         self.release_pending = False
+        self.motion_released_at_secs = None
         self.clock = clock
         self.transport = None
         self.lock = RLock()
@@ -146,6 +147,8 @@ class G1ArmAdapter:
 
     def check_health(self):
         """Require current health telemetry before enabling or continuing output."""
+        if self.whole_body and (self.feedback is None or not self.feedback.quat or not self.feedback.gyro):
+            raise ValueError("missing_hardware_imu")
         if (self.battery_time is None
                 or not 0 <= self.clock() - self.battery_time < HARDWARE_BATTERY_TIMEOUT_SECS):
             raise ValueError("battery_feedback_timeout")
@@ -372,6 +375,7 @@ class G1ArmAdapter:
                 self.walk_rpc_code = self.transport.release_motion()
                 # A failed or timed-out release can still have changed ownership.
                 self.balance_released = True
+                self.motion_released_at_secs = self.clock()
                 if self.walk_rpc_code != 0:
                     self.abort("hardware_release_failed")
                     return

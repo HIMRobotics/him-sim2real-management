@@ -29,11 +29,12 @@ class HardwareMotorGateNode(MotorGateNode):
         self.adapter = None
         super().__init__()
         enabled = self.declare_parameter("enable_hardware_output", False).value
+        dry_run = self.declare_parameter("dry_run", False).value
         whole_body = self.declare_parameter("whole_body_output", False).value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
-        if enabled is not True or not profile_path or not interface:
+        if enabled == dry_run or not profile_path or not interface:
             raise ValueError(
                 "hardware output requires explicit enable, profile path and SDK interface"
             )
@@ -54,11 +55,13 @@ class HardwareMotorGateNode(MotorGateNode):
         self.startup_ready = False
         self.adapter = G1ArmAdapter(profile, whole_body=whole_body)
         self.adapter.transport = UnitreeArmTransport(
-            interface, domain, self.adapter.receive_state, self.adapter.receive_battery
+            interface, domain, self.adapter.receive_state, self.adapter.receive_battery,
+            output_enabled=enabled,
         )
+        self.output_enabled = enabled
         self.adapter.start_workers()
         self.get_logger().warn(
-            "Hardware output enabled. Arming may command the robot. No automatic rearm."
+            f"Hardware output enabled: {enabled}. No automatic rearm."
         )
 
     def notify_startup_ready(self):
@@ -202,9 +205,10 @@ class HardwareMotorGateNode(MotorGateNode):
         # RPC acceptance and stock FSM are evidence, not proof of physical damping.
         status = json.dumps(
             {
-                "hardware_output_enabled": True,
+                "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
                 "motion_released": self.adapter.balance_released,
+                "motion_released_at_secs": self.adapter.motion_released_at_secs,
                 "armed": self.adapter.armed,
                 "handover_complete": self.adapter.last_written_ownership_weight == 1.0,
                 "arm_rejection_reason": self.adapter.arm_rejection_reason,

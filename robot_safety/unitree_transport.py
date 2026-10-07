@@ -55,8 +55,9 @@ class MotorWriterLock:
 class UnitreeArmTransport:
     """Own arm_sdk publication and a separate locomotion RPC client."""
 
-    def __init__(self, interface, domain, on_state, on_battery):
-        self.writer_lock = MotorWriterLock()
+    def __init__(self, interface, domain, on_state, on_battery, *, output_enabled=True):
+        self.output_enabled = output_enabled
+        self.writer_lock = MotorWriterLock() if output_enabled else None
         self.write_lock = Lock()
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
             MotionSwitcherClient,
@@ -74,10 +75,12 @@ class UnitreeArmTransport:
         ChannelFactoryInitialize(domain, interface)
         self.make_command = unitree_hg_msg_dds__LowCmd_
         self.crc = CRC()
-        self.publisher = ChannelPublisher(ARM_SDK_TOPIC, LowCmd_)
-        self.publisher.Init()
-        self.lowcmd = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
-        self.lowcmd.Init()
+        self.publisher = self.lowcmd = None
+        if output_enabled:
+            self.publisher = ChannelPublisher(ARM_SDK_TOPIC, LowCmd_)
+            self.publisher.Init()
+            self.lowcmd = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
+            self.lowcmd.Init()
         self.audio = None
         self.saved_motion_name = None
         self.motion_restored = False
@@ -105,6 +108,8 @@ class UnitreeArmTransport:
 
     def write_arm(self, targets, weight):
         """Send only explicitly mapped upper-body targets, plus SDK ownership weight."""
+        if not self.output_enabled:
+            return True
         message = self.make_command()
         for index, values in targets.items():
             motor = message.motor_cmd[index]
@@ -117,6 +122,8 @@ class UnitreeArmTransport:
 
     def release_motion(self):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
+        if not self.output_enabled:
+            return 0
         switcher = self.switcher
         _code, mode = switcher.CheckMode()
         if isinstance(mode, dict) and mode.get("name"):
@@ -134,6 +141,8 @@ class UnitreeArmTransport:
 
     def restore_motion(self):
         """Reselect the sport service after a release. 7002 means it is still busy."""
+        if not self.output_enabled:
+            return 0
         if self.motion_restored:
             return 0
         self._set_motion_silent(False)
@@ -162,6 +171,8 @@ class UnitreeArmTransport:
         """Encode a complete, already checked 29-joint command."""
         if set(targets) != set(range(NUM_JOINTS)):
             raise ValueError("whole-body output requires all 29 joints")
+        if not self.output_enabled:
+            return True
         message = self.make_command()
         message.mode_pr = 0
         message.mode_machine = machine
@@ -204,6 +215,8 @@ class UnitreeArmTransport:
 
     def request_damping(self):
         """Use Damp's underlying RPC because Damp() discards its return code."""
+        if not self.output_enabled:
+            return 0
         return self.locomotion.SetFsmId(DAMPING_FSM_ID)
 
     def read_ready_fsm(self):
@@ -229,6 +242,7 @@ class UnitreeArmTransport:
     def close(self):
         self.subscriber.Close()
         self.bms_subscriber.Close()
-        self.publisher.Close()
-        self.lowcmd.Close()
-        self.writer_lock.close()
+        if self.output_enabled:
+            self.publisher.Close()
+            self.lowcmd.Close()
+            self.writer_lock.close()

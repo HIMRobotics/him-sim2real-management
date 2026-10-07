@@ -152,6 +152,7 @@ class HardwareAdapterTests(unittest.TestCase):
             SimpleNamespace(
                 motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 mode_machine=machine,
+                imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
                 wireless_remote=remote,
             )
         )
@@ -812,25 +813,36 @@ class HardwareAdapterTests(unittest.TestCase):
 
 class TransportEncodingTests(unittest.TestCase):
     def test_startup_initializes_clients_without_control_rpcs(self):
-        sdk = Mock()
-        modules = {
-            "unitree_sdk2py." + name: sdk for name in (
-                "core.channel", "g1.loco.g1_loco_client", "idl.default",
-                "idl.unitree_hg.msg.dds_", "utils.crc",
-                "comm.motion_switcher.motion_switcher_client", "g1.audio.g1_audio_client",
-            )
-        }
-        with patch.dict("sys.modules", modules):
-            transport = UnitreeArmTransport("fake", 0, Mock(), Mock())
-            self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
-            self.assertIs(transport._audio(), sdk.AudioClient.return_value)
-        sdk.MotionSwitcherClient.assert_called_once()
-        sdk.AudioClient.assert_called_once()
-        sdk.MotionSwitcherClient.return_value.ReleaseMode.assert_not_called()
-        sdk.MotionSwitcherClient.return_value.SelectMode.assert_not_called()
-        sdk.LocoClient.return_value.SetFsmId.assert_not_called()
-        sdk.AudioClient.return_value.TtsMaker.assert_not_called()
-        sdk.ChannelPublisher.return_value.Write.assert_not_called()
+        for enabled in (True, False):
+            with self.subTest(output_enabled=enabled):
+                sdk = Mock()
+                modules = {
+                    "unitree_sdk2py." + name: sdk for name in (
+                        "core.channel", "g1.loco.g1_loco_client", "idl.default",
+                        "idl.unitree_hg.msg.dds_", "utils.crc",
+                        "comm.motion_switcher.motion_switcher_client", "g1.audio.g1_audio_client",
+                    )
+                }
+                with patch.dict("sys.modules", modules):
+                    transport = UnitreeArmTransport("fake", 0, Mock(), Mock(), output_enabled=enabled)
+                    self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
+                    self.assertIs(transport._audio(), sdk.AudioClient.return_value)
+                if not enabled:
+                    sdk.ChannelPublisher.assert_not_called()
+                    self.assertIsNone(transport.writer_lock)
+                    transport.write_arm({}, 0.)
+                    transport.write_body({i: {} for i in range(29)}, 5)
+                    transport.release_motion()
+                    transport.restore_motion()
+                    transport.request_damping()
+                sdk.MotionSwitcherClient.assert_called_once()
+                sdk.AudioClient.assert_called_once()
+                sdk.MotionSwitcherClient.return_value.ReleaseMode.assert_not_called()
+                sdk.MotionSwitcherClient.return_value.SelectMode.assert_not_called()
+                sdk.LocoClient.return_value.SetFsmId.assert_not_called()
+                sdk.AudioClient.return_value.TtsMaker.assert_not_called()
+                sdk.ChannelPublisher.return_value.Write.assert_not_called()
+                transport.close()
 
     def test_readiness_and_stop_queries_use_separate_clients(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
@@ -860,6 +872,7 @@ class TransportEncodingTests(unittest.TestCase):
 
     def test_arm_body_and_balance_commands_use_sdk_slots_and_crc(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+        transport.output_enabled = True
         transport.write_lock = Lock()
 
         def make_command():
@@ -950,6 +963,7 @@ class TransportEncodingTests(unittest.TestCase):
 
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
         transport.switcher = Switcher()
+        transport.output_enabled = True
         transport.audio = Audio()
         transport.saved_motion_name = None
         transport.motion_restored = False
