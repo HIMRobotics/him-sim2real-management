@@ -122,33 +122,6 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.transport.release_calls, 0)
         self.assertIsNotNone(self.adapter.abort_reason)
 
-    def test_blocked_write_does_not_block_feedback_or_abort(self):
-        from threading import Event, Thread
-
-        self.adapter.whole_body = True
-        entered, release = Event(), Event()
-
-        def write(*args):
-            entered.set()
-            release.wait(2)
-            return True
-
-        self.transport.write_body = write
-        self.assertTrue(self.adapter.arm())
-        self.adapter.submit(self.command, self.now + 0.1)
-        self.adapter.step()
-        worker = Thread(target=self.adapter.step)
-        worker.start()
-        try:
-            self.assertTrue(entered.wait(1))
-            self.assertTrue(self.adapter.lock.acquire(timeout=0.1))
-            self.adapter.lock.release()
-            self.adapter.abort("controller_stop")
-            self.assertTrue(self.adapter.stop_requested.is_set())
-        finally:
-            release.set()
-            worker.join(1)
-
     def test_startup_and_runtime_pose_gaps_do_not_reject_any_joint(self):
         legacy = profile_data()
         legacy["initial_position_tolerance_rad"] = 0.0001
@@ -664,36 +637,51 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.transport.writes[-1], ({}, 0.0))
         self.assertEqual(self.adapter.reported_fsm_id, 1)
 
-    def test_abort_rpc_does_not_wait_for_blocked_motion_write(self):
+    def test_feedback_and_damping_continue_during_a_blocked_write(self):
         from threading import Event, Thread
 
-        entered_write = Event()
-        release_write = Event()
-        original_write = self.transport.write_arm
+        for whole_body in (False, True):
+            with self.subTest(whole_body=whole_body):
+                self.setUp()
+                self.adapter.whole_body = whole_body
+                entered, release, stopped = Event(), Event(), Event()
 
-        def blocked_write(targets, weight):
-            if targets:
-                entered_write.set()
-                release_write.wait(2.0)
-            return original_write(targets, weight)
+                def blocked_write(targets, _mode, entered=entered, release=release):
+                    if targets:
+                        entered.set()
+                        release.wait(2.0)
+                    return True
 
-        self.transport.write_arm = blocked_write
-        self.assertTrue(self.adapter.arm())
-        self.adapter.submit(self.command, self.now + 0.1)
-        writer = Thread(target=self.adapter.step, daemon=True)
-        writer.start()
-        try:
-            self.assertTrue(entered_write.wait(1.0))
-            self.adapter.abort("abort_during_write")
-            self.adapter.stop_once()
-            self.assertEqual(self.transport.stop_calls, 0)
-            self.assertTrue(self.adapter.stop_requested.is_set())
-        finally:
-            release_write.set()
-            writer.join(timeout=1.0)
-        count = len(self.transport.writes)
-        self.adapter.step()
-        self.assertEqual(len(self.transport.writes), count)
+                if whole_body:
+                    self.transport.write_body = blocked_write
+                else:
+                    self.transport.write_arm = blocked_write
+                self.assertTrue(self.adapter.arm())
+                self.adapter.submit(self.command, self.now + 0.1)
+                if whole_body:
+                    self.adapter.step()
+                writer = Thread(target=self.adapter.step, daemon=True)
+
+                def stop_from_feedback(stopped=stopped):
+                    self.state()
+                    self.adapter.abort("controller_stop", request_damping=True)
+                    self.adapter.stop_once()
+                    stopped.set()
+
+                stopper = Thread(target=stop_from_feedback, daemon=True)
+                writer.start()
+                try:
+                    self.assertTrue(entered.wait(1.0))
+                    stopper.start()
+                    self.assertTrue(stopped.wait(0.5))
+                    self.assertEqual(self.transport.stop_calls, 1)
+                    self.assertEqual(self.adapter.abort_reason, "controller_stop")
+                    self.assertTrue(self.adapter.stop_requested.is_set())
+                finally:
+                    release.set()
+                    writer.join(timeout=1.0)
+                    if stopper.ident is not None:
+                        stopper.join(timeout=1.0)
 
     def test_template_profile_loads_and_contains_example_targets(self):
         path = (
@@ -870,7 +858,7 @@ class TransportEncodingTests(unittest.TestCase):
                 )
                 self.assertEqual(len(transport.readiness_query_results), expected_calls)
 
-    def test_only_upper_body_and_weight_slots_are_written_with_crc(self):
+    def test_arm_body_and_balance_commands_use_sdk_slots_and_crc(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
         transport.write_lock = Lock()
 
@@ -900,14 +888,7 @@ class TransportEncodingTests(unittest.TestCase):
         self.assertTrue(all(message.motor_cmd[i].kp == 0 for i in range(12)))
         self.assertEqual(message.crc, 12345)
 
-    def test_body_writer_preserves_all_fields_and_balance_wrapper(self):
-        transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
-        transport.write_lock = Lock()
-        transport.make_command = lambda: SimpleNamespace(
-            motor_cmd=[SimpleNamespace() for _ in range(35)])
-        transport.crc = SimpleNamespace(Crc=lambda message: 12345)
-        written = []
-        transport.lowcmd = SimpleNamespace(Write=lambda msg: written.append(msg) or True)
+        transport.lowcmd = transport.publisher
         targets = {i: {"q": i / 100, "dq": 0.1, "kp": 2., "kd": 0.5, "tau": 0.2} for i in range(29)}
         self.assertTrue(transport.write_body(targets, 5))
         msg = written[-1]
