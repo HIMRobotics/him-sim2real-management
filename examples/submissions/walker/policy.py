@@ -1,13 +1,11 @@
-"""G1 walker. The command file supplies vx, vy, and yaw_rate.
-
-This is not the GR00T balance network. That file has no velocity command.
-"""
+"""NVIDIA Decoupled WBC command-file wrapper."""
 
 from pathlib import Path
 
 import numpy as np
 import yaml
-from policy_safety.adapter import G1Walker
+from command import load_schedule
+from policy_safety.adapter import NvidiaWalker
 
 NUM_JOINTS = 29
 
@@ -21,10 +19,7 @@ def load_yaml(path):
 
 def load_command(path):
     """vx, vy, yaw_rate."""
-    command = np.asarray(load_yaml(path).get("command"), dtype=np.float32)
-    if command.shape != (3,) or not np.isfinite(command).all():
-        raise ValueError(f"{path} command must be vx, vy, yaw_rate")
-    return command
+    return load_schedule(path).at(0.0)
 
 
 class WalkerPolicy:
@@ -35,7 +30,7 @@ class WalkerPolicy:
         joints = spec["joints"]
         if len(joints) != NUM_JOINTS:
             raise ValueError(f"{spec_path} must list {NUM_JOINTS} joints")
-        self.walker = G1Walker(
+        self.walker = NvidiaWalker(
             model_path,
             {
                 "contract": spec["contract"],
@@ -46,8 +41,12 @@ class WalkerPolicy:
         )
         self.kp = np.array([j["kp"] for j in joints], dtype=np.float64)
         self.kd = np.array([j["kd"] for j in joints], dtype=np.float64)
-        self.command = load_command(command_path)
+        self.schedule = load_schedule(command_path)
+        self.command = self.schedule.at(0.0)
+        self.elapsed = 0.0
 
     def targets(self, q, dq, quat, base_velocity):
+        self.command = self.schedule.at(self.elapsed)
+        self.elapsed += 0.02
         observation = self.walker.observation(q, dq, quat, base_velocity, self.command)
         return self.walker.decode(self.walker.infer(observation))

@@ -4,8 +4,8 @@
 
 | Example | Controller | Environment |
 | --- | --- | --- |
-| `stairs` | The retained walker ONNX plus the original submission's walk, pause, cross, hop, and arm overrides | Restored three low stair treads, top landing, gap, and finish pad |
-| `walker` | The walker ONNX with a 0.6 m/s forward command and zero commanded yaw | Flat floor |
+| `stairs` | The legacy arena stair ONNX plus the original submission's walk, pause, cross, hop, and arm overrides | Restored three low stair treads, top landing, gap, and finish pad |
+| `walker` | Official NVIDIA Decoupled WBC Walk/Balance with a default 0.3 m/s forward command | Flat floor |
 | `balance` | The existing GR00T/Gear WBC lower-body balance ONNX, with arms held at their initial pose | Flat floor |
 
 All controllers send a measured-pose hold as their first command. After that, their targets go directly to the normal sim checks. They do not smooth targets to evade those checks or change safety thresholds. MuJoCo integrates the floating base. The controller never writes root positions.
@@ -31,7 +31,7 @@ From the repository root. On a Mac or Windows laptop use `./desktop_sim.sh` with
 
 Each output directory contains `report.json` and `trace.npz`. Named output directories preserve both recordings. Exit code 0 means a checked run passed or an unchecked run completed, code 1 is a safety violation, and code 2 is an execution error or missing commands. A completed unchecked run is not necessarily a successful task.
 
-The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx`. Set `HIM_BALANCE_ONNX` to select another copy. `--example stairs` and `--example walker` use the committed `examples/policies/walker/walker.onnx`, `walker.onnx.data`, and `walker.yaml`. The generated container context names its policy specification `policy.yaml`.
+The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx`. Set `HIM_BALANCE_ONNX` to select another copy. `--example walker` uses the official Walk/Balance pair in `examples/policies/walker/`. `--example stairs` uses the separate legacy bundle in `examples/policies/stairs/`. The generated container context names its policy specification `policy.yaml`.
 
 ## View a result
 
@@ -111,4 +111,4 @@ Add `--scene path/to/scene.xml` to any example command to override its prepared 
 
 `report.json` records the safety outcome and independent `motion` measurements. A fall after a safety rejection reflects the subsequent hold or damping response. It is not evidence that the rejected policy continued controlling the robot. For the original stair course, `climbed_stairs` requires foot contact on at least two treads, standing on the top landing, and no fall. `course_success` additionally requires an airborne gap crossing and an upright finish on the finish pad. The stricter gap condition requires no foot contact with any course platform while over the gap.
 
-The restored stair geometry and scripted controller come from this repository's `examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`. The retained model history is in [the walker bundle README](../../examples/policies/walker/README.md). The GR00T adapter is shared with `robot_safety/balance_policy.py`. Current measured results and remaining integration checks are in [VALIDATION.md](VALIDATION.md).
+The restored stair geometry and scripted controller come from this repository's `examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`. The retained model history is in [the stairs bundle README](../../examples/policies/stairs/README.md). The NVIDIA walker uses `NvidiaWalker` in `policy_safety/adapter.py`. The standalone balance example uses `robot_safety/balance_policy.py`. Current measured results and remaining integration checks are in [VALIDATION.md](VALIDATION.md).

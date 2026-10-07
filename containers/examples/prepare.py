@@ -62,18 +62,25 @@ def prepare(name, destination=None, *, container=True):
         defaults = DEFAULT_JOINT_POSITIONS.tolist()
         gains = list(zip(list(LEG_KP) + [40.] * 14, list(LEG_KD) + [1.] * 14))
     else:
-        bundle = ROOT / "examples/policies/walker"
+        bundle = ROOT / "examples/policies" / ("stairs" if name == "stairs" else "walker")
+        model_names = (
+            ("walker.onnx", "walker.onnx.data") if name == "stairs"
+            else ("walker.onnx", "balance.onnx", "LICENSE", "provenance.json")
+        )
         missing = [
             filename
-            for filename in ("walker.onnx", "walker.onnx.data", "walker.yaml")
+            for filename in (*model_names, "walker.yaml")
             if not (bundle / filename).is_file()
         ]
         if missing:
             raise ValueError(
-                "Walker bundle missing in examples/policies/walker/: "
+                f"Policy bundle missing in {bundle}: "
                 + ", ".join(missing)
             )
-        for filename in ("walker.onnx", "walker.onnx.data"):
+        for filename in ("walker.onnx.data", "balance.onnx"):
+            if filename not in model_names:
+                (project / filename).unlink(missing_ok=True)
+        for filename in model_names:
             copy_file(bundle / filename, project / filename)
         copy_file(bundle / "walker.yaml", project / "policy.yaml")
         cfg = yaml.safe_load((project / "policy.yaml").read_text())
@@ -103,7 +110,7 @@ def prepare(name, destination=None, *, container=True):
     start = (
         [0.002739233746429086, -0.004604265724722594, 0.79, 1, 0, 0, 0]
         if name == "stairs"
-        else [0, 0, 0.79, 1, 0, 0, 0]
+        else [0, 0, 0.80 if name == "walker" else 0.79, 1, 0, 0, 0]
     )
     key.set("qpos", " ".join(map(str, start + defaults)))
     key.set("ctrl", " ".join(map(str, defaults)))

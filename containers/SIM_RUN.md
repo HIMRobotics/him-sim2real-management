@@ -255,7 +255,7 @@ Other flags:
 | `--push none\|small\|medium\|heavy` | Run that one battery case. Add `--pose` to pick the start. Add `--view`, press Start, and watch it. |
 | `--battery --circle` | Same pushes while the cached walker circles. Standing only. A gait step is applied directly, and the fall check stays on. |
 | `--circle` | Cached walker, velocity file `circle.yaml`. No container. Report `policy` is `circle`. The fall check stays on. The submission tracking window is not applied, because a gait step does not fit it. |
-| `--command FILE` | Same runner, with that velocity file. No container. Report `policy` is the file name without `.yaml`. `forward_stop.yaml` walks at 0.5 m/s for 2 s, then steps down 0.1 m/s each second to zero. The yaw command cancels this walker's drift and scales down with speed. Use `--seconds 7` to see the stop. |
+| `--command FILE` | Same runner, with that velocity file. No container. Report `policy` is the file name without `.yaml`. `forward_stop.yaml` walks at 0.5 m/s for 2 s, then steps down 0.1 m/s each second to zero. Yaw is zero, and the final zero velocity selects NVIDIA Balance. Use `--seconds 7` to see the stop. |
 | `--view` | Open the page first. Press Start to run, then the recording plays from the first frame. |
 | `replay` | Serve the last recording. Does not start a new run. |
 | `--help` | Show usage without starting Docker or requesting sudo. |

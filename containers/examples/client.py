@@ -89,7 +89,7 @@ class PolicyNode(Node):
         state = json.loads(message.data)
         if self.mode != "sim" and state.get("host_boot_id") != Path("/proc/sys/kernel/random/boot_id").read_text().strip():
             raise RuntimeError("policy state came from another host clock")
-        if self.policy.name != "balance" and "base_velocity" not in state:
+        if self.policy.name == "stairs" and "base_velocity" not in state:
             raise RuntimeError("policy requires measured base velocity")
         if (self.trial or (self.policy.name == "stairs" and self.task_command is None)) and "position" not in state:
             raise RuntimeError("task requires measured base position")
@@ -150,7 +150,7 @@ def main():
             "example container requires the loopback-only simulator network"
         )
     name = os.environ.get("G1_SIM_EXAMPLE") or (
-        "balance" if os.path.isfile("/example/project/balance.onnx") else "walker"
+        "walker" if os.path.isfile("/example/project/walker.onnx") else "balance"
     )
     policy = ExamplePolicy(name, "/example/project")
     hashes = Path("/example/project/hashes.json")

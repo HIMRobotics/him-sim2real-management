@@ -19,7 +19,7 @@ sdk="${UNITREE_SDK2PY:-/home/unitree/Workspace/unitree_sdk2_python/unitree_sdk2p
 dds_py="${CYCLONEDDS_PY:-/home/unitree/.local/lib/python3.8/site-packages/cyclonedds}"
 dds_lib="${CYCLONEDDS_LIB:-/home/unitree/cyclonedds_ws/install/cyclonedds/lib}"
 
-if [[ ! -f "$model" || ! -f "$bundle/walker.onnx.data" || ! -f "$bundle/walker.yaml" ]]; then
+if [[ ! -f "$model" || ! -f "$bundle/balance.onnx" || ! -f "$bundle/walker.yaml" ]]; then
   echo "Walker weights missing in examples/policies/walker/" >&2
   exit 1
 fi
@@ -39,9 +39,10 @@ fi
 rm -rf "$stage"
 mkdir -p "$stage/interfaces" "$stage/policy_safety"
 cp "$repo/packages/policy_safety/src/policy_safety/"{__init__,adapter,config}.py "$stage/policy_safety/"
+cp "$repo/containers/examples/command.py" "$stage/"
 cp "$example/Dockerfile" "$example/entrypoint.sh" "$example/walker_node.py" "$example/policy.py" \
   "$bundle/walker.yaml" "$commands/stand.yaml" "$commands/circle.yaml" "$stage/"
-cp "$model" "$bundle/walker.onnx.data" "$stage/"
+cp "$model" "$bundle/balance.onnx" "$bundle/LICENSE" "$bundle/provenance.json" "$stage/"
 cp -a "$sdk" "$stage/unitree_sdk2py"
 cp -a "$dds_py" "$stage/cyclonedds"
 mkdir -p "$stage/ddsc"

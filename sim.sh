@@ -53,7 +53,7 @@ Desktop --self-test and --circle run locally without ROS or Docker.
                    With --example walker, that container plays the same file.
                    stand.yaml stays put. circle.yaml is the loop.
                    forward_stop.yaml walks at 0.5 m/s for 2 s, then steps down
-                   0.1 m/s each second. Yaw cancels the walker's drift.
+                   0.1 m/s each second, then selects NVIDIA Balance.
                    Use --seconds 7.
 --battery          Flat-ground battery: every pose, then 10/50/150 N pelvis
                    pushes. Writes containers/sim/output/battery/report.json.

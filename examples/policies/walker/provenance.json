@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/NVlabs/GR00T-WholeBodyControl",
+  "revision": "b042411fae38ee4d1af9aac82a37a1f8d14d6dd0",
+  "upstream_directory": "decoupled_wbc/sim2mujoco/resources/robots/g1/policy",
+  "files": {
+    "walker.onnx": {
+      "upstream": "GR00T-WholeBodyControl-Walk.onnx",
+      "sha256": "7c82255b6905ffcc4468fa7f8ddcf7b70db168cf1042107ccab887cb6a8e5407"
+    },
+    "balance.onnx": {
+      "upstream": "GR00T-WholeBodyControl-Balance.onnx",
+      "sha256": "f645da599d4ca3d29ed273c8f4712620bb680d34977469ca3aeabe5bb9631c18"
+    }
+  }
+}

@@ -61,7 +61,7 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("seconds must be finite and positive")
     output = _prepare_output(output)
-    project = prepare(name, container=False)
+    project = prepare(name, output / "prepared", container=False)
     scene = scene or project / "environment/scene.xml"
     policy = ExamplePolicy(name, project / "container/project")
     # Score and apply this example's gains. The generic template is stiffer

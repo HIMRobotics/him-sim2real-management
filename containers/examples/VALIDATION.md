@@ -1,5 +1,11 @@
 # Example validation
 
+Historical walker results below used the arena stair model, not NVIDIA's official
+Decoupled WBC Walk checkpoint. They do not qualify the replacement. Current
+NVIDIA local-run artifacts are under `.cache/nvidia-validation/`, with model
+provenance in `examples/policies/walker/provenance.json`.
+
+
 Validated on the development ARM64 host with real ONNX inference and MuJoCo, using the local backend and default prepared environments. No robot motor commands were sent.
 
 ## Current command-gap and response checks

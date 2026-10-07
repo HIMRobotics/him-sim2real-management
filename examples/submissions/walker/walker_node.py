@@ -124,13 +124,12 @@ class WalkerNode(Node):
             return
         with self.imu_lock:
             imu = self.imu
-            velocity = list(self.base_velocity)
         if imu is None:
             return
         if self.sequence == 0:
             target = q
         else:
-            target = self.policy.targets(q, dq, imu[0], velocity)
+            target = self.policy.targets(q, dq, imu[0], [0.0, 0.0, 0.0, *imu[1]])
         command = JointCommand()
         command.session_id = self.session_id
         command.sequence = self.sequence

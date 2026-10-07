@@ -99,3 +99,23 @@ enables boot startup through user lingering, and keeps a gate running that
 checks for double F3 (balance and arm hold) and double Start (whole-body damping).
 It does not start a policy. See the [manual safety tests](tests/manual/README.md)
 for installation checks and arm-raise verification.
+
+## Policy submission
+
+`submit.sh` selects simulation or real hardware. `sim.sh` and `real.sh` remain
+compatible entry points. Hardware launch behavior stays in the existing
+`setup.sh` supervisor and standing safety gate.
+
+```bash
+./submit.sh --mode sim --example walker --local --seconds 10 \
+  --command examples/commands/walker/forward.yaml --view
+```
+
+The walker is NVIDIA's official Decoupled WBC Walk/Balance pair. See
+[its contract and provenance](examples/policies/walker/README.md).
+`examples/commands/walker/run.py` exposes editable `forward_velocity`,
+`sideways_velocity`, and `yaw_rate` variables.
+
+For an explicitly intended hardware session, the equivalent entry point is
+`./submit.sh --mode real --example walker --command FILE`. It retains the
+left + B launch gate and double Start damping stop.

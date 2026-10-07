@@ -796,13 +796,13 @@ class RunnerTest(unittest.TestCase):
         from circle import load_schedule
 
         schedule = load_schedule(ROOT / "examples/commands/walker/forward_stop.yaml")
-        self.assertTrue(np.allclose(schedule.at(0.0), [0.50, 0.0, -0.127]))
-        self.assertTrue(np.allclose(schedule.at(1.99), [0.50, 0.0, -0.127]))
+        self.assertTrue(np.allclose(schedule.at(0.0), [0.50, 0.0, 0.0]))
+        self.assertTrue(np.allclose(schedule.at(1.99), [0.50, 0.0, 0.0]))
         for step, command in enumerate((
-            [0.40, 0.0, -0.102],
-            [0.30, 0.0, -0.076],
-            [0.20, 0.0, -0.051],
-            [0.10, 0.0, -0.025],
+            [0.40, 0.0, 0.0],
+            [0.30, 0.0, 0.0],
+            [0.20, 0.0, 0.0],
+            [0.10, 0.0, 0.0],
         )):
             self.assertTrue(np.allclose(schedule.at(2.0 + step), command))
         self.assertTrue(np.allclose(schedule.at(6.0), [0.0, 0.0, 0.0]))

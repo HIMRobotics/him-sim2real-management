@@ -1,9 +1,4 @@
-"""Drive the cached G1 walker from an example command file.
-
-The balance network is the standing policy. A walking step also exceeds the
-submission tracking window, so this gait is applied directly and the fall
-check still runs. A file may hold one velocity or a timed list of them.
-"""
+"""Drive NVIDIA Decoupled WBC from a velocity command file."""
 
 import os
 import sys
@@ -38,13 +33,13 @@ class CircleWalker:
             )
         document = yaml.safe_load(spec.read_text())
         joints = document["joints"]
-        from policy_safety.adapter import G1Walker
+        from policy_safety.adapter import ADAPTERS
 
-        self.walker = G1Walker(
+        self.walker = ADAPTERS[document["contract"]](
             model_path,
             {
-                "contract": "g1-walker-99-v1",
-                "normalization": "embedded",
+                "contract": document["contract"],
+                "normalization": document["normalization"],
                 "default_joint_positions": [joint["default_position"] for joint in joints],
                 "action_scales": [joint["action_scale"] for joint in joints],
             },

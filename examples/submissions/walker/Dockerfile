@@ -17,7 +17,8 @@ COPY unitree_sdk2py /opt/walker/unitree_sdk2py
 COPY cyclonedds /opt/walker/cyclonedds
 COPY ddsc /opt/walker/ddsc
 ENV LD_LIBRARY_PATH=/opt/walker/ddsc
-COPY walker_node.py policy.py walker.onnx walker.onnx.data walker.yaml stand.yaml circle.yaml entrypoint.sh /opt/walker/
+COPY LICENSE provenance.json /opt/walker/
+COPY walker_node.py policy.py command.py walker.onnx balance.onnx walker.yaml stand.yaml circle.yaml entrypoint.sh /opt/walker/
 COPY policy_safety /opt/walker/policy_safety
 ENV PYTHONPATH=/opt/walker
 RUN python3 -c "from policy import WalkerPolicy; p = WalkerPolicy('walker.onnx', 'walker.yaml', 'stand.yaml'); p.targets(p.walker.default, [0.0]*29, [1.0,0.0,0.0,0.0], [0.0]*6)"

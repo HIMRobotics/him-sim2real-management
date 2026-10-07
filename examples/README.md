@@ -6,7 +6,8 @@ general-purpose policy deployment image.
 
 | Directory | Contents |
 | --- | --- |
-| [policies/walker](policies/walker/) | Walker ONNX graph, external weights, and observation/action specification |
+| [policies/walker](policies/walker/) | Official NVIDIA Decoupled WBC Walk/Balance checkpoints and contract |
+| [policies/stairs](policies/stairs/) | Legacy arena stair model, separate from the NVIDIA walker |
 | [policies/balance](policies/balance/) | GR00T standing-balance model |
 | [commands/walker](commands/walker/) | Stand, circle, and walk-then-stop velocity commands |
 | [submissions/walker](submissions/walker/) | Example walker container, ROS client, and build script |

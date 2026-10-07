@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 import yaml
-from policy_safety.adapter import G1Walker
+from policy_safety.adapter import ADAPTERS
 
 from robot_safety.balance_policy import LEG_KD, LEG_KP, BalancePolicy
 
@@ -50,10 +50,12 @@ class ExamplePolicy:
                 "action_scales": [j["action_scale"] for j in joints],
             }
             path = project / cfg["model"]["file"]
-            self.policy = G1Walker(path, robot, session=session(path))
+            self.policy = ADAPTERS[cfg["contract"]](path, robot, session=session(path))
             self.kp = np.array([j["kp"] for j in joints])
             self.kd = np.array([j["kd"] for j in joints])
-            self.policy.infer(np.zeros((1, 99), dtype=np.float32))
+            self.policy.infer(self.policy.observation(
+                self.policy.default, np.zeros(29), [1, 0, 0, 0], np.zeros(6), [0, 0, 0]
+            ))
             self.policy.reset()
 
     def velocity_command(self, state):
@@ -61,7 +63,7 @@ class ExamplePolicy:
         if "task_command" in state:
             return np.asarray(state["task_command"], dtype=np.float32)
         if self.name == "walker":
-            return np.array([0.6, 0.0, 0.0], dtype=np.float32)
+            return np.array([0.3, 0.0, 0.0], dtype=np.float32)
         x, y, z = state["position"]
         if self.phase == "walk":
             if x >= 1.55 and abs(y) < 0.35 and z > 0.60 and state["upright"] > 0.75:
@@ -103,7 +105,8 @@ class ExamplePolicy:
                 q,
                 state["dq"],
                 state["quat"],
-                state["base_velocity"],
+                ([0.0, 0.0, 0.0, *state["gyro"]]
+                 if self.name == "walker" else state["base_velocity"]),
                 self.velocity_command(state),
             )
             target = self.policy.decode(self.policy.infer(observation))

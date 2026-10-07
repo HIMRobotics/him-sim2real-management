@@ -403,6 +403,8 @@ def load_session(request):
         sim.robot["joint_names"], request.get("joint_profile", DEFAULT_JOINT_PROFILE)
     )
     files = model_files(request["model"])
+    if request["adapter"] == "nvidia-decoupled-wbc-516-v1":
+        files += model_files(Path(request["model"]).with_name("balance.onnx"))
     adapter = ADAPTERS[request["adapter"]](request["model"], sim.robot)
     return sim, adapter, profile, rules, clip, files
 
