@@ -37,10 +37,11 @@ All positions are absolute joint angles in radians. At 50 Hz, an interval lasts
 20 ms. The policy's own decoder converts any action offsets into absolute angles.
 
 - `q_proposed`: current proposal, not yet accepted or sent.
+- `q_commanded`: proposal clipped to the configured joint-position bounds.
 - `q_measured`: latest measured joint angle.
 - `q_applied`: accepted command retained after simulation application or a
   successful full-weight hardware write. SDK write success does not prove motion.
-- `command_gap = q_proposed - q_measured`: checked before issuing a command.
+- `command_gap = q_commanded - q_measured`: checked before issuing a command.
 - `response_error = q_measured - q_applied`: measured after execution, diagnostic only.
 
 `max_command_gap_rad` is **0.5 rad** for every joint. It is a local allowance,
@@ -57,8 +58,10 @@ estimated PD plus feedforward demand, and available measured torque. Simulator
 checks use its actual gains. The hardware arm adapter uses profile gains, which
 are the gains it actually sends, and forwards validated feedforward torque.
 
-A command within the 0.5 rad allowance can still violate position or torque
-bounds. A small response error does not establish safety. Response diagnostics
+Position clipping records a warning with the original and clipped angles, bounds,
+count and largest correction per joint. Clipping alone does not latch a stop.
+Gap, initial alignment and torque checks use the clipped command and can still
+reject it. A small response error does not establish safety. Response diagnostics
 never latch a stop or silently increase any limit.
 
 ## Runtime and startup checks

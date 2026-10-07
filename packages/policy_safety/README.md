@@ -100,10 +100,10 @@ contract is the YAML described in
 
 This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not
-describe the complete stairs submission. By default, decoded targets outside
-actuator ranges are violations even though the simulator clips applied targets.
-With `--clip-to-stops`, command and torque checks use the clipped target
-instead. Reports record this option and retain the raw target and clipping amount.
+describe the complete stairs submission. Decoded positions are clipped to the
+intersection of model and joint-profile bounds. Reports retain the raw proposal,
+clipped command and per-joint warnings. Gap and torque checks use the clipped
+command. `--clip-to-stops` remains a compatibility flag, as clipping is now default.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
 tensor dimensions is insufficient. Follow the `G1Walker` adapter contract, register it
@@ -212,7 +212,8 @@ maximum tilt. Non-upright counterfactuals omit the upright fall check.
 ### Command and response checks
 
 `q_proposed` is the pending absolute position command. `q_measured` is current
-feedback. Before applying a command, `abs(q_proposed - q_measured)` must not exceed
+feedback. The bounded proposal is `q_commanded`. Before applying a command,
+`abs(q_commanded - q_measured)` must not exceed
 `max_command_gap_rad`, **0.5 rad** for every joint in the supplied profiles.
 There is no consecutive-command delta check. Position, torque and speed bounds
 still apply independently. Simulation retains the submitted policy's gains.
@@ -333,9 +334,9 @@ The separate joint profile nevertheless enforces command gaps, position bounds,
 and immediate measured joint speed for its covered joints. The shared body-speed
 check also applies. `acceptance_checks` lists global gaps and
 `joint_movement_checks` lists per-joint coverage. The evaluator checks unsaturated PD torque demand as well as the resulting
-applied torque. By default, the independent decoded-target check prevents clipping
-from hiding out-of-range requests. `--clip-to-stops` explicitly changes that
-behavior. Counterfactuals run after the nominal and branch
+applied torque. Position clipping produces warnings rather than a rejection, with
+original and clipped angles preserved in the report and trace.
+Counterfactuals run after the nominal and branch
 tests for each seed, so they may not yet be represented in intermediate counts.
 
 The repository wrapper makes the report and exit code available to deployment

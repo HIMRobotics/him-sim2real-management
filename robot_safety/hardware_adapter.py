@@ -33,6 +33,7 @@ from .joint_checks import (
     check_command,
     check_measured_velocity,
     check_torque,
+    clip_position,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
 
@@ -264,6 +265,7 @@ class G1ArmAdapter:
         self.ownership_taken = False
         self.hold_targets = self.arm_hold_q = None
         self.joint_diagnostics = JointDeltaDiagnostics()
+        self.position_warnings = {}
 
     def reject_arm(self, reason):
         """Record the failed readiness check without changing motor settings."""
@@ -337,8 +339,14 @@ class G1ArmAdapter:
                 return
             try:
                 self.record_response()
+                diagnostic_command = dict(self.command)
+                diagnostic_command["q"] = list(self.command["q"])
+                for index, limits in self._monitored_joints():
+                    diagnostic_command["q"][index] = clip_position(
+                        G1_29_JOINT_NAMES[index], self.command["q"][index],
+                        limits.position_min_rad, limits.position_max_rad)
                 self.joint_diagnostics.record(
-                    self.command, self.feedback
+                    diagnostic_command, self.feedback
                 )
                 targets = self.checked_targets(now)
                 elapsed = (
@@ -375,7 +383,10 @@ class G1ArmAdapter:
         if not self.lock.acquire(blocking=False):
             return None
         try:
-            return self.joint_diagnostics.snapshot()
+            result = self.joint_diagnostics.snapshot()
+            for name, warning in self.position_warnings.items():
+                result[name]["position_clipping"] = warning.copy()
+            return result
         finally:
             self.lock.release()
 
@@ -417,14 +428,15 @@ class G1ArmAdapter:
             tau = self.command["tau"][index]
             joint = G1_29_JOINT_NAMES[index]
             q_measured = self.feedback.q[index]
-            check_command(joint, limits, q_proposed, dq_proposed, tau, q_measured, initial,
+            q_commanded = check_command(joint, limits, q_proposed, dq_proposed, tau, q_measured, initial,
                           self.profile.initial_position_tolerance_rad,
-                          self.profile.initial_velocity_tolerance_rad_secs)
-            tau_demand = (limits.kp * (q_proposed - q_measured)
+                          self.profile.initial_velocity_tolerance_rad_secs,
+                          warnings=self.position_warnings)
+            tau_demand = (limits.kp * (q_commanded - q_measured)
                           + limits.kd * (dq_proposed - self.feedback.dq[index]) + tau)
             check_torque(joint, limits, tau_demand)
             if index in UPPER_BODY_INDICES:
-                targets[index] = {"q": q_proposed, "dq": dq_proposed, "kp": limits.kp,
+                targets[index] = {"q": q_commanded, "dq": dq_proposed, "kp": limits.kp,
                                   "kd": limits.kd, "tau": tau}
         return targets
 

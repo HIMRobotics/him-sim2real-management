@@ -28,6 +28,17 @@ from view import export_replay
 
 
 class ExampleTests(unittest.TestCase):
+    def test_walker_clips_positions_before_later_gap_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run("walker", tmp, 0.36, safety_checks=True)
+        warning = report["warnings"]["right_ankle_pitch"]
+        self.assertEqual(warning["count"], 3)
+        self.assertEqual(warning["q_commanded"], -0.87267)
+        self.assertLess(warning["q_proposed"], warning["q_commanded"])
+        self.assertEqual(report["commands"], 17)
+        self.assertEqual(report["reason"], "joint_command_gap_limit")
+        self.assertEqual(report["detail"]["joint"], "left_ankle_pitch")
+
     def test_walker_makes_forward_progress_with_checks_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = run("walker", tmp, 10, safety_checks=False)

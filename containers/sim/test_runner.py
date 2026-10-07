@@ -72,6 +72,27 @@ class RunnerTest(unittest.TestCase):
         runner.step(0.2)
         self.assertEqual(runner.reason, "action_timeout")
 
+    def test_clipped_ankle_is_sent_and_used_for_response(self):
+        runner = Runner()
+        index = runner.plant.joint_names.index("right_ankle_pitch_joint")
+        runner.plant.data.qpos[runner.plant.qadr[index]] = -0.86
+        state = runner.feedback(0.0)
+        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+        frame = hold(runner, state, 1)
+        frame["q"][index] = -0.892688
+        self.assertIsNone(runner.command(frame, 0.02))
+        self.assertEqual(frame["q"][index], -0.892688)
+        self.assertEqual(runner.active["q"][index], -0.87267)
+        with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
+            runner.step(0.02)
+        self.assertEqual(runner.plant.data.ctrl[runner.plant.actuators[index]], -0.87267)
+        self.assertAlmostEqual(runner.response_error[index], 0.01267)
+        report = runner.report()
+        self.assertEqual(report["status"], "within_limits")
+        warning = report["warnings"]["right_ankle_pitch"]
+        self.assertEqual(warning["q_proposed"], -0.892688)
+        self.assertEqual(warning["q_commanded"], -0.87267)
+
     def test_unchecked_observation_has_no_hidden_age_limit(self):
         runner = Runner(safety_checks=False)
         first = runner.feedback(0.0)

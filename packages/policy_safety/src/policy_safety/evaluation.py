@@ -193,7 +193,7 @@ def run_scenario(
     start = float(sim.data.time)
     start_position = sim.data.qpos[:3].copy()
     snapshots, rows = {}, []
-    result = dict(scenario, status="completed", first_violation=None, peaks={})
+    result = dict(scenario, status="completed", first_violation=None, peaks={}, warnings={})
     steps = round(scenario["seconds"] / sim.dt)
     if steps < 1 or not np.isclose(
         steps * sim.dt, scenario["seconds"], atol=1e-10, rtol=0
@@ -255,16 +255,14 @@ def run_scenario(
             obs = sim.observation(adapter, command)
             raw = adapter.infer(obs)
             target = adapter.decode(raw)
-            applied = np.clip(target, sim.ctrl_bounds[:, 0], sim.ctrl_bounds[:, 1])
+            applied = joint_rules.clip_positions(target, result["warnings"], sim.ctrl_bounds)
             velocity, torque_command = adapter.command_velocity_and_torque()
             measured_at_command = sim.data.qpos[sim.qadr]
-            commanded = applied if clip_to_stops else target
+            commanded = applied
             monitor.peaks["clipping"] = max(
                 monitor.peaks.get("clipping", 0),
                 float(np.max(np.abs(target - applied))),
             )
-            if not clip_to_stops and np.any(target != applied):
-                screen(raise_violation, "decoded_target_out_of_range")
             screen(
                 joint_rules.check_command,
                 commanded,
@@ -460,7 +458,7 @@ def evaluate(request):
         "adapter": request["adapter"],
         "tested_behavior": adapter.tested_behavior,
         "hardware_authorization": False,
-        "clip_to_stops": clip_to_stops,
+        "clip_to_stops": True,
         "profile": profile,
         "joint_movement_checks": joint_rules.coverage(),
         "acceptance_checks": {
@@ -472,13 +470,13 @@ def evaluate(request):
             ),
             "always_checked": [
                 "finite_policy_output",
-                "decoded_target_range",
+                "position_clipping_with_warning",
                 "joint_position_range",
                 "model_torque_range",
                 "profile_torque_demand_and_applied_bounds",
             ],
             "upright_scenarios_only": ["fall_height", "fall_orientation"],
-            "note": "PD torque demand is checked before every physics step against the joint profile, in addition to the applied torque checks. Out-of-range decoded targets are rejected before clipping can hide them.",
+            "note": "Positions are clipped to the intersection of joint-profile and model bounds with per-joint warnings. Gap and PD torque checks use the clipped command. Response error uses the command actually applied.",
         },
         "suite": suite,
         "push_sampling": {

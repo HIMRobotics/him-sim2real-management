@@ -4,7 +4,8 @@ Validated on the development ARM64 host with real ONNX inference and MuJoCo, usi
 
 ## Current command-gap and response checks
 
-The shared guard now compares a proposed angle with the current measured angle,
+Position proposals are now clipped to the joint bounds with per-joint warnings.
+The shared guard compares the clipped angle with the current measured angle,
 with a 0.5 rad ceiling. It does not compare consecutive proposals. Measured speed
 uses the per-joint model ceilings immediately. Response error is recorded after
 actuation and does not reject commands. The experiments below used older checks.
@@ -14,11 +15,14 @@ Ten-second local simulation requests with real policy inference produced:
 | Policy | Result with checks enabled |
 | --- | --- |
 | GR00T balance | Completed 500 commands over 10 seconds within limits. |
-| Walker | After 5 accepted commands, requested right ankle pitch -0.892688 rad, outside the unchanged -0.87267 rad lower bound. |
+| Walker | Three right ankle pitch proposals were clipped to -0.87267 rad. After 17 accepted commands, the left ankle pitch command gap reached 0.503285 rad, exceeding 0.5 rad. |
 | Stair walker | After 19 accepted commands, requested a left ankle pitch command gap of 0.534488 rad, exceeding 0.5 rad. |
 
 The balance run's largest recorded response error was 0.317639 rad, diagnostic
 only. Temporary rollout outputs were removed. Hardware was not activated.
+The walker previously stopped after five accepted commands on an out-of-range
+position proposal. Clipping removes that rejection, but does not bypass the
+remaining gap and torque checks. Its later gap rejection still ends walking.
 
 ## Earlier walker target-change comparison, October 6, 2026
 

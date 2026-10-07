@@ -40,7 +40,7 @@ class JointDeltaDiagnostics:
         }
 
     def record(self, command, feedback):
-        """Sample proposals before validation, including rejected commands."""
+        """Sample bounded commands before remaining checks, including rejections."""
         for index, ranges in self.joints.items():
             q_proposed, q_measured = command["q"][index], feedback.q[index]
             ranges["command_gap_rad"].record(q_proposed - q_measured)

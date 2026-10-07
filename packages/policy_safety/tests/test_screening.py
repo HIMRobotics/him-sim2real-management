@@ -1,6 +1,7 @@
 """Policy contracts, simulation causality and failure reporting."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from policy_safety.config import (
     suite_config,
 )
 from policy_safety.evaluation import Monitor, run_scenario, summarize_scenarios, verdict
+from policy_safety.joint_rules import JointRules
 from policy_safety.simulation import Simulation, mesh_point_in_body
 
 
@@ -294,7 +296,7 @@ def test_counterfactual_initialization(setup, pose):
     ("value", "status", "reason"),
     [
         (float("nan"), "violation", "nonfinite_or_invalid_action"),
-        (1000, "violation", "decoded_target_out_of_range"),
+        (1000, "violation", "joint_command_gap_limit"),
         (RuntimeError("inference failed"), "error", None),
     ],
 )
@@ -430,7 +432,7 @@ def test_raw_clipping_is_recorded(setup, tmp_path):
         assert trace["applied_target"].size == 0
     assert result["simulated_seconds"] == 0
     assert result["peaks"]["clipping"] > 0
-    assert result["first_violation"]["reason"] == "decoded_target_out_of_range"
+    assert result["first_violation"]["reason"] == "joint_command_gap_limit"
 
 
 def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
@@ -446,6 +448,25 @@ def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
     )
     assert result["first_violation"]["reason"] == "joint_command_gap_limit"
     assert result["status"] == "violation"
+
+
+def test_clipping_is_a_warning_and_trace_records_executed_command(setup, tmp_path, monkeypatch):
+    sim, adapter, profile = setup
+    rules = JointRules(sim.robot["joint_names"])
+    q = sim.data.qpos[sim.qadr].copy()
+    index = rules.sdk_names.index("right_wrist_yaw")
+    bound = q[index] + 0.001
+    rules.entries = [(i, name, replace(limits, position_max_rad=bound)
+                      if i == index else limits) for i, name, limits in rules.entries]
+    q[index] += 0.02
+    monkeypatch.setattr(adapter, "decode", lambda raw: q.copy())
+    result, _ = run_scenario(sim, adapter, profile, scenario(seconds=sim.dt),
+                             tmp_path / "warning.npz", joint_rules=rules)
+    assert result["status"] == "completed"
+    assert result["warnings"]["right_wrist_yaw"]["q_proposed"] == q[index]
+    assert result["warnings"]["right_wrist_yaw"]["q_commanded"] == bound
+    with np.load(tmp_path / "warning.npz") as trace:
+        assert np.all(trace["applied_target"][:, index] == bound)
 
 
 def test_joint_mismatch_rejected_before_actuation(setup, tmp_path):

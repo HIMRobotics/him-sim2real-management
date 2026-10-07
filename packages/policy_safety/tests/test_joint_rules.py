@@ -92,12 +92,34 @@ def test_official_velocity_and_torque_boundaries(rules, sign):
 
 def test_position_initial_and_finite_checks_remain(rules):
     q, dq, tau, measured = (np.zeros(29) for _ in range(4))
-    for value, initial, reason in ((2.8, False, "joint_target_position_limit"),
+    for value, initial, reason in ((2.8, False, "joint_command_gap_limit"),
                                    (0.031, True, "initial_joint_position_mismatch"),
                                    (float("nan"), False, "nonfinite")):
         q[15] = value
         with pytest.raises(ValueError, match=reason):
             rules.check_command(q, dq, tau, measured, initial=initial)
+
+
+@pytest.mark.parametrize("side", ["position_min_rad", "position_max_rad"])
+def test_position_clipping_warns_and_preserves_proposals(rules, side):
+    for i, name, limits in rules.entries:
+        bound = getattr(limits, side)
+        q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+        measured[i] = bound
+        q[i] = bound + (-0.02 if side == "position_min_rad" else 0.02)
+        original = q.copy()
+        warnings = {}
+        clipped = rules.check_command(q, dq, tau, measured, initial=True, warnings=warnings)
+        assert clipped[i] == bound
+        np.testing.assert_array_equal(q, original)
+        assert warnings[name]["q_proposed"] == q[i]
+        assert warnings[name]["q_commanded"] == bound
+        assert warnings[name]["count"] == 1
+        rules.check_command(q, dq, tau, measured, warnings=warnings)
+        assert warnings[name]["count"] == 2
+        measured[i] = bound + (0.501 if side == "position_min_rad" else -0.501)
+        with pytest.raises(JointViolation, match="joint_command_gap_limit"):
+            rules.check_command(q, dq, tau, measured)
 
 
 def test_body_limits_are_per_axis_and_tilt_is_optional():

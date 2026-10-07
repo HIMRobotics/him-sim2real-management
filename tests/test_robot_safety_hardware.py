@@ -722,6 +722,26 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 1)
 
+    def test_clipping_precedes_gap_and_torque_checks_and_sdk_write(self):
+        self.run_first()
+        self.adapter.first_output_secs = self.now - self.adapter.profile.handover_secs
+        q = list(self.adapter.feedback.q)
+        q[16] = 0.98
+        self.adapter.feedback = replace(self.adapter.feedback, q=tuple(q))
+        joints = list(self.adapter.profile.joints)
+        joints[4] = replace(joints[4], max_torque_nm=0.05)
+        self.adapter.profile = replace(self.adapter.profile, joints=tuple(joints))
+        self.command["q"][16] = 1.2
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(self.transport.writes[-1][0][16]["q"], 1.0)
+        self.assertEqual(self.adapter.q_applied[16], 1.0)
+        self.assertEqual(self.adapter.command["q"][16], 1.2)
+        warning = self.adapter.joint_diagnostics_snapshot()["left_shoulder_roll"]["position_clipping"]
+        self.assertEqual(warning["q_proposed"], 1.2)
+        self.assertEqual(warning["q_commanded"], 1.0)
+
     def test_invalid_battery_before_arming_does_not_send_control(self):
         self.adapter.receive_battery(SimpleNamespace(soc=float("nan")))
         self.adapter.stop_once()

@@ -241,12 +241,17 @@ class HardwareMotorGateNode(MotorGateNode):
         payload = {
             "session_id": self.motor_gate.policy_session_id,
             "abort_reason": self.adapter.abort_reason,
-            "scope": "proposed_command_gaps_and_responses_to_prior_full_weight_writes",
+            "scope": "clipped_command_gaps_and_responses_to_prior_full_weight_writes",
             "joints": joints,
         }
         message = String()
         message.data = json.dumps(payload)
         self.joint_diagnostics_publisher.publish(message)
+        for name, values in sampled.items():
+            if "position_clipping" in values:
+                self.get_logger().warning(
+                    f"Joint position clipped {name}: {json.dumps(values['position_clipping'])}"
+                )
         if final:
             for name, values in sampled.items():
                 self.get_logger().info(f"Joint extrema {name}: {json.dumps(values)}")

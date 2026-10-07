@@ -60,6 +60,7 @@ class Runner:
         self.sim_time = 0.0
         self.response_error = None
         self.max_response_error = 0.0
+        self.position_warnings = {}
         self.trace_qpos = []
         self.trace_time = []
         self.record_trace = (
@@ -91,6 +92,7 @@ class Runner:
     def command(self, frame, time):
         if self.reason is not None:
             return self.reason
+        frame = dict(frame) if isinstance(frame, dict) else frame
         reason, detail = self._validate(frame, float(time))
         if reason:
             # Keep the last accepted hold. Dropping it leaves kp at 0, and the
@@ -202,6 +204,7 @@ class Runner:
             "status": status,
             "reason": self.reason,
             "detail": self.detail,
+            "warnings": self.position_warnings.copy(),
             "response_error_rad": {"last": self.response_error, "max_abs": self.max_response_error},
             "commands": self.commands,
             "steps": self.steps,
@@ -359,12 +362,13 @@ class Runner:
         if not self.safety_checks:
             return None, None
         try:
-            self.rules.check_command(
+            arrays["q"] = self.rules.check_command(
                 arrays["q"],
                 arrays["dq"],
                 arrays["tau"],
                 measured,
                 initial=self.active is None,
+                warnings=self.position_warnings,
             )
             demand = self.plant.demand(
                 arrays["q"],
@@ -382,4 +386,5 @@ class Runner:
             return exc.args[0], exc.details
         except ValueError as exc:
             return exc.args[0] if exc.args else "invalid_command", None
+        frame["q"] = arrays["q"]
         return None, None

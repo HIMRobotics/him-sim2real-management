@@ -29,8 +29,9 @@ following the official upper-body example. Indices 12–28 contain waist and arm
 targets. Index 29 carries ownership weight. Legs are not controlled through this
 adapter. Whole-body policy control through `rt/lowcmd` is not implemented.
 Upper-body ownership ramps from zero to one with a smooth cubic curve. Commands
-use the profile gains and validated feedforward torque. Each proposal must be
-within the joint position bounds and 0.5 rad of the current measured position.
+use the profile gains and validated feedforward torque. Proposals are clipped to
+joint-position bounds with warnings in `/safety/joint_diagnostics` and ROS logs.
+The clipped command must be within 0.5 rad of the current measured position.
 Total PD plus feedforward torque and desired speed must satisfy per-joint bounds.
 Initial alignment and stationary-start checks remain enabled.
 

@@ -46,6 +46,25 @@ def check_bound(reason, joint, value, limit, units):
         raise JointViolation(reason, joint, value, limit, units)
 
 
+def clip_position(joint, q_proposed, lower, upper, warnings=None):
+    """Bound a finite proposal and summarize clipping per joint."""
+    if not math.isfinite(q_proposed):
+        raise ValueError("nonfinite_or_invalid_joint_command")
+    q_commanded = max(lower, min(upper, q_proposed))
+    if q_commanded != q_proposed and warnings is not None:
+        previous = warnings.get(joint, {})
+        warnings[joint] = {
+            "reason": "joint_position_clipped",
+            "q_proposed": float(q_proposed),
+            "q_commanded": float(q_commanded),
+            "bounds_rad": [float(lower), float(upper)],
+            "count": previous.get("count", 0) + 1,
+            "max_correction_rad": max(previous.get("max_correction_rad", 0),
+                                      abs(float(q_proposed - q_commanded))),
+        }
+    return q_commanded
+
+
 BASE_ANGULAR_SPEED_LIMIT_RAD_S = 6.0
 BASE_TILT_LIMIT_RAD = 1.0
 MOTOR_WINDING_LIMIT_C = 120.0
@@ -84,18 +103,17 @@ def check_measured_velocity(joint, limits, measured_dq):
 
 def check_command(
     joint, limits, q_proposed, dq_proposed, tau, q_measured,
-    initial, initial_position, initial_velocity,
+    initial, initial_position, initial_velocity, warnings=None,
 ):
     """Validate a proposal against current measurements before actuation."""
     if not all(math.isfinite(v) for v in (q_proposed, dq_proposed, tau, q_measured)):
         raise ValueError("nonfinite_or_invalid_joint_command")
-    if not limits.position_min_rad <= q_proposed <= limits.position_max_rad:
-        raise JointViolation("joint_target_position_limit", joint, q_proposed,
-                             [limits.position_min_rad, limits.position_max_rad], "rad")
+    q_commanded = clip_position(joint, q_proposed, limits.position_min_rad,
+                               limits.position_max_rad, warnings)
     check_bound("joint_target_velocity_limit", joint, abs(dq_proposed),
                 limits.max_velocity_rad_secs, "rad/s")
     check_bound("joint_feedforward_torque_limit", joint, abs(tau), limits.max_torque_nm, "Nm")
-    command_gap = q_proposed - q_measured
+    command_gap = q_commanded - q_measured
     check_bound("joint_command_gap_limit", joint, abs(command_gap),
                 limits.max_command_gap_rad, "rad")
     if initial:
@@ -103,6 +121,7 @@ def check_command(
                     initial_position, "rad")
         check_bound("initial_joint_target_velocity_limit", joint, abs(dq_proposed),
                     initial_velocity, "rad/s")
+    return q_commanded
 
 
 def check_torque(joint, limits, torque):

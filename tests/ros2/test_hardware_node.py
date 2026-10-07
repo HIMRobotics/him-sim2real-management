@@ -53,6 +53,15 @@ class HardwareNodeTests(unittest.TestCase):
         diagnostics.record_response({16: 0.05}, feedback)
         HardwareMotorGateNode.publish_joint_diagnostics(node)
         self.assertIn("largest=left_shoulder_roll", node.get_logger().info.call_args[0][0])
+        snapshot = diagnostics.snapshot()
+        warning = {"reason": "joint_position_clipped", "q_proposed": 1.2,
+                   "q_commanded": 1.0, "count": 1}
+        snapshot["left_shoulder_roll"]["position_clipping"] = warning
+        node.adapter.joint_diagnostics_snapshot = lambda: snapshot
+        HardwareMotorGateNode.publish_joint_diagnostics(node)
+        payload = json.loads(node.joint_diagnostics_publisher.publish.call_args[0][0].data)
+        self.assertEqual(payload["joints"]["left_shoulder_roll"]["position_clipping"], warning)
+        self.assertIn("Joint position clipped left_shoulder_roll", node.get_logger().warning.call_args[0][0])
 
     def test_startup_ready_requires_warmup_telemetry_and_live_workers(self):
         adapter = SimpleNamespace(

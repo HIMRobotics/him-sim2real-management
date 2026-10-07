@@ -8,6 +8,7 @@ from joint_checks import (
     check_command,
     check_measured_velocity,
     check_torque,
+    clip_position,
 )
 
 from .adapter import PolicyViolation
@@ -49,7 +50,7 @@ class JointRules:
             "uncovered_joints": [name for name in self.names if name not in covered],
             "profile_values": self.profile,
             "rules": [
-                "target_position",
+                "position_clipping_with_warning",
                 "target_velocity",
                 "command_gap",
                 "initial_target_mismatch",
@@ -57,17 +58,33 @@ class JointRules:
                 "feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Before actuation: compare proposed position with current measured position, enforce position, speed and torque limits. Response error is measured minus applied command after the interval, diagnostic only. No consecutive-command delta limit.",
+            "semantics": "Before actuation: clip proposed position to bounds with a warning, compare the clipped command with current measured position, and enforce speed and torque limits. Response error is measured minus applied command after the interval, diagnostic only. No consecutive-command delta limit.",
         }
 
-    def check_command(self, q_proposed, velocity, torque, q_measured, *, initial=False):
+    def clip_positions(self, q_proposed, warnings=None, bounds=None):
+        """Clip to profile bounds, intersected with model bounds when supplied."""
+        q_commanded = np.asarray(q_proposed, dtype=float).copy()
+        if q_commanded.shape != (len(self.names),) or not np.isfinite(q_commanded).all():
+            raise PolicyViolation("nonfinite_or_invalid_joint_command")
+        for i, name, limits in self.entries:
+            lower, upper = limits.position_min_rad, limits.position_max_rad
+            if bounds is not None:
+                lower, upper = max(lower, bounds[i, 0]), min(upper, bounds[i, 1])
+                if lower > upper:
+                    raise ValueError(f"disjoint position bounds: {name}")
+            q_commanded[i] = clip_position(name, q_commanded[i], lower, upper, warnings)
+        return q_commanded
+
+    def check_command(self, q_proposed, velocity, torque, q_measured, *, initial=False, warnings=None):
         for values in (q_proposed, velocity, torque, q_measured):
             if np.asarray(values).shape != (len(self.names),) or not np.isfinite(values).all():
                 raise PolicyViolation("nonfinite_or_invalid_joint_command")
+        q_commanded = self.clip_positions(q_proposed, warnings)
         for i, name, limits in self.entries:
-            check_command(name, limits, q_proposed[i], velocity[i], torque[i], q_measured[i],
+            check_command(name, limits, q_commanded[i], velocity[i], torque[i], q_measured[i],
                           initial, self.profile["initial_position_tolerance_rad"],
                           self.profile["initial_velocity_tolerance_rad_secs"])
+        return q_commanded
 
     def check_measured_velocity(self, measured_dq):
         for i, name, limits in self.entries:

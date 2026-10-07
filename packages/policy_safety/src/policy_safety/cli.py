@@ -191,7 +191,7 @@ def main(argv=None):
         command.add_argument(
             "--clip-to-stops",
             action="store_true",
-            help="command the clipped stop instead of rejecting a target past it",
+            help="compatibility flag, position clipping with warnings is always enabled",
         )
     evaluate.add_argument("--suite", type=Path)
     evaluate.add_argument("--output", required=True, type=Path)
