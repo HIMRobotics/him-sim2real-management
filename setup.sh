@@ -142,6 +142,7 @@ launch_node() {
 launch_node checker -p "thrash.mode:=$thrash"
 launch_node controller_stop -p startup_timeout_secs:=5.0
 launch_node feedback -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}" \
+  -p "hardware_profile_path:=$profile" \
   -p publish_policy_state:=true -p "require_base_state:=${G1_REQUIRE_BASE_STATE:-true}" \
   -p "base_state_topic:=${G1_BASE_STATE_TOPIC:-}" -p "base_velocity_frame:=${G1_BASE_VELOCITY_FRAME:-}"
 dry_run=false

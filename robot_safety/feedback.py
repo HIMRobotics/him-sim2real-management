@@ -74,7 +74,8 @@ def base_state_from_sdk(message, received_at_secs, velocity_frame, quat):
             or not all(math.isfinite(v) for v in position + velocity + (source_time,))):
         raise ValueError("invalid_base_state")
     if velocity_frame == "body":
-        if len(quat) != 4 or abs(sum(v * v for v in quat) - 1) > 0.01:
+        if (len(quat) != 4 or not all(math.isfinite(v) for v in quat)
+                or abs(sum(v * v for v in quat) - 1) > 0.01):
             raise ValueError("invalid_base_orientation")
         w, x, y, z = quat
         vx, vy, vz = velocity

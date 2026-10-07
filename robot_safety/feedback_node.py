@@ -14,6 +14,7 @@ from .feedback import (
     policy_state,
 )
 from .hardware_constants import LOW_STATE_TOPIC, NUM_JOINTS
+from .hardware_profile import HardwareProfile
 from .ros_nodes import SafetyNode
 
 
@@ -43,6 +44,8 @@ class RobotFeedbackNode(SafetyNode):
         self.base_topic = self.declare_parameter("base_state_topic", "").value
         self.base_frame = self.declare_parameter("base_velocity_frame", "").value
         self.require_base = self.declare_parameter("require_base_state", False).value
+        profile_path = self.declare_parameter("hardware_profile_path", "").value
+        self.profile = HardwareProfile.load(profile_path) if profile_path else None
         if self.require_base and (not self.base_topic or self.base_frame not in ("world", "body")):
             raise ValueError("required base state needs an explicit SDK topic and velocity frame")
         self.policy_publisher = self.create_publisher(String, "/safety/policy_state", self.feedback_qos)
@@ -90,6 +93,10 @@ class RobotFeedbackNode(SafetyNode):
             return
         try:
             state = policy_state(sample, message.observation_id, self.host_boot_id)
+            if self.profile:
+                joints = self.profile.legs + self.profile.joints
+                state["ctrl_low"] = [joint.position_min_rad for joint in joints]
+                state["ctrl_high"] = [joint.position_max_rad for joint in joints]
             base = self.base
             if base and 0 <= time.monotonic() - base["base_received_at_secs"] < self.config.robot_timeout:
                 state.update(base)
