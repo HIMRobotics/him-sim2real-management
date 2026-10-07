@@ -1,9 +1,11 @@
 """ROS 2 command checking, controller-stop detection and motor-gate roles."""
 
 import argparse
+import json
 import math
 import signal
 import time
+from dataclasses import fields, replace
 from pathlib import Path
 
 import rclpy
@@ -20,10 +22,11 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
 from . import ros_topics as topics
-from .config import COMMAND_FIELDS, Config
+from .config import COMMAND_FIELDS, Config, ThrashConfig
 from .controller import StartDoublePressDetector
 from .core import Supervisor, SupervisorPhase
 from .motor_gate import MotorCommandGate
+from .thrash import default_regions
 
 
 def command_from_ros(message):
@@ -102,7 +105,18 @@ class SafetyCheckerNode(SafetyNode):
 
     def __init__(self):
         super().__init__("safety_checker")
+        settings = {}
+        for field in fields(ThrashConfig):
+            default = field.default
+            if field.name == "velocity_scales":
+                default = [1.0] * self.config.joints
+            elif field.name == "regions":
+                default = list(default_regions(self.config.joints))
+            value = self.declare_parameter(f"thrash.{field.name}", default).value
+            settings[field.name] = tuple(value) if isinstance(default, list) else value
+        self.config = replace(self.config, thrash=ThrashConfig(**settings))
         self.supervisor = Supervisor(self.config)
+        self.thrash_event_logged = False
         self.postcheck_publisher = self.create_publisher(
             CheckedCommand, topics.POSTCHECK_COMMAND, self.command_qos
         )
@@ -172,6 +186,14 @@ class SafetyCheckerNode(SafetyNode):
         self.check_fault()
 
     def check_fault(self):
+        if self.supervisor.thrash_event is None:
+            self.thrash_event_logged = False
+        elif not self.thrash_event_logged:
+            self.get_logger().warning(
+                f"Thrash detection ({self.config.thrash.mode}): "
+                f"{json.dumps(self.supervisor.thrash_event)}"
+            )
+            self.thrash_event_logged = True
         if self.supervisor.supervisor_phase == SupervisorPhase.STOP_LATCHED:
             self.latch_abort(self.supervisor.stop_reason)
 

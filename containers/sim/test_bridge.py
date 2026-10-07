@@ -29,7 +29,7 @@ def load_bridge():
     modules["rclpy.node"].Node = object
     for name in ("DurabilityPolicy", "QoSProfile", "ReliabilityPolicy"):
         setattr(modules["rclpy.qos"], name, Mock())
-    for name in ("Abort", "JointCommand", "RobotFeedback"):
+    for name in ("Abort", "CheckedCommand", "JointCommand", "RobotFeedback"):
         setattr(modules["him_safety_interfaces.msg"], name, types.SimpleNamespace)
     modules["std_msgs.msg"].String = types.SimpleNamespace
     modules["std_srvs.srv"].Trigger = object
@@ -47,6 +47,8 @@ class BridgeTests(unittest.TestCase):
         bridge = load_bridge()
         node = bridge.SimBridge.__new__(bridge.SimBridge)
         node.finished = False
+        node.motor_gate = None
+        node.checker = None
         node.created = 1.0
         node.run_started = 1.0
         node.seconds = 10.0
@@ -137,6 +139,7 @@ class BridgeTests(unittest.TestCase):
         bridge = load_bridge()
         node = bridge.SimBridge.__new__(bridge.SimBridge)
         node.clock = lambda: 0.0
+        node.checker = None
         node.feedback_pub, node.observation_pub, node.sim_state_pub = (
             Mock(),
             Mock(),
@@ -176,6 +179,7 @@ class BridgeTests(unittest.TestCase):
         node = bridge.SimBridge.__new__(bridge.SimBridge)
         node.finished = False
         node.lowstate = Mock(ok=False)
+        node.checker = None
         node.plant = Mock()
         node.plant.call.return_value = {"status": "completed", "commands": 3}
         with tempfile.TemporaryDirectory() as tmp:

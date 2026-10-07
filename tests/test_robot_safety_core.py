@@ -1,5 +1,6 @@
 """Deterministic tests without SDK imports or robot communication."""
 
+import math
 import sys
 import unittest
 from dataclasses import replace
@@ -7,8 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from robot_safety.config import JointCommandLimits
+from robot_safety.config import JointCommandLimits, ThrashConfig
 from robot_safety.core import Config, Supervisor
+from robot_safety.thrash import ThrashDetector
 
 
 class SupervisorTests(unittest.TestCase):
@@ -21,6 +23,15 @@ class SupervisorTests(unittest.TestCase):
         message["q"][0] = 0.100001
         self.assertFalse(supervisor.accept(message, 0.02))
         self.assertEqual(supervisor.stop_reason, "invalid_action")
+        detail = supervisor.status(0.02)["fault_detail"]
+        self.assertEqual(detail["joint_index"], 0)
+        self.assertEqual(detail["field"], "q")
+        self.assertEqual(detail["value"], 0.100001)
+        self.assertEqual(detail["bounds"], [-0.1, 0.1])
+        supervisor.stop("later_fault", 0.03, {"joint_index": 1})
+        self.assertEqual(supervisor.status(0.03)["fault_detail"], detail)
+        supervisor.control("reset", 0.04)
+        self.assertIsNone(supervisor.stop_detail)
 
     def test_invalid_limit_configuration_is_rejected(self):
         for bounds in ((1.0, -1.0), (0.0, float("inf")), (False, 1.0), [0.0, 1.0]):
@@ -231,6 +242,176 @@ class SupervisorTests(unittest.TestCase):
         status["output"]["kd"][0] = 99.0
         self.assertEqual(supervisor.latest_robot_observation["q"][0], 0.0)
         self.assertEqual(supervisor.last_selected_command["kd"][0], 1.0)
+
+
+class ThrashTests(unittest.TestCase):
+    def detector(self, joints=1, **settings):
+        return ThrashDetector(ThrashConfig(**settings), joints, 0.2)
+
+    def sine(self, detector, amplitude, frequency, duration=3.0, dt=0.005):
+        detections = []
+        for i in range(round(duration / dt) + 1):
+            now = i * dt
+            velocity = amplitude * 2 * math.pi * frequency * math.cos(2 * math.pi * frequency * now)
+            reason = detector.update([velocity] * detector.joints, now)
+            if reason:
+                detections.append((now, reason))
+        return detections
+
+    def test_regular_single_joint_instability_still_triggers(self):
+        detector = self.detector()
+        detections = self.sine(detector, 0.12, 8)
+        self.assertTrue(detections)
+        self.assertEqual(detections[0][1], "thrashing_severe")
+        self.assertLess(detections[0][0], 1.0)
+        self.assertLess(detector.metrics["irregularity_cv"][0], 0.01)
+
+    def test_local_and_distributed_detection(self):
+        for regions, reason in (
+            ((0, 0), "thrashing_local"),
+            ((0, 1, 2), "thrashing_distributed"),
+            ((0, 1), None),
+        ):
+            with self.subTest(regions=regions):
+                detections = self.sine(self.detector(len(regions), regions=regions), 0.07, 8)
+                self.assertEqual(detections[0][1] if detections else None, reason)
+
+    def test_regular_motion_inside_configured_envelope(self):
+        detector = self.detector(29, velocity_scales=(2.0,) * 29)
+        self.assertFalse(self.sine(detector, 0.4, 2))
+
+    def test_scaling_changes_the_envelope(self):
+        self.assertFalse(self.sine(self.detector(velocity_scales=(10.0,)), 0.12, 8))
+        self.assertTrue(self.sine(self.detector(velocity_scales=(1.0,)), 0.12, 8))
+
+    def test_irregular_motion_below_filtered_threshold(self):
+        periods = [0.3, 0.7, 0.4, 0.6, 0.25, 0.75]
+        for joints, speed, reason in ((2, 3, "thrashing_local"), (1, 4, "thrashing_severe")):
+            detector = self.detector(joints, regions=(0,) * joints, activity_rms=1.5)
+            detected = False
+            for i in range(601):
+                now = i * 0.005
+                phase = now
+                for period in periods:
+                    if phase < period:
+                        break
+                    phase -= period
+                velocity = speed * math.sin(2 * math.pi * phase / period)
+                result = detector.update([velocity] * joints, now)
+                if result:
+                    self.assertEqual(result, reason)
+                    self.assertLess(max(detector.metrics["oscillatory_rms"]), 1.5)
+                    self.assertGreater(max(detector.metrics["irregularity_cv"]), 0.35)
+                    detected = True
+                    break
+            self.assertTrue(detected)
+
+    def test_asymmetric_repeated_strokes_are_not_irregular(self):
+        detector = self.detector(2, regions=(0, 0), slow_cutoff_hz=10.0)
+        for i in range(1201):
+            now = i * 0.005
+            phase = now % 0.5
+            velocity = (
+                2 * math.sin(math.pi * phase / 0.15) if phase < 0.15
+                else -2 * 0.15 / 0.35 * math.sin(math.pi * (phase - 0.15) / 0.35)
+            )
+            self.assertIsNone(detector.update([velocity] * 2, now))
+        self.assertLess(max(detector.metrics["irregularity_cv"]), 0.01)
+
+    def test_noise_single_impulse_and_short_burst_do_not_trigger(self):
+        signals = (
+            lambda t: 0.03 * math.sin(130 * t),
+            lambda t: 15.0 if 0.1 <= t < 0.13 else 0.0,
+            lambda t: 8 * math.sin(2 * math.pi * 8 * t) if t < 0.15 else 0.0,
+        )
+        for signal in signals:
+            detector = self.detector(29)
+            for i in range(401):
+                now = i * 0.005
+                self.assertIsNone(detector.update([signal(now)] * 29, now))
+
+    def test_evidence_decays_and_gaps_clear_history(self):
+        detector = self.detector()
+        self.assertTrue(self.sine(detector, 0.12, 8))
+        for i in range(1, 601):
+            detector.update([0.0], 3.0 + i * 0.005)
+        self.assertEqual(detector.evidence, [0.0])
+        self.assertEqual(detector.severe_evidence, [0.0])
+        self.assertFalse(detector.motion_cycles[0].cycles)
+        self.assertIsNone(detector.update([5.0], 7.0))
+        self.assertEqual(detector.metrics, {})
+        self.assertEqual(detector.evidence, [0.0])
+
+    def test_duplicate_samples_do_not_accumulate_evidence(self):
+        detector = self.detector()
+        self.sine(detector, 0.12, 8, duration=0.5)
+        before = list(detector.evidence)
+        for i in range(200):
+            detector.update([(-1) ** i * 10.0], 0.5)
+        self.assertEqual(detector.evidence, before)
+
+    def test_sample_rate_variation(self):
+        for dt in (0.002, 0.005, 0.01):
+            with self.subTest(dt=dt):
+                self.assertTrue(self.sine(self.detector(), 0.12, 8, dt=dt))
+
+    def test_invalid_settings(self):
+        for settings in (
+            {"mode": "auto"}, {"min_cycles": 1}, {"min_cycles": 7},
+            {"local_joints": 1.5}, {"averaging_secs": float("nan")},
+            {"persistence_secs": 0.0}, {"fast_cutoff_hz": 3.0},
+            {"severe_rms": 0.5}, {"velocity_scales": (0.0,)},
+            {"regions": (-1,)},
+        ):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                ThrashConfig(**settings)
+        with self.assertRaises(ValueError):
+            Config(joints=2, thrash=ThrashConfig(velocity_scales=(1.0,)))
+
+    def test_monitor_enforce_off_and_session_reset(self):
+        for mode in ("monitor", "enforce", "off"):
+            with self.subTest(mode=mode):
+                supervisor = Supervisor(Config(
+                    joints=1, thrash=ThrashConfig(mode=mode),
+                ))
+                supervisor.state({"q": [0.0], "dq": [0.0]}, False, 0.0)
+                self.assertNotIn("error", supervisor.control("arm", 0.0))
+                for i in range(1, 301):
+                    now = i * 0.005
+                    phase = 2 * math.pi * 8 * now
+                    supervisor.state({
+                        "q": [0.12 * math.sin(phase)],
+                        "dq": [0.12 * 2 * math.pi * 8 * math.cos(phase)],
+                    }, False, now)
+                    command = {
+                        "session": supervisor.policy_session_id, "seq": i,
+                        "state_id": supervisor.latest_observation_id,
+                        "q": [0.0], "dq": [0.0], "kp": [1.0], "kd": [1.0], "tau": [0.0],
+                    }
+                    accepted = supervisor.accept(command, now)
+                    output = supervisor.cycle(now)
+                    if supervisor.stop_reason:
+                        self.assertFalse(accepted)
+                        self.assertEqual(output["kind"], "damping")
+                        break
+                    self.assertTrue(accepted)
+                    self.assertEqual(output["kind"], "policy")
+                if mode == "enforce":
+                    self.assertEqual(supervisor.stop_reason, "thrashing_severe")
+                    self.assertFalse(supervisor.accept(command, now + 0.001))
+                    self.assertNotIn("error", supervisor.control("reset", now + 0.001))
+                    self.assertIsNone(supervisor.thrash_event)
+                    self.assertEqual(supervisor.thrash_detector.metrics, {})
+                    self.assertNotIn("error", supervisor.control("arm", now + 0.002))
+                elif mode == "monitor":
+                    self.assertIsNone(supervisor.stop_reason)
+                    self.assertEqual(supervisor.thrash_event["reason"], "thrashing_severe")
+                    snapshot = supervisor.status(now)
+                    snapshot["thrash_event"]["joint_indices"].clear()
+                    self.assertEqual(supervisor.thrash_event["joint_indices"], [0])
+                else:
+                    self.assertIsNone(supervisor.stop_reason)
+                    self.assertIsNone(supervisor.thrash_event)
 
 
 if __name__ == "__main__":

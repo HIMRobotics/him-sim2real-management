@@ -469,19 +469,15 @@ def test_clipping_is_a_warning_and_trace_records_executed_command(setup, tmp_pat
         assert np.all(trace["applied_target"][:, index] == bound)
 
 
-def test_joint_mismatch_rejected_before_actuation(setup, tmp_path):
+def test_initial_pose_gap_does_not_stop_simulation(setup, tmp_path):
     sim, adapter, profile = setup
     sim.data.ctrl[sim.actuators[15]] += 0.031
-    before = sim.data.ctrl.copy()
     result, _ = run_scenario(
         sim, adapter, profile, scenario(), tmp_path / "mismatch.npz"
     )
-    assert result["status"] == "violation"
-    assert result["first_violation"]["reason"] == "initial_joint_position_mismatch"
-    assert result["first_violation"]["joint"] == "left_shoulder_pitch"
-    assert result["first_violation"]["limit"] == 0.03
-    assert result["simulated_seconds"] == 0
-    np.testing.assert_array_equal(before, sim.data.ctrl)
+    assert result["status"] == "completed"
+    assert result["first_violation"] is None
+    assert result["simulated_seconds"] > 0
 
 
 @pytest.mark.parametrize("joint", [0, 15])

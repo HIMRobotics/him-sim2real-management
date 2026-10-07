@@ -78,6 +78,28 @@ damping, so finish hardware tests with the robot supported before removal.
 See the [manual arm-raise guide](../tests/manual/README.md) to verify this
 background gate through a policy run without starting a second motor gate.
 
+## Shared simulation decisions
+
+`core.action_error` and `core.watchdog_reason` are used by both the ROS
+supervisor and the local simulation runner. `Config` supplies their joint
+sanity bounds, observation history size and watchdog defaults. Protocol fault
+labels remain compatible with each interface (`invalid_action` in ROS and a
+specific rejection in local reports).
+
+`joint_checks.checked_targets` is the common command processor for the hardware
+adapter and checked MuJoCo submissions. It clips positions, selects profile
+gains, and bounds target velocity, feedforward effort
+and PD torque demand. The output is the processed command used for actuation.
+The hardware adapter selects its upper-body subset after checking all joints.
+Shared profile parsing and torque arithmetic also serve the portable policy
+checker, whose offline experiments retain their explicitly configured model
+gains and perturbations.
+
+Both gateways revoke policy output on a latched fault. Simulation damping and
+the hardware hold/damp/balance procedures remain adapter responsibilities, as
+do physics, SDK transport, battery and temperature checks. No second safety
+module or simulation-specific set of thresholds is introduced.
+
 ## Node responsibilities
 
 - `SafetyCheckerNode`: callback-driven validation of whole precheck frames using the existing core. One invalid joint latches the fuse, prevents all later relaying, and publishes abort immediately then every 100 ms. Each valid frame is relayed once, never replayed as a heartbeat.
@@ -85,6 +107,66 @@ background gate through a policy run without starting a second motor gate.
 - `ControllerStopNode`: observes physical Start, detects a double press and publishes abort directly to both nodes. It also aborts on stale feedback. Fresh DDS data does not prove a live radio link.
 
 The core remains the ROS-independent checker logic. `motor_gate.py` contains the independently testable final-gate logic. The earlier `runtime.py` is retained as an in-process test/reference implementation, not the scheduler used by these ROS nodes. ROS executors run callbacks and timers. Run roles as separate OS processes in deployment to avoid a checker freeze freezing the gate too.
+
+## Thrash detection in the existing checker
+
+`SafetyCheckerNode` uses measured `/safety/robot_feedback` velocities to update
+the supervisor's thrash detector while armed or running. Commands still follow
+`/safety/precheck` → checker → `/safety/postcheck` → motor gate. There is no new
+node, command publisher or message type. This does not add detection to the
+standalone hardware watchdog when the checker is absent.
+
+The default `thrash.mode=monitor` records the first detection per session in the
+checker log and supervisor status without blocking commands. With
+`thrash.mode=enforce`, detection latches the supervisor stop, prevents subsequent
+postcheck relays, and publishes the existing `/safety/abort` message. The motor
+gate then uses its existing stop/output handling. Previously delivered commands
+remain subject to abort delivery and their existing expiry deadlines. `off`
+disables this detector only. Existing watchdogs and checks remain active.
+
+The detector uses fast/slow velocity filters, exponentially averaged squared
+activity, substantial direction reversals, local and distributed body-region
+checks, and evidence that rises during suspicious motion and decays twice as
+fast otherwise. Severe single-joint activity can trigger independently. Moderate
+activity requires two joints in one region or three across at least two regions.
+Timing or amplitude variation across complete cycles increases suspicion when
+activity is elevated, including slower irregular motion. Regular severe
+oscillation still triggers. Startup partial cycles are discarded. Evidence uses
+receipt timestamps, ignores duplicates and resets after telemetry gaps or a new
+session. Supervisor freshness checks independently reject stale input.
+
+All `ThrashConfig` fields in `config.py` are startup ROS parameters prefixed with
+`thrash.`. Defaults are provisional: 4/25 Hz filters, 150 ms averaging, 200 ms
+evidence, at least three cycles in a two-second history, and up to six retained
+cycles per joint. Cycle estimation adds latency beyond the evidence duration.
+Telemetry must sample the motion sufficiently quickly to resolve its reversals.
+
+`thrash.velocity_scales` is a positive array in SDK joint order, with one scale
+per joint in rad/s. Filtered and total RMS velocities are divided by these
+scales before comparison with `activity_rms` (1.0) and `severe_rms` (2.5).
+The default scales are all 1.0, not validated task envelopes. `thrash.regions`
+defaults to left leg, right leg, waist, left arm and right arm for the 29-joint
+G1. Other joint counts default to a separate region per joint. Configure scales
+and regions independently of policy commands and calibrate them against the
+intended tasks. The detector cannot infer intent or guarantee discrimination
+between allowed running/table-tennis motion and faults with the same telemetry.
+
+For an isolated dry-run graph, select enforcement on the existing checker with:
+
+```bash
+ros2 run him_safety_nodes safety_node checker --ros-args -p thrash.mode:=enforce
+```
+
+This command does not launch or arm a motor gate. Use monitoring and replay
+evaluation to choose task settings before hardware enforcement. Tests cover
+synthetic oscillation, irregularity, transient rejection and gateway abort
+propagation, not physical detection rates or stopping performance.
+
+The simulator reuses this detector too. Safety-enabled ROS simulation runs this
+same checker and routes postcheck commands through `MotorCommandGate` to MuJoCo.
+The ROS-free local runner calls the same detector with physics timestamps and
+uses its existing latch/output path. Select `--thrash-mode monitor|enforce|off`
+with `./sim.sh`. See [simulation wiring and calibration notes](../containers/SIM_RUN.md#shared-thrash-detection).
 
 ## Topics and services
 

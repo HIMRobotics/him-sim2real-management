@@ -12,15 +12,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("entry", ["sim.sh", "desktop_sim.sh"])
-def test_local_example_without_docker_or_live_writes(tmp_path, entry):
+@pytest.mark.parametrize("mode", [None, "monitor", "enforce"])
+def test_local_example_without_docker_or_live_writes(tmp_path, entry, mode):
     result = subprocess.run(
         [str(ROOT / entry), "--local", "--example", "walker", "--seconds", "0.1",
-         "--no-safety-checks", "--output", str(tmp_path)],
+         "--no-safety-checks", "--output", str(tmp_path)]
+        + (["--thrash-mode", mode] if mode else []),
         env=dict(os.environ, G1_SIM_PYTHON=sys.executable, CONTAINER_RUNTIME="missing-docker"),
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads((tmp_path / "report.json").read_text())["execution"] == "local"
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["execution"] == "local"
+    assert report["thrash"]["mode"] == (mode or "off")
+    assert report["checks"]["thrash_monitoring"] == (mode is not None)
     assert (tmp_path / "trace.npz").is_file()
     assert not (tmp_path / "live.jsonl").exists()
 

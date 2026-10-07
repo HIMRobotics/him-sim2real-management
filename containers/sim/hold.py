@@ -8,7 +8,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
-FEEDBACK = "/safety/robot_feedback"
+FEEDBACK = "/safety/policy_observation"
 PRECHECK = "/safety/precheck"
 ABORT = "/safety/abort"
 ARM = "/safety/checker/arm"

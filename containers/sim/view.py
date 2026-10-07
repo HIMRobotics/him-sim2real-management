@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "robot_safety"))
 
+from hardware_constants import G1_29_JOINT_NAMES
 from plant import load_model
 from viewer_assets import install
 
@@ -21,17 +22,48 @@ PAGE = """<!DOCTYPE html>
 <title>G1 sim replay</title>
 <style>
   html, body { margin: 0; height: 100%; background: #f4f4f4; overflow: hidden; }
-  #hud { position: absolute; left: 12px; top: 12px; font: 14px sans-serif; color: #222; }
+  #hud { position: absolute; left: 12px; top: 12px; max-width: calc(54vw - 50px);
+    font: 14px sans-serif; color: #222; }
   #start {
     position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
     font: 600 18px sans-serif; padding: 12px 28px; border: 0; border-radius: 8px;
     background: #1a1a1a; color: #fff; cursor: pointer;
   }
   #start:disabled { background: #888; cursor: default; }
+  #thrash { position: absolute; right: 12px; top: 12px; width: min(450px, 46vw);
+    background: #fffffff0; border: 1px solid #d7dce0; border-radius: 10px;
+    padding: 14px; font: 13px system-ui, sans-serif; color: #263238; }
+  #thrash h2 { margin: 0 0 8px; font-size: 17px; }
+  #thrash-status { font-weight: 600; margin-bottom: 8px; }
+  #thrash-peak { font-size: 19px; font-variant-numeric: tabular-nums; margin: 8px 0; }
+  #thrash small { display: block; line-height: 1.5; margin-top: 8px; }
+  .joint-readings { max-height: 245px; overflow: auto; }
+  #thrash table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  #thrash th, #thrash td { padding: 5px 3px; text-align: right; border-bottom: 1px solid #eee; }
+  #thrash th { position: sticky; top: 0; background: #fff; font-size: 11px; }
+  #thrash th:first-child, #thrash td:first-child { text-align: left; }
+  #thrash tr.flagged { background: #fff0da; }
+  #stop { position: absolute; left: 12px; bottom: 18px; max-width: min(670px, 75vw);
+    background: #fff4eeed; border-left: 5px solid #b54a22; border-radius: 6px;
+    padding: 12px 16px; font: 14px system-ui, sans-serif; white-space: pre-line; color: #682811; }
 </style>
 </head>
 <body>
 <div id="hud">loading</div>
+<div id="stop" role="status" hidden></div>
+<aside id="thrash">
+  <h2>Thrash readings</h2>
+  <div id="thrash-status">Waiting for telemetry</div>
+  <div id="thrash-peak"></div>
+  <div class="joint-readings"><table>
+    <thead><tr><th>Joint</th><th>Osc. RMS</th><th>Motion RMS</th><th>CV</th><th>Evidence ms<br>normal / severe</th></tr></thead>
+    <tbody id="thrash-joints"></tbody>
+  </table></div>
+  <small id="thrash-thresholds"></small>
+  <small id="thrash-event"></small>
+  <small>RMS is normalized by each joint's velocity scale. CV measures cycle irregularity.
+  These are motion indicators, not a probability of thrashing. Space pauses, arrows step frames.</small>
+</aside>
 <script type="importmap">
 { "imports": { "three": "./three.module.js" } }
 </script>
@@ -42,6 +74,59 @@ import { STLLoader } from "./STLLoader.js";
 
 const motion = await (await fetch("motion.json")).json();
 const hud = document.getElementById("hud");
+motion.thrash ||= [];
+motion.stop ||= [];
+function showStop(index) {
+  const stop = motion.stop[index] || motion.run_stop;
+  const panel = document.getElementById("stop");
+  panel.hidden = !stop;
+  if (!stop) return;
+  const before = stop.time_secs != null && motion.time[index] < stop.time_secs;
+  panel.textContent = stop.description + (before ? `\nThis frame precedes the stop.` : "");
+}
+const readings = document.getElementById("thrash-joints");
+const thrashRows = (motion.joint_names || []).map(() => {
+  const row = readings.insertRow();
+  for (let i = 0; i < 5; i++) row.insertCell();
+  return row;
+});
+function showThrash(index) {
+  const sample = motion.thrash[index];
+  const status = document.getElementById("thrash-status");
+  const peak = document.getElementById("thrash-peak");
+  const thresholds = document.getElementById("thrash-thresholds");
+  const event = document.getElementById("thrash-event");
+  const metrics = sample?.metrics || {};
+  const available = sample?.mode !== "off" && metrics.oscillatory_rms?.length;
+  thrashRows.forEach(row => { row.hidden = !available; });
+  peak.textContent = "";
+  thresholds.textContent = "";
+  event.textContent = sample?.event ? `First detection: ${sample.event.reason}` : "No detection recorded so far";
+  status.style.color = metrics.reason ? "#a64b00" : "#263238";
+  status.textContent = !sample ? "No telemetry for this frame" : sample.mode === "off"
+    ? "Detector off" : `${sample.mode === "monitor" ? "Monitor · records without stopping" : "Enforce · stops on detection"} · ${metrics.reason || "no current detection"}`;
+  if (!available) {
+    if (sample && sample.mode !== "off") peak.textContent = "Warming up";
+    if (!sample) event.textContent = "";
+    return;
+  }
+  const order = metrics.oscillatory_rms.map((_, i) => i)
+    .sort((a, b) => metrics.oscillatory_rms[b] - metrics.oscillatory_rms[a]);
+  const top = order[0];
+  peak.textContent = `Peak oscillation: ${metrics.oscillatory_rms[top].toFixed(3)} · ${motion.joint_names[top].replaceAll("_", " ")}`;
+  order.forEach((joint, slot) => {
+    const row = thrashRows[slot];
+    const values = [motion.joint_names[joint].replaceAll("_", " "),
+      metrics.oscillatory_rms[joint].toFixed(3), metrics.activity_rms[joint].toFixed(3),
+      metrics.irregularity_cv[joint].toFixed(3),
+      `${(1000 * metrics.evidence_secs[joint]).toFixed(0)} / ${(1000 * metrics.severe_evidence_secs[joint]).toFixed(0)}`];
+    values.forEach((value, column) => { row.cells[column].textContent = value; });
+    row.classList.toggle("flagged", metrics.joint_indices.includes(joint));
+  });
+  const t = sample.thresholds;
+  if (t) thresholds.textContent = `RMS elevated ≥ ${t.activity_rms.toFixed(2)} · severe ≥ ${t.severe_rms.toFixed(2)} · CV ≥ ${t.irregularity_cv.toFixed(2)} · evidence ${1000 * t.persistence_secs} ms. Cycle and joint-group checks also apply.`;
+  if (sample.control_path === "direct") thresholds.textContent += " Direct circle: submission-command checks bypassed.";
+}
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
@@ -119,6 +204,8 @@ function show(index) {
   const playback = mode === "idle" ? "ready" : mode === "live" ? "live" : (paused ? "paused" : "playing");
   hud.textContent = `${motion.summary}\n${playback}  ${motion.time[frame].toFixed(2)} s  frame ${frame + 1} / ${motion.frames}`;
   hud.style.whiteSpace = "pre-line";
+  showThrash(frame);
+  showStop(frame);
 }
 let trailCount = 0;
 function updateTrail() {
@@ -149,11 +236,15 @@ function remember(frames, replace) {
     trailCount = 0;
     motion.time = [];
     motion.focus = [];
+    motion.thrash = [];
+    motion.stop = [];
     for (const geom of motion.geoms) geom.poses = [];
   }
   for (const item of frames) {
     motion.time.push(item.time);
     motion.focus.push(item.focus);
+    motion.thrash.push(item.thrash || null);
+    motion.stop.push(item.stop || null);
     item.poses.forEach((pose, index) => motion.geoms[index].poses.push(pose));
   }
   motion.frames = motion.time.length;
@@ -207,7 +298,10 @@ if (motion.live) {
         start.remove();
       }
       if (body.summary) motion.summary = body.summary;
+      if (body.stop) motion.run_stop = body.stop;
       if (body.done) mode = "replay";
+      if (motion.frames) show(frame);
+      if (body.done && !synced) start.remove();
       if (!body.done) setTimeout(poll, 50);
     };
     poll();
@@ -339,7 +433,7 @@ def pose_frame(model, data, base, geoms, qpos, time):
     return {"time": float(time), "focus": focus, "poses": poses}
 
 
-def write_page(dest, model, geoms, frames, summary, live=False):
+def write_page(dest, model, geoms, frames, summary, live=False, stop=None):
     """Write index.html, motion.json, and the mesh files the page loads."""
     assets = install()
     dest = Path(dest)
@@ -353,6 +447,10 @@ def write_page(dest, model, geoms, frames, summary, live=False):
         "focus": [frame["focus"] for frame in frames],
         "summary": summary,
         "live": live,
+        "thrash": [frame.get("thrash") for frame in frames],
+        "stop": [frame.get("stop") for frame in frames],
+        "run_stop": describe_stop(stop),
+        "joint_names": list(G1_29_JOINT_NAMES),
         "geoms": [],
     }
     written = set()
@@ -381,6 +479,78 @@ def write_page(dest, model, geoms, frames, summary, live=False):
     return dest
 
 
+def stop_from_report(report):
+    """Read current or legacy stop metadata."""
+    if report.get("stop"):
+        return report["stop"]
+    if report.get("reason"):
+        return {"reason": report["reason"], "detail": report.get("detail"),
+                "time_secs": report.get("stop_time_seconds")}
+    return None
+
+
+def describe_stop(stop):
+    """Attach a readable cause without changing recorded fault data."""
+    if not stop:
+        return None
+    reason = stop["reason"]
+    labels = {
+        "joint_velocity_limit": "Measured joint velocity (q dot) exceeded limit",
+        "joint_target_velocity_limit": "Target joint velocity exceeded limit",
+        "initial_joint_target_velocity_limit": "Initial target velocity exceeded limit",
+        "joint_torque_limit": "Torque demand or measured torque exceeded limit",
+        "joint_feedforward_torque_limit": "Feedforward torque exceeded limit",
+        "base_angular_speed_limit": "Base angular speed exceeded limit",
+        "fall": "Standing fall check triggered",
+        "nonfinite_simulation": "Simulation produced non-finite state",
+        "invalid_command": "Malformed command or command sanity bound exceeded",
+        "thrashing_local": "Thrashing detected within one body region",
+        "thrashing_distributed": "Thrashing detected across body regions",
+        "thrashing_severe": "Severe joint thrashing detected",
+    }
+    when = stop.get("time_secs")
+    lines = ["Policy stopped" + (f" at {when:.3f} s" if when is not None else ""),
+             f"{labels.get(reason, reason.replace('_', ' '))} [{reason}]"]
+    detail = stop.get("detail")
+    if isinstance(detail, dict):
+        joint = detail.get("joint")
+        index = detail.get("joint_index")
+        if joint is None and type(index) is int and 0 <= index < len(G1_29_JOINT_NAMES):
+            joint = G1_29_JOINT_NAMES[index]
+        if joint is not None:
+            if reason == "base_angular_speed_limit" and str(joint) in ("0", "1", "2"):
+                lines.append("Base axis: " + "xyz"[int(joint)])
+            else:
+                lines.append("Joint: " + str(joint))
+        indices = detail.get("joint_indices", [])
+        if indices:
+            lines.append("Joints: " + ", ".join(
+                G1_29_JOINT_NAMES[i] if type(i) is int and 0 <= i < len(G1_29_JOINT_NAMES)
+                else str(i) for i in indices))
+        for key, label in (("value", "Value"), ("limit", "Limit"), ("height", "Height")):
+            if key in detail:
+                value = detail[key]
+                value = f"{value:.4g}" if type(value) in (int, float) else str(value)
+                lines.append(f"{label}: {value} {detail.get('units', 'm' if key == 'height' else '')}".strip())
+        for key in ("field", "detail", "torque_kind", "rejection", "bounds"):
+            if key in detail:
+                lines.append(f"{key.replace('_', ' ').capitalize()}: {detail[key]}")
+        if reason.startswith("thrashing_"):
+            for index in indices:
+                values = []
+                for key, label in (("oscillatory_rms", "osc RMS"), ("activity_rms", "motion RMS"),
+                                   ("irregularity_cv", "CV"), ("evidence_secs", "normal evidence s"),
+                                   ("severe_evidence_secs", "severe evidence s")):
+                    samples = detail.get(key, [])
+                    if type(index) is int and 0 <= index < len(samples):
+                        values.append(f"{label}={samples[index]:.3f}")
+                if values:
+                    lines.append(f"Joint {index}: " + ", ".join(values))
+    elif detail:
+        lines.append(str(detail))
+    return dict(stop, description="\n".join(lines))
+
+
 def report_summary(report, safety_checks=True):
     """HUD text for a finished run."""
     summary = f"{report.get('policy') or 'Simulation'} | Safety checks: "
@@ -390,8 +560,15 @@ def report_summary(report, safety_checks=True):
     else:
         summary += "ON" if report.get("safety_checks", safety_checks) else "OFF"
     summary += " | " + str(report.get("status", ""))
+    if "thrash" in report:
+        thrash = report["thrash"]
+        summary += " | Thrash: " + thrash["mode"]
+        if thrash.get("event"):
+            summary += " (" + thrash["event"]["reason"] + ")"
     if report.get("reason"):
-        summary += "\nStopped accepting commands: " + report["reason"]
+        summary += "\n" + describe_stop(stop_from_report(report))["description"]
+    elif report.get("status") == "no_command":
+        summary += "\nNo policy commands were accepted before the run ended."
     motion = report.get("motion", {})
     if "fell" in motion:
         summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")
@@ -429,6 +606,8 @@ def export_replay(trace_path, dest):
     with np.load(trace_path, allow_pickle=False) as trace:
         qpos = trace["qpos"]
         times = trace["time"]
+        thrash = json.loads(str(trace["thrash"])) if "thrash" in trace else [None] * len(times)
+        stops = json.loads(str(trace["stop"])) if "stop" in trace else [None] * len(times)
         safety_checks = (
             bool(trace["safety_checks"]) if "safety_checks" in trace else True
         )
@@ -451,11 +630,17 @@ def export_replay(trace_path, dest):
         pose_frame(model, data, base, geoms, pose, float(time))
         for pose, time in zip(qpos, times)
     ]
+    if len(thrash) != len(frames) or len(stops) != len(frames):
+        raise ValueError("telemetry samples do not match trace frames")
+    for frame, telemetry, stop in zip(frames, thrash, stops):
+        frame["thrash"] = telemetry
+        frame["stop"] = describe_stop(stop)
     summary = report_summary(metadata, safety_checks)
     report_path = trace_path.parent / "report.json"
     if report_path.is_file():
-        summary = report_summary(json.loads(report_path.read_text()), safety_checks)
-    return write_page(dest, model, geoms, frames, summary, live=False)
+        metadata = json.loads(report_path.read_text())
+        summary = report_summary(metadata, safety_checks)
+    return write_page(dest, model, geoms, frames, summary, live=False, stop=stop_from_report(metadata))
 
 
 def main():

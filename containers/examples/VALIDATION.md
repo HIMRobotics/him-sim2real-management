@@ -65,6 +65,10 @@ replays remain in the ignored `containers/sim/output/startup-transition-01/`.
 
 ## Earlier validation
 
+These are historical results. Pose-gap, consecutive-target-delta and tracking-error
+stops have since been removed, including the startup pose-gap check. Rejected
+commands now revoke policy output. These rows do not describe the current checks.
+
 | Policy | Safety checks | Duration | Result |
 | --- | --- | --- | --- |
 | Stair walker | Off | 20 simulated seconds | 1,000 accepted commands. Foot contact on all three treads, stood on top, finished upright, no fall. Minimum pelvis height approximately 0.770 m. |

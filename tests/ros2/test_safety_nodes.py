@@ -1,7 +1,15 @@
 """Isolated ROS graph tests using generated types and fake motor output."""
 
+import json
+import math
+import os
+import tempfile
 import time
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from tests.ros2.environment import require_test_domain
 
@@ -24,7 +32,7 @@ except ImportError as error:
 
 class SafetyGraphTests(unittest.TestCase):
     def setUp(self):
-        rclpy.init()
+        rclpy.init(args=["--ros-args", "-p", "thrash.mode:=enforce"])
         self.checker = SafetyCheckerNode()
         self.motor = MotorGateNode()
         self.executor = SingleThreadedExecutor()
@@ -106,6 +114,162 @@ class SafetyGraphTests(unittest.TestCase):
             self.motor.motor_gate.abort_reason,
             ("checked_command_expired", "postcheck_timeout"),
         )
+
+    def test_thrash_blocks_relay_and_aborts_existing_motor_gate(self):
+        self.assertEqual(self.checker.config.thrash.mode, "enforce")
+        for node in (self.checker, self.motor):
+            node.config = replace(
+                node.config, action_timeout=10.0, observation_timeout=10.0,
+                robot_timeout=10.0, loop_timeout=10.0,
+            )
+        self.checker.supervisor.config = self.checker.config
+        self.motor.motor_gate.config = self.motor.config
+        command = self.arm()
+        self.checker.on_precheck(command)
+        self.wait_for(lambda: self.motor.motor_gate.supervisor_phase == SupervisorPhase.RUNNING)
+        start = time.monotonic()
+        for i in range(201):
+            now = start + i * 0.005
+            phase = 2 * math.pi * 8 * (now - start)
+            feedback = RobotFeedback()
+            feedback.host_boot_id = self.checker.host_boot_id
+            feedback.received_at_secs = now
+            feedback.q = [0.12 * math.sin(phase)] + [0.0] * 28
+            feedback.dq = [0.12 * 2 * math.pi * 8 * math.cos(phase)] + [0.0] * 28
+            with patch("robot_safety.ros_nodes.time", SimpleNamespace(monotonic=lambda now=now: now)):
+                self.checker.on_feedback(feedback)
+            if self.checker.abort_reason:
+                break
+        self.assertEqual(self.checker.abort_reason, "thrashing_severe")
+        command.sequence = 2
+        command.observation_id = self.checker.supervisor.latest_observation_id
+        with patch.object(self.checker.postcheck_publisher, "publish") as publish:
+            self.checker.on_precheck(command)
+            publish.assert_not_called()
+        self.wait_for(lambda: self.motor.motor_gate.abort_reason is not None)
+        self.assertEqual(self.motor.motor_gate.abort_reason, "thrashing_severe")
+        self.assertEqual(self.motor.motor_gate.cycle(time.monotonic())["kind"], "damping")
+        self.assertEqual(self.motor.motor_gate.last_command_sequence, 1)
+
+
+class SimGatewayGraphTests(unittest.TestCase):
+    wait_for = SafetyGraphTests.wait_for
+
+    def start(self, mode):
+        from std_msgs.msg import String
+
+        from containers.sim.bridge import SimBridge
+
+        rclpy.init(args=["--ros-args", "-p", "thrash.mode:=" + mode])
+        self.checker = SafetyCheckerNode()
+        self.command_count = 0
+        self.observation_id = 0
+        self.plant_reason = None
+        self.plant_calls = []
+        self.tmp = tempfile.TemporaryDirectory()
+        self.started = time.monotonic()
+        plant = Mock(failed=False)
+        plant.call.side_effect = self.plant_call
+        with patch.dict(os.environ, {"G1_SIM_EXAMPLE": "walker"}):
+            self.bridge = SimBridge(plant, 10, Path(self.tmp.name) / "report.json", Mock(), self.checker)
+        self.policy = self.bridge.create_publisher(JointCommand, "/safety/precheck", self.checker.command_qos)
+        self.bridge.create_subscription(String, "/sim/state", self.on_state, self.checker.feedback_qos)
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.checker)
+        self.executor.add_node(self.bridge)
+
+    def tearDown(self):
+        self.executor.shutdown()
+        self.bridge.destroy_node()
+        self.checker.destroy_node()
+        rclpy.shutdown()
+        self.tmp.cleanup()
+
+    def plant_call(self, request):
+        self.plant_calls.append(request)
+        operation = request["op"]
+        if operation == "command":
+            self.command_count += 1
+            return {"ok": self.plant_reason is None, "reason": self.plant_reason}
+        if operation == "abort":
+            self.plant_reason = self.plant_reason or request["reason"]
+            return {"ok": True}
+        if operation == "report":
+            return {"status": "violation" if self.plant_reason else "within_limits",
+                    "reason": self.plant_reason, "commands": self.command_count,
+                    "thrash": request["thrash"]}
+        self.observation_id += 1
+        phase = 2 * math.pi * 8 * (time.monotonic() - self.started)
+        return {"ok": True, "reason": self.plant_reason, "session_id": "plant-session",
+                "observation_id": self.observation_id,
+                "q": [0.12 * math.sin(phase)] + [0.0] * 28,
+                "dq": [0.12 * 2 * math.pi * 8 * math.cos(phase)] + [0.0] * 28}
+
+    def on_state(self, message):
+        state = json.loads(message.data)
+        command = JointCommand()
+        command.session_id = state["session_id"]
+        command.sequence = state["observation_id"]
+        command.observation_id = state["observation_id"]
+        command.q = state["q"]
+        command.dq = command.tau = [0.0] * 29
+        command.kp = command.kd = [1.0] * 29
+        self.last_command = command
+        self.policy.publish(command)
+
+    def test_simulated_feedback_stops_shared_checker_and_plant(self):
+        self.start("enforce")
+        self.wait_for(lambda: self.plant_reason is not None, timeout=5)
+        self.assertEqual(self.plant_reason, "thrashing_severe")
+        self.assertEqual(self.checker.supervisor.stop_reason, self.plant_reason)
+        self.assertEqual(self.bridge.motor_gate.abort_reason, self.plant_reason)
+        self.assertGreater(self.command_count, 0)
+        self.last_command.sequence += 1
+        before = self.command_count
+        self.policy.publish(self.last_command)
+        for _ in range(10):
+            self.executor.spin_once(timeout_sec=0.005)
+        self.assertEqual(self.command_count, before)
+        commands = [call["frame"] for call in self.plant_calls if call["op"] == "command"]
+        self.assertTrue(all(command["session_id"] == "plant-session" for command in commands))
+        self.bridge.finish()
+        report = json.loads(self.bridge.report_path.read_text())
+        self.assertEqual(report["thrash"]["event"]["reason"], self.plant_reason)
+
+    def test_sim_monitoring_records_event_and_keeps_commands_flowing(self):
+        self.start("monitor")
+        self.wait_for(lambda: self.checker.supervisor.thrash_event is not None, timeout=5)
+        before = self.command_count
+        self.wait_for(lambda: self.command_count > before)
+        self.assertIsNone(self.plant_reason)
+        self.assertIsNone(self.bridge.motor_gate.abort_reason)
+        self.bridge.finish()
+        report = json.loads(self.bridge.report_path.read_text())
+        self.assertEqual(report["thrash"]["mode"], "monitor")
+        self.assertEqual(report["thrash"]["event"]["reason"], "thrashing_severe")
+
+    def test_sim_gate_stops_when_checker_stops_relaying(self):
+        self.start("monitor")
+        self.wait_for(lambda: self.command_count > 0)
+        self.executor.remove_node(self.checker)
+        self.wait_for(lambda: self.plant_reason is not None)
+        self.assertIn(self.plant_reason, ("checked_command_expired", "postcheck_timeout"))
+        self.assertEqual(self.bridge.motor_gate.abort_reason, self.plant_reason)
+
+    def test_sim_abort_keeps_joint_details_instead_of_a_monitor_warning(self):
+        self.start("monitor")
+        self.wait_for(lambda: self.checker.supervisor.thrash_event is not None, timeout=5)
+        command = self.last_command
+        command.sequence += 1
+        command.q[20] = 11.0
+        self.policy.publish(command)
+        self.wait_for(lambda: self.plant_reason is not None)
+        self.assertEqual(self.plant_reason, "invalid_action")
+        abort = next(call for call in self.plant_calls if call["op"] == "abort")
+        self.assertEqual(abort["detail"]["joint_index"], 20)
+        self.assertEqual(abort["detail"]["field"], "q")
+        self.assertEqual(abort["detail"]["value"], 11.0)
+        self.assertEqual(abort["detail"]["rejection"], "invalid_command")
 
 
 class FeedbackBridgeTests(unittest.TestCase):

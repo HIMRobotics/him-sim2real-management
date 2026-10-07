@@ -2,9 +2,14 @@
 
 import json
 import os
+import sys
 import time
 import uuid
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mujoco
 import numpy as np
@@ -14,47 +19,46 @@ from joint_checks import (
 )
 from metrics import MotionMetrics
 from plant import PHYSICS_DT, POSES, Plant
-from policy_safety.adapter import PolicyViolation
 from policy_safety.joint_rules import JointRules
 
-OBSERVATION_TIMEOUT = 0.2
-ACTION_TIMEOUT = 0.1
-SANITY = {
-    "q": (-10.0, 10.0),
-    "dq": (-50.0, 50.0),
-    "kp": (0.0, 500.0),
-    "kd": (0.0, 50.0),
-    "tau": (-200.0, 200.0),
-}
-
-
-def _finite_vector(values):
-    try:
-        array = np.asarray(values, dtype=float)
-    except (TypeError, ValueError):
-        return False, np.empty(0)
-    return array.shape == (29,) and bool(np.isfinite(array).all()), array
+from robot_safety.config import COMMAND_FIELDS, Config, ThrashConfig
+from robot_safety.core import action_error, watchdog_reason
+from robot_safety.thrash import ThrashDetector
 
 
 class Runner:
     """One simulated session. A failed check latches for the rest of the run."""
 
-    def __init__(self, pose=None, scene=None, safety_checks=True, *, record_trace=None):
+    def __init__(self, pose=None, scene=None, safety_checks=True, *, record_trace=None,
+                 thrash_config=None, config=None):
         pose = pose or os.environ.get("G1_SIM_POSE", "standing")
         if pose not in POSES:
             raise ValueError("unknown pose")
         self.safety_checks = bool(safety_checks)
+        config = config or Config(thrash=ThrashConfig(
+            mode=os.environ.get("G1_SIM_THRASH_MODE") or ("monitor" if safety_checks else "off")
+        ))
+        thrash_config = thrash_config or config.thrash
+        self.config = config = replace(config, thrash=thrash_config)
+        self.thrash_detector = ThrashDetector(config.thrash, config.joints, config.robot_timeout)
+        self.external_thrash = None
         self.control_path = "submission"
         self.plant = Plant(pose, scene=scene, check_fall=self.safety_checks)
+        if config.joints != len(self.plant.joint_names):
+            raise ValueError("simulation config must match the G1 joint count")
         self.rules = JointRules(self.plant.joint_names)
         self.session_id = "sim-" + uuid.uuid4().hex[:12]
         self.observation_id = 0
         self.observations = {}
         self.last_sequence = -1
         self.last_command_time = None
+        self.last_cycle_time = None
+        self.last_robot_time = None
+        self.command_observation_id = None
         self.active = None
         self.reason = None
         self.detail = None
+        self.stop_sim_time = None
         self.commands = 0
         self.steps = 0
         self.sim_time = 0.0
@@ -63,6 +67,8 @@ class Runner:
         self.position_warnings = {}
         self.trace_qpos = []
         self.trace_time = []
+        self.trace_thrash = []
+        self.trace_stop = []
         self.record_trace = (
             bool(os.environ.get("G1_SIM_TRACE"))
             if record_trace is None
@@ -78,9 +84,11 @@ class Runner:
         return self.session_id
 
     def feedback(self, time):
+        self._check_deadlines(float(time))
+        self.last_robot_time = float(time)
         self.observation_id += 1
         self.observations[self.observation_id] = float(time)
-        if len(self.observations) > 512:
+        if len(self.observations) > self.config.observation_history_size:
             oldest = next(iter(self.observations))
             del self.observations[oldest]
         state = self.plant.state()
@@ -95,28 +103,38 @@ class Runner:
         frame = dict(frame) if isinstance(frame, dict) else frame
         reason, detail = self._validate(frame, float(time))
         if reason:
-            # Keep the last accepted hold. Dropping it leaves kp at 0, and the
-            # body folds even though the rejected target was never applied.
-            self._latch(reason, detail, hold=True)
+            self._latch(reason, detail)
             return reason
+        self._check_deadlines(float(time))
+        if self.reason is not None:
+            return self.reason
+        if self.safety_checks:
+            try:
+                frame.update(self.rules.process_command(
+                    frame, self.plant.q(), self.plant.dq(), initial=self.active is None,
+                    warnings=self.position_warnings,
+                ))
+            except JointViolation as exc:
+                self._latch(exc.reason, exc.details)
+                return self.reason
+            except ValueError as exc:
+                self._latch(exc.args[0] if exc.args else "invalid_command", None)
+                return self.reason
         self.commands += 1
+        self.command_observation_id = frame["observation_id"]
         self.last_sequence = int(frame["sequence"])
         self.last_command_time = float(time)
 
         self.active = {
             key: np.asarray(frame[key], dtype=float).copy()
-            for key in ("q", "dq", "kp", "kd", "tau")
+            for key in COMMAND_FIELDS
         }
         return None
 
     def step(self, time):
-        if (
-            self.safety_checks
-            and self.reason is None
-            and self.last_command_time is not None
-            and float(time) - self.last_command_time >= ACTION_TIMEOUT
-        ):
-            self._latch("action_timeout", None)
+        self._check_deadlines(float(time))
+        if self.last_command_time is not None:
+            self.last_cycle_time = float(time)
         if self.active is None:
             q, dq = self.plant.q(), self.plant.dq()
             q_des, dq_des, kp, kd, tau = self.plant.damping_command(q, dq)
@@ -135,24 +153,28 @@ class Runner:
             ):
                 violation = ("nonfinite_simulation", None)
                 break
-            if not self.safety_checks:
-                continue
-            if self.plant.fallen():
-                violation = ("fall", {"height": self.plant.state()["height"]})
-                break
-            try:
-                self.rules.check_measured_velocity(dq)
-                check_base_motion(self.plant.data.qvel[
-                    self.plant.base_vadr + 3:self.plant.base_vadr + 6])
-                if self.active is not None and self.control_path == "submission":
-                    tau_demand = self.plant.demand(
-                        self.active["q"], self.active["dq"], self.active["kp"],
-                        self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
-                    self.rules.check_torque(tau_demand)
-                    self.rules.check_torque(self.plant.data.qfrc_actuator[self.plant.vadr])
-            except JointViolation as exc:
-                violation = (exc.reason, exc.details)
-                break
+            if self.safety_checks:
+                if self.plant.fallen():
+                    violation = ("fall", {"height": self.plant.state()["height"]})
+                    break
+                try:
+                    self.rules.check_measured_velocity(dq)
+                    check_base_motion(self.plant.data.qvel[
+                        self.plant.base_vadr + 3:self.plant.base_vadr + 6])
+                    if self.active is not None and self.control_path == "submission":
+                        tau_demand = self.plant.demand(
+                            self.active["q"], self.active["dq"], self.active["kp"],
+                            self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
+                        self.rules.check_torque(tau_demand, kind="PD demand")
+                        self.rules.check_torque(self.plant.data.qfrc_actuator[self.plant.vadr], kind="applied torque")
+                except JointViolation as exc:
+                    violation = (exc.reason, exc.details)
+                    break
+            if self.reason is None and self.commands:
+                reason = self.thrash_detector.observe(dq, self.sim_time)
+                if reason:
+                    violation = (reason, deepcopy(self.thrash_detector.event))
+                    break
         self.steps += 1
         if violation is None and self.plant.fallen():
             violation = ("fall", {"height": self.plant.state()["height"]})
@@ -173,19 +195,25 @@ class Runner:
     def checks(self):
         """Report enabled checks for the control path used by this run."""
         submission = self.control_path == "submission"
+        thrash_mode = (self.external_thrash or {}).get("mode", self.thrash_detector.config.mode)
         return {
             "command_protocol": submission,
             "command_limits": submission and self.safety_checks,
+            "profile_gains": submission and self.safety_checks,
             "response_error": False,
             "response_error_diagnostic": submission,
             "motor_temperature": False,
             "battery": False,
             "observation_freshness": submission and self.safety_checks,
             "action_timeout": self.safety_checks,
+            "robot_state_timeout": submission and self.safety_checks,
+            "loop_timeout": self.safety_checks,
             "joint_speed": self.safety_checks,
             "base_angular_speed": self.safety_checks,
             "fall": self.plant.check_fall,
             "finite_simulation": True,
+            "thrash_monitoring": thrash_mode != "off",
+            "thrash_enforcement": thrash_mode == "enforce",
         }
 
     def report(self, lowstate=False):
@@ -193,7 +221,7 @@ class Runner:
             self._live.close()
             self._live = None
         if self.reason:
-            status = "violation" if self.safety_checks else "error"
+            status = "violation" if self.safety_checks or self.checks()["thrash_enforcement"] else "error"
         elif self.commands < 1:
             status = "no_command"
         else:
@@ -204,6 +232,8 @@ class Runner:
             "status": status,
             "reason": self.reason,
             "detail": self.detail,
+            "stop_time_seconds": self.stop_sim_time,
+            "stop": self._stop_snapshot(),
             "warnings": self.position_warnings.copy(),
             "response_error_rad": {"last": self.response_error, "max_abs": self.max_response_error},
             "commands": self.commands,
@@ -220,12 +250,29 @@ class Runner:
             "fall_check": self.plant.check_fall,
             "trace": trace,
             "motion": self.metrics.report(),
+            "thrash": self._thrash_snapshot(),
         }
 
+    def _thrash_snapshot(self):
+        snapshot = (deepcopy(self.external_thrash) if self.external_thrash
+                    else self.thrash_detector.snapshot())
+        snapshot["control_path"] = self.control_path
+        return snapshot
+
+    def _stop_snapshot(self):
+        if self.reason is None:
+            return None
+        return {"reason": self.reason, "detail": deepcopy(self.detail),
+                "time_secs": self.stop_sim_time}
+
     def _remember(self):
+        telemetry = self._thrash_snapshot() if self.record_trace or self.live_path else None
+        stop = self._stop_snapshot()
         if self.record_trace:
             self.trace_qpos.append(self.plant.data.qpos.copy())
             self.trace_time.append(self.sim_time)
+            self.trace_thrash.append(telemetry)
+            self.trace_stop.append(stop)
         path = self.live_path
         if not path:
             return
@@ -234,7 +281,8 @@ class Runner:
             target.parent.mkdir(parents=True, exist_ok=True)
             self._live = target.open("w")
         qpos = [round(float(value), 5) for value in self.plant.data.qpos]
-        self._live.write(json.dumps({"t": self.sim_time, "qpos": qpos}) + "\n")
+        self._live.write(json.dumps({"t": self.sim_time, "qpos": qpos, "thrash": telemetry,
+                                    "stop": stop}) + "\n")
         self._live.flush()
 
     def _write_trace(self):
@@ -253,6 +301,8 @@ class Runner:
             safety_checks=self.safety_checks,
             control_path=self.control_path,
             checks=json.dumps(self.checks()),
+            thrash=json.dumps(self.trace_thrash),
+            stop=json.dumps(self.trace_stop),
         )
         return str(target)
 
@@ -291,7 +341,10 @@ class Runner:
             Path(path).unlink(missing_ok=True)
         self.trace_qpos = []
         self.trace_time = []
+        self.trace_thrash = []
+        self.trace_stop = []
         self.sim_time = 0.0
+        self.thrash_detector.reset()
         self._remember()
 
     def handle(self, request):
@@ -304,6 +357,7 @@ class Runner:
             reason = self.command(request["frame"], request["time"])
             return {"ok": reason is None, "reason": reason, "detail": self.detail}
         if op in ("circle", "step"):
+            self.external_thrash = request.get("thrash", self.external_thrash)
             started = time.monotonic()
             result = (
                 self.circle(request["time"])
@@ -322,69 +376,45 @@ class Runner:
                 result.update(self.feedback(issued))
             return result
         if op == "report":
+            self.external_thrash = request.get("thrash")
             return self.report(request.get("lowstate", False))
+        if op == "abort":
+            if self.reason is None:
+                self._latch(request["reason"], request.get("detail"))
+            self.active = None
+            return {"ok": True, "reason": self.reason}
         return {"ok": False, "reason": "unknown_op"}
 
-    def _latch(self, reason, detail, hold=False):
-        self.reason = reason
-        self.detail = detail
-        if not hold:
-            self.active = None
+    def _check_deadlines(self, time):
+        if not self.safety_checks or self.reason is not None:
+            return
+        submission = self.control_path == "submission"
+        reason = watchdog_reason(
+            self.config, time, last_cycle=self.last_cycle_time,
+            action_time=self.last_command_time,
+            robot_time=self.last_robot_time if submission else time,
+            observation_time=(self.observations.get(self.command_observation_id, -float("inf"))
+                              if self.command_observation_id is not None and submission else None),
+        )
+        if reason:
+            self._latch(reason, None)
+
+    def _latch(self, reason, detail):
+        first = self.reason is None
+        if first:
+            self.reason = reason
+            self.detail = detail
+            self.stop_sim_time = self.sim_time
+        self.active = None
+        if first:
+            self._remember()
 
     def _validate(self, frame, time):
-        if not isinstance(frame, dict) or frame.get("session_id") != self.session_id:
-            return "session_mismatch", None
-        sequence = frame.get("sequence")
-        if type(sequence) is not int or sequence <= self.last_sequence:
-            return "sequence", None
-        observation_id = frame.get("observation_id")
-        if (
-            type(observation_id) is not int
-            or not 1 <= observation_id <= self.observation_id
-        ):
-            return "stale_observation", None
-        if self.safety_checks:
-            issued = self.observations.get(observation_id)
-            if issued is None or not 0 <= time - issued < OBSERVATION_TIMEOUT:
-                return "stale_observation", None
-        ok, measured = _finite_vector(self.plant.q())
-        if not ok:
-            return "invalid_command", {"field": "measured"}
-        arrays = {}
-        for name, bounds in SANITY.items():
-            ok, array = _finite_vector(frame.get(name))
-            if not ok or (
-                self.safety_checks
-                and (np.any(array < bounds[0]) or np.any(array > bounds[1]))
-            ):
-                return "invalid_command", {"field": name}
-            arrays[name] = array
-        if not self.safety_checks:
-            return None, None
-        try:
-            arrays["q"] = self.rules.check_command(
-                arrays["q"],
-                arrays["dq"],
-                arrays["tau"],
-                measured,
-                initial=self.active is None,
-                warnings=self.position_warnings,
-            )
-            demand = self.plant.demand(
-                arrays["q"],
-                arrays["dq"],
-                arrays["kp"],
-                arrays["kd"],
-                arrays["tau"],
-                measured,
-                self.plant.dq(),
-            )
-            self.rules.check_torque(demand)
-        except JointViolation as exc:
-            return exc.reason, exc.details
-        except PolicyViolation as exc:
-            return exc.args[0], exc.details
-        except ValueError as exc:
-            return exc.args[0] if exc.args else "invalid_command", None
-        frame["q"] = arrays["q"]
-        return None, None
+        message = frame
+        if isinstance(frame, dict):
+            message = dict(frame, session=frame.get("session_id"),
+                           seq=frame.get("sequence"), state_id=frame.get("observation_id"))
+        return action_error(
+            message, self.config, self.session_id, self.last_sequence,
+            self.observations, self.observation_id, time, safety_checks=self.safety_checks,
+        )

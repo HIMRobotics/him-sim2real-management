@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Sim needs root to enter the isolated network. Re-running with sudo."
-  exec sudo --preserve-env=G1_SIM_BACKEND,G1_SIM_VIEW_PORT,G1_SIM_SECONDS,G1_SIM_PYTHON,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=G1_SIM_BACKEND,G1_SIM_VIEW_PORT,G1_SIM_SECONDS,G1_SIM_PYTHON,G1_SIM_THRASH_MODE,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
 fi
 
 stop_sim() {
@@ -70,6 +70,7 @@ run_session() {
     "G1_SIM_POSE=$pose"
     "G1_SIM_SCENE=$scene"
     "G1_SIM_SAFETY_CHECKS=$safety_checks"
+    "G1_SIM_THRASH_MODE=$thrash_mode"
     "G1_SIM_EXAMPLE=$example"
     "G1_SIM_SECONDS=$seconds"
     "G1_SIM_REPORT=$out_dir/report.json"

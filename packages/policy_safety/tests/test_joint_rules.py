@@ -18,12 +18,13 @@ def rules(bundle):
 
 
 @pytest.mark.parametrize("sign", [-1, 1])
-def test_runtime_gap_has_no_limit_for_every_joint(rules, sign):
+@pytest.mark.parametrize("initial", [False, True])
+def test_pose_gap_has_no_limit_for_every_joint(rules, sign, initial):
     for i, _name, limits in rules.entries:
         q, dq, tau, measured = (np.zeros(29) for _ in range(4))
         q[i] = limits.position_min_rad if sign < 0 else limits.position_max_rad
         measured[i] = limits.position_max_rad if sign < 0 else limits.position_min_rad
-        np.testing.assert_array_equal(rules.check_command(q, dq, tau, measured), q)
+        np.testing.assert_array_equal(rules.check_command(q, dq, tau, measured, initial=initial), q)
 
 
 @pytest.mark.parametrize("gap", [0.4, 0.501])
@@ -66,13 +67,14 @@ def test_official_velocity_and_torque_boundaries(rules, sign):
                 method(values)
 
 
-def test_position_initial_and_finite_checks_remain(rules):
+def test_startup_velocity_and_finite_checks_remain(rules):
     q, dq, tau, measured = (np.zeros(29) for _ in range(4))
-    for value, initial, reason in ((0.031, True, "initial_joint_position_mismatch"),
-                                   (float("nan"), False, "nonfinite")):
-        q[15] = value
-        with pytest.raises(ValueError, match=reason):
-            rules.check_command(q, dq, tau, measured, initial=initial)
+    dq[15] = rules.profile["initial_velocity_tolerance_rad_secs"] + 0.01
+    with pytest.raises(ValueError, match="initial_joint_target_velocity_limit"):
+        rules.check_command(q, dq, tau, measured, initial=True)
+    q[15] = float("nan")
+    with pytest.raises(ValueError, match="nonfinite"):
+        rules.check_command(q, dq, tau, measured)
 
 
 @pytest.mark.parametrize("side", ["position_min_rad", "position_max_rad"])

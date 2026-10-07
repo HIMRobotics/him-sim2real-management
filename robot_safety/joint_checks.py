@@ -26,6 +26,44 @@ class JointHardwareLimits:
             raise ValueError("joint gains and limits must be positive")
 
 
+def joint_profile_entries(data, names):
+    """Validate movement settings and map profile joints to command indices."""
+    if data["expected_machine_type"] != 5:
+        raise ValueError("joint profile must target G1 machine type 5")
+    if len(names) != 29 or len(set(names)) != 29 or set(data["joints"]) != set(names):
+        raise ValueError("joint profile must include all 29 robot joints")
+    value = data["initial_velocity_tolerance_rad_secs"]
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise ValueError("initial_velocity_tolerance_rad_secs must be finite and positive")
+    return tuple((i, name, JointHardwareLimits(**data["joints"][name]))
+                 for i, name in enumerate(names))
+
+
+def torque_demand(q_des, dq_des, kp, kd, tau, q, dq):
+    """PD effort, usable with scalars or arrays."""
+    return kp * (q_des - q) + kd * (dq_des - dq) + tau
+
+
+def checked_targets(command, entries, q, dq, *, initial,
+                    initial_velocity, warnings=None):
+    """Clip and screen targets using the profile gains that will be applied."""
+    targets = {}
+    for index, joint, limits in entries:
+        position = check_command(
+            joint, limits, command["q"][index], command["dq"][index],
+            command["tau"][index], q[index], initial,
+            initial_velocity, warnings,
+        )
+        target = {"q": position, "dq": command["dq"][index], "kp": limits.kp,
+                  "kd": limits.kd, "tau": command["tau"][index]}
+        check_torque(joint, limits, torque_demand(
+            position, target["dq"], target["kp"], target["kd"], target["tau"],
+            q[index], dq[index],
+        ), kind="PD demand")
+        targets[index] = target
+    return targets
+
+
 class JointViolation(ValueError):
     """A failed check with reportable joint and threshold details."""
 
@@ -102,7 +140,7 @@ def check_measured_velocity(joint, limits, measured_dq):
 
 def check_command(
     joint, limits, q_proposed, dq_proposed, tau, q_measured,
-    initial, initial_position, initial_velocity, warnings=None,
+    initial, initial_velocity, warnings=None,
 ):
     """Validate a proposal against current measurements before actuation."""
     if not all(math.isfinite(v) for v in (q_proposed, dq_proposed, tau, q_measured)):
@@ -112,15 +150,17 @@ def check_command(
     check_bound("joint_target_velocity_limit", joint, abs(dq_proposed),
                 limits.max_velocity_rad_secs, "rad/s")
     check_bound("joint_feedforward_torque_limit", joint, abs(tau), limits.max_torque_nm, "Nm")
-    command_gap = q_commanded - q_measured
     if initial:
-        check_bound("initial_joint_position_mismatch", joint, abs(command_gap),
-                    initial_position, "rad")
         check_bound("initial_joint_target_velocity_limit", joint, abs(dq_proposed),
                     initial_velocity, "rad/s")
     return q_commanded
 
 
-def check_torque(joint, limits, torque):
+def check_torque(joint, limits, torque, *, kind=None):
     """Check estimated demand or measured effort against the same bound."""
-    check_bound("joint_torque_limit", joint, abs(torque), limits.max_torque_nm, "Nm")
+    try:
+        check_bound("joint_torque_limit", joint, abs(torque), limits.max_torque_nm, "Nm")
+    except JointViolation as exc:
+        if kind:
+            exc.details["torque_kind"] = kind
+        raise

@@ -4,15 +4,16 @@ from pathlib import Path
 
 import numpy as np
 from joint_checks import (
-    JointHardwareLimits,
     check_command,
     check_measured_velocity,
     check_torque,
+    checked_targets,
     clip_position,
+    joint_profile_entries,
 )
 
 from .adapter import PolicyViolation
-from .config import positive, read_json
+from .config import read_json
 
 DEFAULT_JOINT_PROFILE = Path(__file__).parent / "profiles/g1_type5.template.json"
 
@@ -25,22 +26,17 @@ class JointRules:
         self.profile = read_json(self.path)
         self.names = list(joint_names)
         self.sdk_names = [name.removesuffix("_joint") for name in self.names]
-        if len(set(self.sdk_names)) != len(self.sdk_names):
-            raise ValueError("ambiguous joint names in movement-rule mapping")
-        data = self.profile
-        if data["expected_machine_type"] != 5:
-            raise ValueError("joint profile must target G1 machine type 5")
-        if set(data["joints"]) != set(self.sdk_names):
-            raise ValueError("joint profile must include all 29 robot joints")
-        for key in (
-            "initial_position_tolerance_rad",
-            "initial_velocity_tolerance_rad_secs",
-        ):
-            positive(data[key], key)
-        self.entries = [
-            (self.sdk_names.index(name), name, JointHardwareLimits(**limits))
-            for name, limits in data["joints"].items()
-        ]
+        self.entries = joint_profile_entries(self.profile, self.sdk_names)
+
+    def process_command(self, command, q, dq, *, initial=False, warnings=None):
+        """Return a complete command screened with hardware profile gains."""
+        targets = checked_targets(
+            command, self.entries, q, dq, initial=initial,
+            initial_velocity=self.profile["initial_velocity_tolerance_rad_secs"],
+            warnings=warnings,
+        )
+        return {field: np.array([targets[i][field] for i in range(len(self.names))])
+                for field in ("q", "dq", "kp", "kd", "tau")}
 
     def coverage(self):
         covered = [self.names[i] for i, _, _ in self.entries]
@@ -52,12 +48,12 @@ class JointRules:
             "rules": [
                 "position_clipping_with_warning",
                 "target_velocity",
-                "initial_target_mismatch",
+                "initial_target_velocity",
                 "initial_target_velocity",
                 "feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Before actuation: clip proposed position to bounds with a warning and enforce speed and torque limits. Initial alignment is checked only at startup. Command gap and response error are diagnostics, with no runtime delta or consecutive-command change limit.",
+            "semantics": "Before actuation: clip proposed position to bounds with a warning and enforce speed and torque limits. Command gap and response error are diagnostics only, including at startup. PD torque demand still uses position error.",
         }
 
     def clip_positions(self, q_proposed, warnings=None, bounds=None):
@@ -81,7 +77,7 @@ class JointRules:
         q_commanded = self.clip_positions(q_proposed, warnings)
         for i, name, limits in self.entries:
             check_command(name, limits, q_commanded[i], velocity[i], torque[i], q_measured[i],
-                          initial, self.profile["initial_position_tolerance_rad"],
+                          initial,
                           self.profile["initial_velocity_tolerance_rad_secs"])
         return q_commanded
 
@@ -89,6 +85,6 @@ class JointRules:
         for i, name, limits in self.entries:
             check_measured_velocity(name, limits, measured_dq[i])
 
-    def check_torque(self, torque):
+    def check_torque(self, torque, *, kind=None):
         for i, name, limits in self.entries:
-            check_torque(name, limits, torque[i])
+            check_torque(name, limits, torque[i], kind=kind)

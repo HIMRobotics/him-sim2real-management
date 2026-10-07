@@ -198,7 +198,7 @@ at runtime.
 
 The joint rules clip out-of-range position proposals with warnings and reject
 excessive desired velocity, feedforward torque or total PD torque demand.
-Initial alignment remains 0.03 rad and initial desired speed 0.05 rad/s.
+No initial pose-gap threshold remains. Initial desired speed stays limited to 0.05 rad/s.
 
 ### Shared speed checks
 
@@ -213,9 +213,9 @@ maximum tilt. Non-upright counterfactuals omit the upright fall check.
 
 `q_proposed` is the pending absolute position command. `q_measured` is current
 feedback. The bounded proposal is `q_commanded`. Its difference from the measured
-position is diagnostic only during runtime. There is no runtime command-gap or
+position is diagnostic only, including at startup. There is no command-gap or
 consecutive-command delta rejection. Position clipping, torque and speed bounds
-still apply independently. Initial alignment remains a startup-only check.
+still apply independently. A large position error can still exceed the PD torque ceiling.
 Simulation retains the submitted policy's gains.
 
 `q_applied` is the accepted position command. After a complete 20 ms interval,

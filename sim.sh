@@ -34,6 +34,7 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --scene PATH        Load a host-side MuJoCo XML scene and its relative assets.
                     Default: the bundled G1 on a flat floor.
 --safety-checks     Enable safety checks (default).
+--thrash-mode MODE  Thrash detector: monitor, enforce, or off. Independent of safety checks.
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
 --example NAME     Run a bundled ONNX controller in its matching environment.
@@ -177,6 +178,7 @@ pose_set=0
 image="${G1_IMAGE:-}"
 scene=""
 safety_checks=1
+thrash_mode="${G1_SIM_THRASH_MODE:-}"
 example=""
 local_mode=0
 stopping=0
@@ -203,12 +205,22 @@ while [[ $# -gt 0 ]]; do
     --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
     --safety-checks) safety_checks=1; shift ;;
     --no-safety-checks) safety_checks=0; shift ;;
+    --thrash-mode) thrash_mode="${2:?--thrash-mode needs monitor, enforce, or off}"; shift 2 ;;
     --example) example="${2:?--example needs stairs, walker, or balance}"; shift 2 ;;
     --local) local_mode=1; shift ;;
     --output) out_dir="${2:?--output needs a directory}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -z "$thrash_mode" ]]; then
+  thrash_mode=off
+  [[ "$safety_checks" -eq 0 ]] || thrash_mode=monitor
+fi
+case "$thrash_mode" in
+  monitor|enforce|off) export G1_SIM_THRASH_MODE="$thrash_mode" ;;
+  *) echo "--thrash-mode must be monitor, enforce, or off" >&2; exit 2 ;;
+esac
 
 if [[ -n "$example" && "$example" != stairs && "$example" != walker && "$example" != balance ]]; then
   echo "--example must be stairs, walker, or balance" >&2

@@ -31,9 +31,9 @@ adapter. Whole-body policy control through `rt/lowcmd` is not implemented.
 Upper-body ownership ramps from zero to one with a smooth cubic curve. Commands
 use the profile gains and validated feedforward torque. Proposals are clipped to
 joint-position bounds with warnings in `/safety/joint_diagnostics` and ROS logs.
-The command-to-measurement gap is diagnostic only during runtime.
+The command-to-measurement gap is diagnostic only, including at startup.
 Total PD plus feedforward torque and desired speed must satisfy per-joint bounds.
-Initial alignment and stationary-start checks remain enabled.
+Stationary-start velocity checks remain enabled. No pose-gap threshold stops motion.
 
 An abort stops subsequent motion writes. Runtime motion and health faults request
 stock damping directly. For other aborts, if this process has taken arm ownership
@@ -82,7 +82,6 @@ Required fields:
   operating-state ID is distinct from `mode_machine=5`, the hardware model.
 - `handover_secs`: ownership ramp duration.
 - `max_publish_gap_secs`: maximum output-worker gap, no greater than 0.2 seconds.
-- `initial_position_tolerance_rad`: allowed first target/measured-position mismatch.
 - `initial_velocity_tolerance_rad_secs`: required near-stationary start tolerance.
 - `joints`: all 29 named joints, including legs. Each needs a positive `max_torque_nm`, position bounds, positive
   `kp` and `kd`, and maximum velocity.

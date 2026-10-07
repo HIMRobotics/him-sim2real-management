@@ -12,6 +12,7 @@ from joint_checks import (
     BASE_ANGULAR_SPEED_LIMIT_RAD_S,
     JointViolation,
     check_base_motion,
+    torque_demand,
 )
 
 from . import __version__
@@ -46,7 +47,6 @@ def verdict(scenarios, calibrated):
 
 # Other limit reasons already end with _limit.
 LIMIT_REASONS = {
-    "initial_joint_position_mismatch",
     "nonzero_feedforward_torque",
     "decoded_target_out_of_range",
 }
@@ -285,9 +285,11 @@ def run_scenario(
                 warning_count = sim.data.warning.number.copy()
                 screen(
                     joint_rules.check_torque,
-                    sim.model.actuator_biasprm[sim.actuators, 0]
-                    + kp * (commanded - sim.data.qpos[sim.qadr])
-                    - kd * sim.data.qvel[sim.vadr],
+                    torque_demand(
+                        commanded, 0, kp, kd,
+                        sim.model.actuator_biasprm[sim.actuators, 0],
+                        sim.data.qpos[sim.qadr], sim.data.qvel[sim.vadr],
+                    ),
                 )
                 mujoco.mj_step(sim.model, sim.data)
                 metrics, acceleration, torque, reason = monitor.sample(
