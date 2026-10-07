@@ -64,12 +64,14 @@ class PolicyNode(Node):
             finally:
                 self.destroy_client(client)
 
-        call("/safety/controller_stop/ready", Trigger, Trigger.Request())
-        call("/safety/motor_gate/ready", Trigger, Trigger.Request())
+        if self.mode != "sim":
+            call("/safety/controller_stop/ready", Trigger, Trigger.Request())
+            call("/safety/motor_gate/ready", Trigger, Trigger.Request())
         session = call("/safety/checker/arm", Trigger, Trigger.Request())
-        request = ArmGate.Request()
-        request.session_id = session
-        call("/safety/motor_gate/arm", ArmGate, request)
+        if self.mode != "sim":
+            request = ArmGate.Request()
+            request.session_id = session
+            call("/safety/motor_gate/arm", ArmGate, request)
         self.session_id = session
 
     def on_state(self, message):
@@ -139,12 +141,12 @@ def main():
     rclpy.init()
     node = PolicyNode(policy, mode)
     try:
-        if mode != "sim":
-            deadline = time.monotonic() + 15
-            while node.state is None and not node.done and time.monotonic() < deadline:
-                rclpy.spin_once(node, timeout_sec=0.1)
-            if node.state is None or node.done:
-                raise RuntimeError("no valid policy state before arming")
+        deadline = time.monotonic() + 15
+        while node.state is None and not node.done and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if node.state is None or node.done:
+            raise RuntimeError("no valid policy state before arming")
+        if not node.session_id:
             node.arm()
         while rclpy.ok() and not node.done:
             rclpy.spin_once(node, timeout_sec=0.1)

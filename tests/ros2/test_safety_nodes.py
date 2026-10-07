@@ -337,6 +337,37 @@ class FeedbackBridgeTests(unittest.TestCase):
         self.bridge.publish_feedback()
         self.assertEqual(self.bridge.abort_reason, "sdk_feedback_timeout")
 
+    def test_policy_state_preserves_ids_and_requires_fresh_post_release_base(self):
+        from robot_safety.feedback import FeedbackSample
+
+        bridge = self.bridge
+        bridge.publish_policy = bridge.require_base = True
+        bridge.policy_publisher = Mock()
+        now = time.monotonic()
+        sample = FeedbackSample(now, (0.,) * 29, (0.,) * 29, False,
+                                quat=(1., 0., 0., 0.), gyro=(0., 0., 0.))
+        bridge.pending[now] = sample
+        message = RobotFeedback()
+        message.received_at_secs, message.observation_id = now, 17
+        bridge.base = {"position": (0., 0., 0.8), "linear_velocity": (0.1, 0., 0.),
+                       "base_received_at_secs": now - 0.01, "base_source_time_secs": 123.}
+        bridge.hardware_status = {"handover_complete": True, "motion_released_at_secs": now}
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertEqual(state["observation_id"], 17)
+        self.assertFalse(state["control_ready"])
+        bridge.base["base_received_at_secs"] = time.monotonic()
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertTrue(state["control_ready"])
+        self.assertEqual(state["base_velocity"], [0.1, 0., 0., 0., 0., 0.])
+        bridge.time_started_secs = now - 6
+        bridge.base["base_received_at_secs"] = now - 1
+        bridge.policy_publisher.publish.reset_mock()
+        bridge.on_observation(message)
+        self.assertEqual(bridge.abort_reason, "base_feedback_timeout")
+        bridge.policy_publisher.publish.assert_not_called()
+
     def test_stale_sample_latches_and_blocks_recovery(self):
         from robot_safety.feedback import FeedbackSample
 
