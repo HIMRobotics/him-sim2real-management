@@ -64,9 +64,12 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
     scene = scene or project / "environment/scene.xml"
     policy = ExamplePolicy(name, project / "container/project")
     runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
+    task_command = json.loads(os.environ.get("G1_TASK_COMMAND") or "null")
 
     def command(current, time, _step):
         state = current.feedback(time)
+        if task_command is not None:
+            state["task_command"] = task_command
         current.command(policy.command(state), time)
         current.step(time)
 
@@ -78,6 +81,7 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
             "policy": name,
             "requested_seconds": seconds,
             "policy_calls": policy.sequence,
+            "task_command": task_command,
         },
     )
 

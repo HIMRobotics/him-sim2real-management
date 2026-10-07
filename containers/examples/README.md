@@ -73,11 +73,20 @@ The generated directories are `.cache/sim_examples/<name>/container` and `.cache
 
 `bridge.log` and `policy.log` accompany Docker run reports. `execution: docker_ros` distinguishes this path from `execution: local`. Docker runs use wall-clock deadlines, so their numerical trajectory can differ from local runs. The bridge publishes feedback after advancing physics to avoid giving the controller a state that is already one step old.
 
-The example containers require a network containing only `lo`. They are simulation clients and cannot be launched with `setup.sh` on the robot network. They publish only `/safety/precheck`.
+The example containers publish only `/safety/precheck`. Simulation retains the
+loopback-only network restriction. Explicit dry-run and hardware launch modes
+use the same image through `setup.sh`, as described in the
+[hardware deployment guide](../../robot_safety/HARDWARE_ADAPTER.md#same-container-in-simulation-and-hardware).
+`G1_TASK_COMMAND='[vx,vy,yaw_rate]'` overrides the task command in both the
+container and `--local` example runs. Use `G1_JOINT_PROFILE` to select the same
+effective gains in simulation and hardware.
 
-## Simulation-only policy observations
+## Shared policy observations
 
-The existing robot topics remain available. The bridge additionally publishes `/sim/state` as `std_msgs/String` containing JSON. This provides the base pose and velocity needed by the stair controller without pretending that hardware has an odometry feed.
+The policy client consumes `/safety/policy_state` as `std_msgs/String` containing
+JSON. The simulation bridge retains `/sim/state` for reporting and compatibility.
+Hardware publishes measured joints/IMU and includes base pose/velocity only when
+an explicitly configured measurement source is available and fresh.
 
 | Field | Meaning |
 | --- | --- |
@@ -89,7 +98,8 @@ The existing robot topics remain available. The bridge additionally publishes `/
 | `ctrl_low`, `ctrl_high` | Model actuator target bounds, in motor order |
 | `sim_time`, `height`, `upright` | Simulated time and pelvis state |
 
-The session already exists when the sim starts. These example clients use the ID in `/sim/state`. Other submissions can continue obtaining it from `/safety/checker/arm`.
+The client uses the session supplied in `/safety/policy_state` or arms through
+the existing readiness and `/safety/checker/arm` services.
 
 `--circle` and `--command` use a separate direct-control path. Successful runs
 report `completed`, with `control_path: direct` and explicit per-check flags.

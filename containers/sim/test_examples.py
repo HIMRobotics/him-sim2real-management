@@ -177,6 +177,7 @@ class ExampleTests(unittest.TestCase):
                     str(output),
                 ],
                 cwd="/tmp",
+                env={**os.environ, "G1_TASK_COMMAND": "[0.1,0,0]"},
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -185,6 +186,7 @@ class ExampleTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             report = json.loads((output / "report.json").read_text())
             self.assertEqual(report["execution"], "local")
+            self.assertEqual(report["task_command"], [0.1, 0, 0])
             self.assertFalse(report["safety_checks"])
             with self.assertRaises(ValueError):
                 run("walker", output, scene=Path(tmp) / "absent.xml")
