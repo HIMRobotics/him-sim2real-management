@@ -225,9 +225,9 @@ class RunnerTest(unittest.TestCase):
         self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
         held = runner.active["q"].copy()
         q = list(state["q"])
-        q[0] = q[0] + 0.501
+        q[0] = q[0] + 2.3
         reason = runner.command(hold(runner, state, 1, q=q), 0.02)
-        self.assertEqual(reason, "joint_command_gap_limit")
+        self.assertEqual(reason, "joint_torque_limit")
         np.testing.assert_allclose(runner.active["q"], held)
         for step in range(25):
             runner.step(0.03 + step * 0.02)

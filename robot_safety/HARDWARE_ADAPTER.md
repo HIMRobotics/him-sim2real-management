@@ -31,7 +31,7 @@ adapter. Whole-body policy control through `rt/lowcmd` is not implemented.
 Upper-body ownership ramps from zero to one with a smooth cubic curve. Commands
 use the profile gains and validated feedforward torque. Proposals are clipped to
 joint-position bounds with warnings in `/safety/joint_diagnostics` and ROS logs.
-The clipped command must be within 0.5 rad of the current measured position.
+The command-to-measurement gap is diagnostic only during runtime.
 Total PD plus feedforward torque and desired speed must satisfy per-joint bounds.
 Initial alignment and stationary-start checks remain enabled.
 
@@ -85,7 +85,7 @@ Required fields:
 - `initial_position_tolerance_rad`: allowed first target/measured-position mismatch.
 - `initial_velocity_tolerance_rad_secs`: required near-stationary start tolerance.
 - `joints`: all 29 named joints, including legs. Each needs a positive `max_torque_nm`, position bounds, positive
-  `kp` and `kd`, maximum velocity and `max_command_gap_rad`.
+  `kp` and `kd`, and maximum velocity.
 
 The adapter's feedback deadline is 200 ms. Its output cadence targets 20 ms, matching the operator-tested SDK example.
 The separate stop watchdog polls every 5 ms.
@@ -141,7 +141,7 @@ The profile uses the official revision-1.0 model's position/velocity limits
 for all 17 waist/arm joints.
 The source values and checksum are recorded in
 `robot_safety/profiles/g1_type5.official_limits.json`. Gains still match the tested
-SDK example. Handover and command-gap settings remain local choices. Model
+SDK example. Handover settings remain local choices. Model
 effort ceilings are checked against total estimated torque and available torque feedback.
 
 ## Launch the complete physical test

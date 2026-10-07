@@ -41,15 +41,13 @@ All positions are absolute joint angles in radians. At 50 Hz, an interval lasts
 - `q_measured`: latest measured joint angle.
 - `q_applied`: accepted command retained after simulation application or a
   successful full-weight hardware write. SDK write success does not prove motion.
-- `command_gap = q_commanded - q_measured`: checked before issuing a command.
+- `command_gap = q_commanded - q_measured`: diagnostic only during runtime.
 - `response_error = q_measured - q_applied`: measured after execution, diagnostic only.
 
-`max_command_gap_rad` is **0.5 rad** for every joint. It is a local allowance,
-not a Unitree specification, and is independent of elapsed time. There is no
-consecutive-command delta or desired-velocity-change rejection. Removed profile
-fields are `max_position_target_rate_rad_secs`, `max_acceleration_rad_secs2` and
-`max_tracking_error_rad`. Custom profiles must remove these and explicitly supply
-`max_command_gap_rad`. They are not silently reinterpreted.
+There is no runtime command-gap, consecutive-command delta or desired-velocity-
+change rejection. Custom profiles must remove the obsolete `max_command_gap_rad`,
+`max_position_target_rate_rad_secs`, `max_acceleration_rad_secs2` and
+`max_tracking_error_rad` fields. Initial alignment remains a separate startup check.
 
 `max_velocity_rad_secs` checks both the desired velocity field and measured
 velocity using the model values above, immediately on each sample. No 50 ms
@@ -60,9 +58,17 @@ are the gains it actually sends, and forwards validated feedforward torque.
 
 Position clipping records a warning with the original and clipped angles, bounds,
 count and largest correction per joint. Clipping alone does not latch a stop.
-Gap, initial alignment and torque checks use the clipped command and can still
+Initial alignment and torque checks use the clipped command and can still
 reject it. A small response error does not establish safety. Response diagnostics
 never latch a stop or silently increase any limit.
+
+## Next priority: thrashing and flailing detection
+
+Develop a detector based on measured motion over time, with joint speed, torque
+and body motion as inputs. Validate it against normal gait and deliberately
+unstable simulation cases before enabling a new stop condition. A position
+command gap alone is not evidence of thrashing. Existing physical limits remain
+active but are not a complete detector of unstable motion.
 
 ## Runtime and startup checks
 

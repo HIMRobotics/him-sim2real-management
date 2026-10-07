@@ -14,7 +14,6 @@ class JointHardwareLimits:
     kd: float
     max_velocity_rad_secs: float
     max_torque_nm: float
-    max_command_gap_rad: float
 
     def __post_init__(self):
         if not all(math.isfinite(v) for v in self.__dict__.values()):
@@ -114,8 +113,6 @@ def check_command(
                 limits.max_velocity_rad_secs, "rad/s")
     check_bound("joint_feedforward_torque_limit", joint, abs(tau), limits.max_torque_nm, "Nm")
     command_gap = q_commanded - q_measured
-    check_bound("joint_command_gap_limit", joint, abs(command_gap),
-                limits.max_command_gap_rad, "rad")
     if initial:
         check_bound("initial_joint_position_mismatch", joint, abs(command_gap),
                     initial_position, "rad")

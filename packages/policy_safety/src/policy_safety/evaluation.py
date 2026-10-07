@@ -463,7 +463,7 @@ def evaluate(request):
         "joint_movement_checks": joint_rules.coverage(),
         "acceptance_checks": {
             "calibrated": profile["calibrated"],
-            "metric_threshold_scope": "Global scalar limits. Per-joint command-gap and physical limits are listed in joint_movement_checks.",
+            "metric_threshold_scope": "Global scalar limits. Per-joint physical limits and startup checks are listed in joint_movement_checks.",
             "metric_maxima": profile["maxima"],
             "metrics_without_thresholds": sorted(
                 METRICS - set(profile["maxima"]) - {"actuator_torque", "clipping"}
@@ -476,7 +476,7 @@ def evaluate(request):
                 "profile_torque_demand_and_applied_bounds",
             ],
             "upright_scenarios_only": ["fall_height", "fall_orientation"],
-            "note": "Positions are clipped to the intersection of joint-profile and model bounds with per-joint warnings. Gap and PD torque checks use the clipped command. Response error uses the command actually applied.",
+            "note": "Positions are clipped to the intersection of joint-profile and model bounds with per-joint warnings. PD torque checks use the clipped command. Response error uses the command actually applied. Runtime command gaps do not reject commands.",
         },
         "suite": suite,
         "push_sampling": {

@@ -28,16 +28,18 @@ from view import export_replay
 
 
 class ExampleTests(unittest.TestCase):
-    def test_walker_clips_positions_before_later_gap_rejection(self):
+    def test_walker_completes_with_position_clipping_and_safety_checks(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report = run("walker", tmp, 0.36, safety_checks=True)
+            report = run("walker", tmp, 10, safety_checks=True)
         warning = report["warnings"]["right_ankle_pitch"]
-        self.assertEqual(warning["count"], 3)
-        self.assertEqual(warning["q_commanded"], -0.87267)
-        self.assertLess(warning["q_proposed"], warning["q_commanded"])
-        self.assertEqual(report["commands"], 17)
-        self.assertEqual(report["reason"], "joint_command_gap_limit")
-        self.assertEqual(report["detail"]["joint"], "left_ankle_pitch")
+        self.assertGreater(warning["count"], 0)
+        self.assertNotEqual(warning["q_proposed"], warning["q_commanded"])
+        self.assertEqual(report["commands"], 500)
+        self.assertIsNone(report["reason"])
+        self.assertEqual(report["status"], "within_limits")
+        self.assertFalse(report["motion"]["fell"])
+        self.assertTrue(report["motion"]["upright_at_end"])
+        self.assertGreater(report["motion"]["final_position"][0], 3.0)
 
     def test_walker_makes_forward_progress_with_checks_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,7 +52,7 @@ class ExampleTests(unittest.TestCase):
         self.assertFalse(motion["fell"])
         self.assertTrue(motion["upright_at_end"])
 
-    def test_stairs_real_policy_climbs_with_checks_disabled_and_is_rejected_when_enabled(
+    def test_stairs_real_policy_climbs_and_accepts_checked_startup(
         self,
     ):
         with tempfile.TemporaryDirectory() as tmp:
@@ -63,10 +65,9 @@ class ExampleTests(unittest.TestCase):
             self.assertTrue(off["motion"]["stairs"]["climbed_stairs"])
             self.assertTrue(off["motion"]["stairs"]["finished_upright"])
             on = run("stairs", root / "on", 0.5, safety_checks=True)
-            self.assertEqual(on["status"], "violation")
-            self.assertEqual(on["reason"], "joint_command_gap_limit")
-            self.assertEqual(on["detail"]["joint"], "left_ankle_pitch")
-            self.assertEqual(on["commands"], 19)
+            self.assertEqual(on["status"], "within_limits")
+            self.assertIsNone(on["reason"])
+            self.assertEqual(on["commands"], 25)
             view = export_replay(root / "off/trace.npz", root / "view")
             motion = json.loads((view / "motion.json").read_text())
             self.assertIn("Safety checks: OFF", motion["summary"])

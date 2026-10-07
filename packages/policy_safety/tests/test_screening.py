@@ -296,7 +296,7 @@ def test_counterfactual_initialization(setup, pose):
     ("value", "status", "reason"),
     [
         (float("nan"), "violation", "nonfinite_or_invalid_action"),
-        (1000, "violation", "joint_command_gap_limit"),
+        (1000, "violation", "joint_torque_limit"),
         (RuntimeError("inference failed"), "error", None),
     ],
 )
@@ -432,7 +432,7 @@ def test_raw_clipping_is_recorded(setup, tmp_path):
         assert trace["applied_target"].size == 0
     assert result["simulated_seconds"] == 0
     assert result["peaks"]["clipping"] > 0
-    assert result["first_violation"]["reason"] == "joint_command_gap_limit"
+    assert result["first_violation"]["reason"] == "joint_torque_limit"
 
 
 def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
@@ -446,7 +446,7 @@ def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
         tmp_path / "clipped-command.npz",
         clip_to_stops=True,
     )
-    assert result["first_violation"]["reason"] == "joint_command_gap_limit"
+    assert result["first_violation"]["reason"] == "joint_torque_limit"
     assert result["status"] == "violation"
 
 
@@ -571,7 +571,7 @@ def test_evaluation_enforces_profile_and_reports_sampled_coverage(
         )
     )
     data = json.loads(DEFAULT_JOINT_PROFILE.read_text())
-    data["joints"]["left_hip_pitch"]["max_command_gap_rad"] = 0.001
+    data["joints"]["left_hip_pitch"]["max_torque_nm"] = 0.001
     joint_path = tmp_path / "strict-joints.json"
     joint_path.write_text(json.dumps(data))
     output = tmp_path / "result"

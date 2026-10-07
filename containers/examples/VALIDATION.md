@@ -4,25 +4,28 @@ Validated on the development ARM64 host with real ONNX inference and MuJoCo, usi
 
 ## Current command-gap and response checks
 
-Position proposals are now clipped to the joint bounds with per-joint warnings.
-The shared guard compares the clipped angle with the current measured angle,
-with a 0.5 rad ceiling. It does not compare consecutive proposals. Measured speed
-uses the per-joint model ceilings immediately. Response error is recorded after
-actuation and does not reject commands. The experiments below used older checks.
+Position proposals are clipped to the joint bounds with per-joint warnings.
+The runtime command-gap rejection has been removed. Neither that gap nor changes
+between consecutive proposals reject commands. Measured speed uses the per-joint
+model ceilings immediately. Torque, body motion, freshness and startup checks
+remain enabled. Response error is diagnostic only. The experiments below used
+older checks.
 
 Ten-second local simulation requests with real policy inference produced:
 
 | Policy | Result with checks enabled |
 | --- | --- |
 | GR00T balance | Completed 500 commands over 10 seconds within limits. |
-| Walker | Three right ankle pitch proposals were clipped to -0.87267 rad. After 17 accepted commands, the left ankle pitch command gap reached 0.503285 rad, exceeding 0.5 rad. |
-| Stair walker | After 19 accepted commands, requested a left ankle pitch command gap of 0.534488 rad, exceeding 0.5 rad. |
+| Walker | Completed 500 commands over 10 seconds within limits. Stayed upright with 5.2346 m forward displacement and 1.6509 m lateral drift. Position clipping warned 71 times at the right ankle pitch and 8 at the left. |
+| Stair walker | Completed 500 commands over 10 seconds within limits, climbed all three treads and finished upright. |
 
 The balance run's largest recorded response error was 0.317639 rad, diagnostic
 only. Temporary rollout outputs were removed. Hardware was not activated.
 The walker previously stopped after five accepted commands on an out-of-range
-position proposal. Clipping removes that rejection, but does not bypass the
-remaining gap and torque checks. Its later gap rejection still ends walking.
+position proposal, then after 17 commands on the 0.5 rad gap guard once position
+clipping was enabled. Neither condition now ends the run. Torque and measured
+motion checks remain active. A validated detector for thrashing/flailing is the
+next priority, as described in the [profile guide](../../robot_safety/profiles/README.md#next-priority-thrashing-and-flailing-detection).
 
 ## Earlier walker target-change comparison, October 6, 2026
 

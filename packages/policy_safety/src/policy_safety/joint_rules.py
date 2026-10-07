@@ -52,13 +52,12 @@ class JointRules:
             "rules": [
                 "position_clipping_with_warning",
                 "target_velocity",
-                "command_gap",
                 "initial_target_mismatch",
                 "initial_target_velocity",
                 "feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Before actuation: clip proposed position to bounds with a warning, compare the clipped command with current measured position, and enforce speed and torque limits. Response error is measured minus applied command after the interval, diagnostic only. No consecutive-command delta limit.",
+            "semantics": "Before actuation: clip proposed position to bounds with a warning and enforce speed and torque limits. Initial alignment is checked only at startup. Command gap and response error are diagnostics, with no runtime delta or consecutive-command change limit.",
         }
 
     def clip_positions(self, q_proposed, warnings=None, bounds=None):

@@ -30,7 +30,6 @@ def profile_data():
                 "kp": 2.0,
                 "kd": 0.5,
                 "max_velocity_rad_secs": 0.1,
-                "max_command_gap_rad": 0.1,
                 "max_torque_nm": 100.0,
             }
             for i in range(29)
@@ -448,15 +447,14 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIsNotNone(self.adapter.abort_reason)
         self.assertEqual(self.transport.writes, [])
 
-    def test_leg_command_target_step_is_rejected(self):
+    def test_leg_command_gap_does_not_reject(self):
         self.run_first()
         self.now += 0.005
-        self.command["q"][3] = 0.2
+        self.command["q"][3] = 0.6
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
-        reason = self.adapter.abort_reason
-        self.assertIn("left_knee: joint_command_gap_limit", reason)
-        self.assertEqual(len(self.transport.writes), 1)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 2)
         self.assertNotIn(3, self.transport.writes[-1][0])
 
     def test_leg_velocity_limit_is_rejected(self):
@@ -489,19 +487,17 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIsNotNone(self.adapter.abort_reason)
         self.assertEqual(len(self.transport.writes), 1)
 
-    def test_output_rejection_preserves_proposed_offset_measurements(self):
+    def test_command_gap_remains_diagnostic_without_rejection(self):
         self.run_first()
         self.now += 0.005
-        self.command["q"][16] = 0.2
+        self.command["q"][16] = 0.6
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
-        reason = self.adapter.abort_reason
-        self.assertIn("left_shoulder_roll: joint_command_gap_limit", reason)
-        self.assertIn("value=0.2", reason)
-        self.assertEqual(len(self.transport.writes), 1)
-        self.assertTrue(self.adapter.stop_requested.is_set())
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 2)
+        self.assertFalse(self.adapter.stop_requested.is_set())
         ranges = self.adapter.joint_diagnostics_snapshot()["left_shoulder_roll"]
-        self.assertEqual(ranges["command_gap_rad"]["max_abs"], 0.2)
+        self.assertEqual(ranges["command_gap_rad"]["max_abs"], 0.6)
         self.assertEqual(ranges["response_error_rad"]["samples"], 0)
 
     def test_tracking_waits_for_feedback_after_a_successful_full_weight_write(self):
@@ -722,7 +718,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 1)
 
-    def test_clipping_precedes_gap_and_torque_checks_and_sdk_write(self):
+    def test_clipping_precedes_torque_checks_and_sdk_write(self):
         self.run_first()
         self.adapter.first_output_secs = self.now - self.adapter.profile.handover_secs
         q = list(self.adapter.feedback.q)

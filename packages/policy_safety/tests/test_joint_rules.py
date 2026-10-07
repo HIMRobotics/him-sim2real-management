@@ -18,30 +18,12 @@ def rules(bundle):
 
 
 @pytest.mark.parametrize("sign", [-1, 1])
-def test_command_gap_boundaries_for_every_joint(rules, sign):
-    for i, name, limits in rules.entries:
-        q_proposed, dq, tau, q_measured = (np.zeros(29) for _ in range(4))
-        q_proposed[i] = 0.1
-        q_measured[i] = q_proposed[i] - sign * 0.5
-        rules.check_command(q_proposed, dq, tau, q_measured)
-        q_measured[i] -= sign * 1e-6
-        with pytest.raises(JointViolation, match="joint_command_gap_limit") as error:
-            rules.check_command(q_proposed, dq, tau, q_measured)
-        assert error.value.details["joint"] == name
-        assert error.value.details["limit"] == 0.5
-
-
-def test_gap_uses_current_measurement_not_previous_command(rules):
-    q, dq, tau, measured = (np.zeros(29) for _ in range(4))
-    q[15], measured[15] = 0.4, 0.0
-    rules.check_command(q, dq, tau, measured)
-    # The same command must be rejected if the joint moves away from it.
-    measured[15] = -0.11
-    with pytest.raises(JointViolation, match="joint_command_gap_limit"):
-        rules.check_command(q, dq, tau, measured)
-    # A large change of command is allowed when close to the actual position.
-    q[15], measured[15] = -0.4, -0.3
-    rules.check_command(q, dq, tau, measured)
+def test_runtime_gap_has_no_limit_for_every_joint(rules, sign):
+    for i, _name, limits in rules.entries:
+        q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+        q[i] = limits.position_min_rad if sign < 0 else limits.position_max_rad
+        measured[i] = limits.position_max_rad if sign < 0 else limits.position_min_rad
+        np.testing.assert_array_equal(rules.check_command(q, dq, tau, measured), q)
 
 
 @pytest.mark.parametrize("gap", [0.4, 0.501])
@@ -61,14 +43,8 @@ def test_hardware_and_simulation_agree(rules, gap, monkeypatch):
     hardware.command = {"q": q, "dq": dq, "tau": tau}
     hardware.feedback = SimpleNamespace(q=measured, dq=dq)
     hardware.last_output_secs = 0
-    if gap <= 0.5:
-        hardware.checked_targets(0.02)
-        rules.check_command(q, dq, tau, measured)
-    else:
-        with pytest.raises(ValueError, match="joint_command_gap_limit"):
-            hardware.checked_targets(0.02)
-        with pytest.raises(JointViolation, match="joint_command_gap_limit"):
-            rules.check_command(q, dq, tau, measured)
+    assert hardware.checked_targets(0.02)[15]["q"] == gap
+    assert rules.check_command(q, dq, tau, measured)[15] == gap
 
 
 @pytest.mark.parametrize("sign", [-1, 1])
@@ -92,8 +68,7 @@ def test_official_velocity_and_torque_boundaries(rules, sign):
 
 def test_position_initial_and_finite_checks_remain(rules):
     q, dq, tau, measured = (np.zeros(29) for _ in range(4))
-    for value, initial, reason in ((2.8, False, "joint_command_gap_limit"),
-                                   (0.031, True, "initial_joint_position_mismatch"),
+    for value, initial, reason in ((0.031, True, "initial_joint_position_mismatch"),
                                    (float("nan"), False, "nonfinite")):
         q[15] = value
         with pytest.raises(ValueError, match=reason):
@@ -118,8 +93,7 @@ def test_position_clipping_warns_and_preserves_proposals(rules, side):
         rules.check_command(q, dq, tau, measured, warnings=warnings)
         assert warnings[name]["count"] == 2
         measured[i] = bound + (0.501 if side == "position_min_rad" else -0.501)
-        with pytest.raises(JointViolation, match="joint_command_gap_limit"):
-            rules.check_command(q, dq, tau, measured)
+        assert rules.check_command(q, dq, tau, measured)[i] == bound
 
 
 def test_body_limits_are_per_axis_and_tilt_is_optional():

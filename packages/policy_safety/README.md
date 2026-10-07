@@ -102,7 +102,7 @@ This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not
 describe the complete stairs submission. Decoded positions are clipped to the
 intersection of model and joint-profile bounds. Reports retain the raw proposal,
-clipped command and per-joint warnings. Gap and torque checks use the clipped
+clipped command and per-joint warnings. Torque checks use the clipped
 command. `--clip-to-stops` remains a compatibility flag, as clipping is now default.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
@@ -196,8 +196,8 @@ Two profiles apply by default. `--profile` selects global simulator limits
 Wheel builds include the file's contents, with no repository or ROS dependency
 at runtime.
 
-The joint rules reject out-of-range position and desired velocity, excessive
-command-to-measurement gap, and excessive feedforward or total PD torque demand.
+The joint rules clip out-of-range position proposals with warnings and reject
+excessive desired velocity, feedforward torque or total PD torque demand.
 Initial alignment remains 0.03 rad and initial desired speed 0.05 rad/s.
 
 ### Shared speed checks
@@ -212,11 +212,11 @@ maximum tilt. Non-upright counterfactuals omit the upright fall check.
 ### Command and response checks
 
 `q_proposed` is the pending absolute position command. `q_measured` is current
-feedback. The bounded proposal is `q_commanded`. Before applying a command,
-`abs(q_commanded - q_measured)` must not exceed
-`max_command_gap_rad`, **0.5 rad** for every joint in the supplied profiles.
-There is no consecutive-command delta check. Position, torque and speed bounds
-still apply independently. Simulation retains the submitted policy's gains.
+feedback. The bounded proposal is `q_commanded`. Its difference from the measured
+position is diagnostic only during runtime. There is no runtime command-gap or
+consecutive-command delta rejection. Position clipping, torque and speed bounds
+still apply independently. Initial alignment remains a startup-only check.
+Simulation retains the submitted policy's gains.
 
 `q_applied` is the accepted position command. After a complete 20 ms interval,
 `response_error = q_measured - q_applied` is recorded as a diagnostic peak, not a
@@ -224,8 +224,8 @@ hard-stop criterion. This replaces the old fixed tracking-error tolerances.
 Legacy report readers still recognize old tracking violations in saved reports.
 
 The global shared profile covers all 29 joints. The standalone package links the
-same profile and dependency-free `joint_checks.py`. Removed custom-profile fields
-must be replaced with `max_command_gap_rad`, as explained in the
+same profile and dependency-free `joint_checks.py`. Remove obsolete custom-profile
+fields, including `max_command_gap_rad`, as explained in the
 [profile guide](../../robot_safety/profiles/README.md).
 
 Hardware remains restricted to arm/waist submissions and uses its configured
@@ -330,7 +330,7 @@ establish whether the policy is physically safe.
 Zero violations only means no *enforced* checks failed in the scenarios reported
 so far. The provisional global profile has no scalar thresholds for measured joint
 velocity/acceleration, base speeds, or contact force.
-The separate joint profile nevertheless enforces command gaps, position bounds,
+The separate joint profile nevertheless enforces position bounds through clipping,
 and immediate measured joint speed for its covered joints. The shared body-speed
 check also applies. `acceptance_checks` lists global gaps and
 `joint_movement_checks` lists per-joint coverage. The evaluator checks unsaturated PD torque demand as well as the resulting
