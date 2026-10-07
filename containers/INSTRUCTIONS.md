@@ -5,12 +5,12 @@ A submission is one `linux/arm64` image with its dependencies installed. Models 
 | | Rule |
 | --- | --- |
 | Packaging | `containers/upload/submission.tar`. One `ENTRYPOINT`. |
-| Inputs | `/safety/robot_feedback` and `rt/lowstate` only. No camera, lidar, or odometry topic. |
+| Inputs | `/safety/policy_state`, `/safety/policy_observation`, and read-only `rt/lowstate`. Base state requires a qualified configured source. |
 | Outputs | 29-slot `JointCommand` on `/safety/precheck`. Stop on `/safety/abort`. |
 | Limits | Fresh observation within 0.2 s, next command within 0.2 s, targets inside the joint profile. Sim: first command within 30 s, then `--seconds` (default 10). The robot process runs until stop or abort. No memory or CPU quota. |
 | Access | State in and joint commands out through the topics below. Not `rt/lowcmd`, `rt/arm_sdk`, or `g1-safety-stops`. |
 
-`./setup.sh` loads that archive and starts the entrypoint. `g1-safety-stops` on the host checks commands and writes motors.
+`./setup.sh` defaults to preflight. Explicit execution modes launch the shared host checker and gate. See [hardware execution](../robot_safety/HARDWARE_ADAPTER.md#same-container-in-simulation-and-hardware) for flags and qualification.
 
 `setup.sh` sets:
 
@@ -18,7 +18,7 @@ A submission is one `linux/arm64` image with its dependencies installed. Models 
 | --- | --- |
 | `ROBOT_INTERFACE` | `eth0` |
 | `ROBOT_DOMAIN` | `0` |
-| `ROS_DOMAIN_ID` | `97` |
+| `ROS_DOMAIN_ID` | `98` by default for the managed hardware/dry-run graph |
 | `ROS_LOCALHOST_ONLY` | `1` |
 | `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` |
 
@@ -26,12 +26,13 @@ A submission is one `linux/arm64` image with its dependencies installed. Models 
 
 | Source | What it is |
 | --- | --- |
-| `/safety/robot_feedback` | 29 joint `q` and `dq`, `start_button_pressed`, `observation_id` |
+| `/safety/policy_observation` | 29 joint `q` and `dq`, controller state, checker-issued `observation_id` |
+| `/safety/policy_state` | Same IDs with timestamped `quat`, `gyro`, and available measured `position`/`base_velocity` |
 | `rt/lowstate` | IMU quaternion (w, x, y, z), gyro, accelerometer, rpy, and the same 29 motors |
 
 Joint order: `left_hip_pitch`, `left_hip_roll`, `left_hip_yaw`, `left_knee`, `left_ankle_pitch`, `left_ankle_roll`, `right_hip_pitch`, `right_hip_roll`, `right_hip_yaw`, `right_knee`, `right_ankle_pitch`, `right_ankle_roll`, `waist_yaw`, `waist_roll`, `waist_pitch`, `left_shoulder_pitch`, `left_shoulder_roll`, `left_shoulder_yaw`, `left_elbow`, `left_wrist_roll`, `left_wrist_pitch`, `left_wrist_yaw`, `right_shoulder_pitch`, `right_shoulder_roll`, `right_shoulder_yaw`, `right_elbow`, `right_wrist_roll`, `right_wrist_pitch`, `right_wrist_yaw`.
 
-The platform does not provide odometry, camera images, or lidar. `rt/lowstate` accelerometer is not odometry. A driver shipped inside the image does not add a second way to command motors.
+Base state is optional and must be explicitly sourced and qualified. Camera images and lidar are not supplied. `rt/lowstate` accelerometer is not odometry. A driver shipped inside the image does not add a second way to command motors.
 
 ## Output
 
@@ -44,11 +45,11 @@ Publish `JointCommand` on `/safety/precheck` every control step. All 29 slots, s
 | `sequence` | Increases by 1 each frame |
 | `observation_id` | From the `RobotFeedback` used for that frame |
 
-A joint the policy does not command stays in the message and is damped: `kp` 0, `kd` 2, `dq` 0, `tau` 0, `q` held at the measured angle.
+Every joint stays in the message. Use an explicit hold for joints outside the policy output. Effective gains come from the approved host profile, not arbitrary submitted gain changes.
 
 Subscribe to `/safety/abort` and stop publishing when it arrives.
 
-The host gate writes approved waist and arm targets (indices 12–28) to `rt/arm_sdk`. It checks all 29 joints. A precheck frame does not become a 29-motor `rt/lowcmd` stream.
+The host gate supports arm-only `rt/arm_sdk` output and explicitly selected whole-body `rt/lowcmd` output. Both use the shared command checks. The container never owns a motor publisher.
 
 ## Safety
 
@@ -89,7 +90,7 @@ On the robot:
 ./setup.sh
 ```
 
-Ctrl+C stops it. `./setup.sh stop` removes it. The safety service keeps running.
+Ctrl+C stops the managed session through its gate. `./setup.sh stop` removes the container, causing the gate watchdog to stop output. Follow the documented supported recovery procedure before restoring the background service.
 
 ## MuJoCo
 

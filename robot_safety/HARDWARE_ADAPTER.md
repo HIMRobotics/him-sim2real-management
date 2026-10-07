@@ -1,4 +1,4 @@
-# G1 arm SDK output adapter
+# G1 checked hardware output adapter
 
 The adapter sends approved commands to the robot using the Unitree SDK. It acts
 as the middleman between the safety checker and the actual robot motors.
@@ -26,8 +26,9 @@ independent computers or a hardware emergency-stop circuit.
 
 `unitree_transport.py` publishes CRC-protected `LowCmd` frames to `rt/arm_sdk`,
 following the official upper-body example. Indices 12–28 contain waist and arm
-targets. Index 29 carries ownership weight. Legs are not controlled through this
-adapter. Whole-body policy control through `rt/lowcmd` is not implemented.
+targets. Index 29 carries ownership weight. Explicit `whole_body_output:=true`
+selects the existing `rt/lowcmd` encoder for all 29 checked joint commands.
+The soft-reset balance helper calls this same encoder.
 Upper-body ownership ramps from zero to one with a smooth cubic curve. Commands
 use the profile gains and validated feedforward torque. Proposals are clipped to
 joint-position bounds with warnings in `/safety/joint_diagnostics` and ROS logs.
@@ -180,3 +181,91 @@ and successfully reported incorrect modes are not retried. Both failed attempts
 still reject startup without damping. Logs include the code, mode and elapsed
 time for each attempt. This tolerates a transient lost reply but does not
 establish the cause of the observed timeouts. Stop RPC timing is unchanged.
+
+## Same container in simulation and hardware
+
+`setup.sh` now defaults to preflight. It validates the selected joint profile and
+reports code, profile and image hashes without starting robot processes.
+The example container consumes `/safety/policy_state` in either environment,
+then sends the same `JointCommand` through the checker and motor gate. Inference
+stays inside the container. `/sim/state` remains a compatibility/reporting topic.
+
+Prepare one example image and select the generated profile in both backends:
+
+```bash
+python3 containers/examples/prepare.py walker
+docker build -t g1-policy:local .cache/sim_examples/walker/container
+export G1_JOINT_PROFILE="$PWD/.cache/sim_examples/walker/container/project/joint_profile.json"
+G1_TASK_COMMAND='[0,0,0]' ./sim.sh --image g1-policy:local --seconds 10
+./setup.sh --image g1-policy:local --profile "$G1_JOINT_PROFILE"
+```
+
+For Compose, `G1_JOINT_PROFILE` must name the profile inside the `/workspace`
+mount. The generated profile retains the current physical limits and selects
+the model's gains. Review it before deployment. The gate freezes that profile
+at startup, overrides submitted gains with its gains, and checks torque with
+those exact values. Requalify changes instead of loosening failing limits.
+
+Hardware observations reuse low-state joints/IMU. Policies needing translation
+also require an explicitly configured `SportModeState_` SDK source:
+`G1_BASE_STATE_TOPIC` and `G1_BASE_VELOCITY_FRAME=world|body`. Position must already
+be in the same world frame as the low-state quaternion. Verify this contract,
+measurement accuracy, advancing source timestamps and availability after stock
+control release under support. There is no assumed topic or zero-velocity
+fallback. Set `G1_REQUIRE_BASE_STATE=false` only for a policy such as stationary
+balance that needs neither base velocity nor position. Movement trials require
+both. Unsupported sensor contracts need a bridge extension, not guessed data.
+
+```bash
+# Same live feedback, checks and inference, with no motor publishers/control RPCs.
+./setup.sh --image g1-policy:local --profile "$G1_JOINT_PROFILE" --mode dry-run
+# Only after supported qualification and deliberate watchdog-service transition.
+./setup.sh --image g1-policy:local --profile "$G1_JOINT_PROFILE"   --mode hardware --enable-hardware-output
+```
+
+The launcher uses a separate localhost ROS domain (98 by default), starts the
+existing feedback, checker, controller-stop and hardware-gate roles, and records
+their logs under `.cache/hardware_runs`. Dry-run leaves the background service
+alone. Hardware mode refuses an active `g1-safety-stops.service`; transition it
+manually while the robot is supported. The gate and direct balance launcher
+share `/tmp/g1-motor-writer.lock`. Already-running older software must be stopped
+before relying on this exclusion. No service is automatically restarted.
+
+Without a trial file the example requests zero task velocity and maintains
+policy control until stopped. `G1_TASK_COMMAND` selects the same explicit task
+command in either backend. Whole-body faults restore stock motion and request
+damping, retaining the fault latch. Restart the entire session deliberately
+after recovery. RPC success is not proof of physical stopping.
+
+## Measured trial campaign
+
+Qualify the exact checked path in simulation, then hardware inference without
+output. Under the gantry, verify takeover, zero-command standing, normal stop,
+controller/fault stop and stock restoration. Record tested ramps and braking
+distance. Keep monitoring during calibration; scored trials require
+`G1_THRASH_MODE=enforce` (simulation: `G1_SIM_THRASH_MODE=enforce`).
+
+Set `G1_TRIAL_CONFIG` to a reviewed JSON file for either backend. Required fields
+are `phase` (`supported_straight`, `unsupported_straight`, or `circle`),
+`qualified: true`, `ramp_secs`, `braking_distance_m`, `settle_secs`, and
+`stationary_speed_m_s`. Numeric settings must be positive measured/qualified
+values. `qualified` records operator signoff, not an automated safety claim.
+The provisional yaw settling threshold is 0.05 rad/s. Never invent braking data
+to enable a trial. Initial speeds are fixed at 0.10 m/s and circle yaw at
+0.10 rad/s, ramped together. Changing these settings requires requalification.
+
+Straight trials target 2 m with endpoint error at most 0.10 m and maximum
+lateral deviation below 0.20 m. Circles require a measured counterclockwise full
+lap of radius 1 m, radial error below 0.20 m and return error at most 0.20 m.
+The 40/100 s deadlines include braking and settling. Timeout fails the trial.
+Successful completion continues zero-command standing control until the operator
+ends the session. A trial's geometric result is provisional until logs and
+physical observations are reviewed, including clipping warnings and any timing
+violations, safety trips, joint faults, falls or balance assistance.
+
+Require three reviewed clean supported straight runs, then three unsupported
+straight runs, then three circles. Advancement is manual. Supported trials keep
+feet weight-bearing, with the gantry following without towing and a second
+operator handling stopping. Hashes, commands, measured state, inference timing,
+trial results, clipping diagnostics, thrash telemetry and stop reasons are saved
+in the run logs. Configuration/policy changes require renewed qualification.
