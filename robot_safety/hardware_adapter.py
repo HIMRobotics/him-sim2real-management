@@ -46,7 +46,6 @@ class G1ArmAdapter:
         self.profile = profile
         self.whole_body = whole_body
         self.release_pending = False
-        self.output_lock = Lock()
         self.clock = clock
         self.transport = None
         self.lock = RLock()
@@ -312,15 +311,7 @@ class G1ArmAdapter:
             self.last_submission_secs = now
 
     def step(self):
-        """Validate the proposal and freshness before one arm SDK write."""
-        if not self.output_lock.acquire(blocking=False):
-            return
-        try:
-            self._step()
-        finally:
-            self.output_lock.release()
-
-    def _step(self):
+        """Check and publish one command from the single output worker."""
         with self.lock:
             if not self.armed or self.abort_reason or self.stop_requested.is_set():
                 return
