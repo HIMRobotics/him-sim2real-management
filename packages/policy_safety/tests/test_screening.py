@@ -281,13 +281,13 @@ def test_counterfactual_initialization(setup, pose):
     q = sim.data.qpos[sim.qadr]
     assert np.all(q >= sim.bounds[:, 0]) and np.all(q <= sim.bounds[:, 1])
     monitor = Monitor(sim, profile)
-    _, _, _, reason = monitor.sample(q, q, np.zeros(29), pose == "standing")
+    _, _, _, reason = monitor.sample(q, q, pose == "standing")
     assert reason != "fall"
     if pose in ("left_side", "right_side"):
         left_axis_height = sim.data.xmat[sim.base].reshape(3, 3)[2, 1]
         assert left_axis_height == pytest.approx(-1 if pose == "left_side" else 1)
     if pose in ("supine", "prone", "left_side", "right_side"):
-        assert monitor.sample(q, q, np.zeros(29), True)[-1] == "fall"
+        assert monitor.sample(q, q, True)[-1] == "fall"
 
 
 @pytest.mark.parametrize(
@@ -307,9 +307,8 @@ def test_bad_inference_is_reported(setup, tmp_path, value, status, reason):
         assert result["first_violation"]["reason"] == reason
 
 
-def test_oscillating_targets_trigger_rate_limit(setup, tmp_path):
+def test_consecutive_proposals_do_not_trigger_a_rate_limit(setup, tmp_path):
     sim, adapter, profile = setup
-    profile["maxima"]["target_rate"] = 2.0
 
     class OscillatingSession(Session):
         def run(self, names, inputs):
@@ -319,8 +318,7 @@ def test_oscillating_targets_trigger_rate_limit(setup, tmp_path):
 
     adapter.session = OscillatingSession(0.05)
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "rate.npz")
-    assert result["first_violation"]["reason"] == "target_rate_limit"
-    assert result["first_violation"]["time_seconds"] > sim.dt
+    assert result["status"] == "completed"
 
 
 def test_scenario_summary_counts_overlapping_issues():
@@ -353,19 +351,6 @@ def test_scenario_summary_counts_overlapping_issues():
     }
 
 
-def test_flail_ignores_an_impact_shorter_than_50ms():
-    from policy_safety.evaluation import overspeed_held
-
-    counts = np.zeros(1, dtype=int)
-    for _ in range(24):
-        counts, held = overspeed_held(counts, [True], 25)
-        assert not held
-    counts, held = overspeed_held(counts, [True], 25)
-    assert held
-    counts, held = overspeed_held(counts, [False], 25)
-    assert not held and counts[0] == 0
-
-
 def test_verdicts_and_calibration():
     assert verdict([{"status": "completed"}], True) == ("within_limits", 0)
     assert verdict([{"status": "completed"}], False) == ("uncalibrated", 3)
@@ -387,10 +372,10 @@ def test_velocity_threshold_is_enforced_only_when_configured(setup):
     sim, _, profile = setup
     sim.data.qvel[sim.vadr[0]] = 3.0
     q = sim.data.qpos[sim.qadr].copy()
-    assert Monitor(sim, profile).sample(q, q, np.zeros(29), True)[-1] is None
+    assert Monitor(sim, profile).sample(q, q, True)[-1] is None
     profile["maxima"]["joint_velocity"] = 2.0
     assert (
-        Monitor(sim, profile).sample(q, q, np.zeros(29), True)[-1]
+        Monitor(sim, profile).sample(q, q, True)[-1]
         == "joint_velocity_limit"
     )
 
@@ -459,7 +444,7 @@ def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
         tmp_path / "clipped-command.npz",
         clip_to_stops=True,
     )
-    assert result["first_violation"]["reason"] == "joint_tracking_error_limit"
+    assert result["first_violation"]["reason"] == "joint_command_gap_limit"
     assert result["status"] == "violation"
 
 
@@ -501,30 +486,43 @@ def test_branch_restores_joint_command_history(setup, tmp_path):
     assert sim.command_history is None
     sim.restore(snapshots[2], adapter)
     dq = np.zeros(29)
-    dq[15] = 0.021
+    dq[15] = 38.0
     adapter.command_velocity_and_torque = lambda: (dq.copy(), np.zeros(29))
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "branch.npz")
-    assert result["first_violation"]["reason"] == "joint_velocity_target_change_limit"
+    assert result["first_violation"]["reason"] == "joint_target_velocity_limit"
     assert result["simulated_seconds"] == 0
 
 
-def test_tracking_checked_between_policy_updates(setup, tmp_path, monkeypatch):
+@pytest.mark.parametrize("follows_target", [True, False])
+def test_tracking_allows_a_full_interval_to_follow_target(
+    setup, tmp_path, monkeypatch, follows_target,
+):
     from policy_safety import evaluation
+    from policy_safety.joint_rules import JointRules
 
     sim, adapter, profile = setup
-    original_step = evaluation.mujoco.mj_step
+    rules = JointRules(sim.robot["joint_names"])
+    target = sim.data.qpos[sim.qadr].copy()
+    target[15] += 0.06
+    adapter.decode = lambda raw: target.copy()
+    ticks = 0
 
-    def drift_step(model, data):
-        original_step(model, data)
-        data.qpos[sim.qadr[15]] -= 0.31
+    def finish_on_last_tick(model, data):
+        nonlocal ticks
+        ticks += 1
+        data.time += sim.physics_dt
+        if follows_target and ticks == sim.substeps:
+            data.qpos[sim.qadr[15]] = target[15]
 
-    monkeypatch.setattr(evaluation.mujoco, "mj_step", drift_step)
+    monkeypatch.setattr(evaluation.mujoco, "mj_step", finish_on_last_tick)
     result, _ = run_scenario(
-        sim, adapter, profile, scenario(), tmp_path / "tracking.npz"
+        sim, adapter, profile, scenario(seconds=sim.dt), tmp_path / "response.npz",
+        joint_rules=rules,
     )
-    assert result["first_violation"]["reason"] == "joint_tracking_error_limit"
-    assert result["first_violation"]["joint"] == "left_shoulder_pitch"
-    assert result["simulated_seconds"] == sim.physics_dt
+    assert ticks == sim.substeps
+    assert result["simulated_seconds"] == pytest.approx(sim.dt)
+    assert result["status"] == "completed"
+    assert result["peaks"]["response_error"] == pytest.approx(0 if follows_target else 0.06)
 
 
 def test_evaluation_enforces_profile_and_reports_sampled_coverage(
@@ -552,7 +550,7 @@ def test_evaluation_enforces_profile_and_reports_sampled_coverage(
         )
     )
     data = json.loads(DEFAULT_JOINT_PROFILE.read_text())
-    data["joints"]["left_hip_pitch"]["max_tracking_error_rad"] = 0.001
+    data["joints"]["left_hip_pitch"]["max_command_gap_rad"] = 0.001
     joint_path = tmp_path / "strict-joints.json"
     joint_path.write_text(json.dumps(data))
     output = tmp_path / "result"
@@ -715,7 +713,7 @@ def test_mp4_starts_with_ftyp(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "joint,spin,flail", [(9, 0, False), (9.1, 0, True), (0, 5.4, False), (0, 5.5, True)]
+    "joint,spin,flail", [(32, 0, False), (32.1, 0, True), (0, 6, False), (0, 6.1, True)]
 )
 def test_sustained_speed_monitor_uses_profile_and_body_caps(
     setup, tmp_path, monkeypatch, joint, spin, flail
@@ -735,7 +733,7 @@ def test_sustained_speed_monitor_uses_profile_and_body_caps(
     if flail:
         reason = "joint_velocity_limit" if joint else "base_angular_speed_limit"
         assert result["first_violation"]["reason"] == reason
-        assert result["simulated_seconds"] == pytest.approx(0.05)
+        assert result["simulated_seconds"] == pytest.approx(sim.physics_dt)
     else:
         assert result["status"] == "completed"
 

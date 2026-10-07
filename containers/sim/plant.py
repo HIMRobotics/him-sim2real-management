@@ -7,6 +7,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from hardware_constants import G1_29_JOINT_NAMES
+from joint_checks import BASE_TILT_LIMIT_RAD
 
 
 def load_model(scene=None):
@@ -41,7 +42,7 @@ CONTROL_DT = 0.02
 PHYSICS_DT = 0.002
 DAMPING_KD = 2.0
 FALL_HEIGHT_M = 0.28
-FALL_UPRIGHT_MIN = 0.3
+FALL_UPRIGHT_MIN = math.cos(BASE_TILT_LIMIT_RAD)
 # Same starts as the offline screening counterfactuals. Only standing uses the fall check.
 POSES = ("standing", "seated", "supine", "prone", "left_side", "right_side")
 

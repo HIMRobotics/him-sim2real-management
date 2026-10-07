@@ -18,14 +18,18 @@ from .hardware_constants import (
 )
 from .hardware_profile import (
     DAMPING_RETRY_SECS,
+    HARDWARE_BATTERY_TIMEOUT_SECS,
     HARDWARE_FEEDBACK_TIMEOUT_SECS,
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
 )
 from .joint_checks import (
-    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
-    SPEED_HOLD_S,
+    MIN_BATTERY_PERCENT,
+    MOTOR_CASING_LIMIT_C,
+    MOTOR_WINDING_LIMIT_C,
+    check_base_motion,
+    check_bound,
     check_command,
     check_measured_velocity,
     check_torque,
@@ -43,6 +47,8 @@ class G1ArmAdapter:
         self.lock = RLock()
         self.stop_lock = Lock()
         self.feedback = None
+        self.battery_percent = None
+        self.battery_time = None
         self.machine_type = None
         self.abort_reason = None
         self.armed = False
@@ -59,8 +65,6 @@ class G1ArmAdapter:
         self.balance_released = False
         self.quat = (1.0, 0.0, 0.0, 0.0)
         self.gyro = (0.0, 0.0, 0.0)
-        self._joint_over_since = {}
-        self._base_over_since = None
         self.f3_pressed = False
         self.reported_fsm_id = None
         self.arm_release_written = False
@@ -122,6 +126,38 @@ class G1ArmAdapter:
                     self.abort("hardware_machine_type_changed")
             except (AttributeError, TypeError, ValueError, OverflowError):
                 self.abort("invalid_hardware_feedback")
+
+    def receive_battery(self, message):
+        """Copy the separate, lower-frequency BMS reading."""
+        with self.lock:
+            try:
+                charge = float(message.soc)
+                if not math.isfinite(charge) or not 0 <= charge <= 100:
+                    raise ValueError("invalid_battery_feedback")
+                self.battery_percent, self.battery_time = charge, self.clock()
+                if self.armed and charge < MIN_BATTERY_PERCENT:
+                    self.abort("low_battery", request_damping=True)
+            except (AttributeError, TypeError, ValueError):
+                self.abort("invalid_battery_feedback", request_damping=self.armed)
+
+    def check_health(self):
+        """Require current health telemetry before enabling or continuing output."""
+        if (self.battery_time is None
+                or not 0 <= self.clock() - self.battery_time < HARDWARE_BATTERY_TIMEOUT_SECS):
+            raise ValueError("battery_feedback_timeout")
+        if self.battery_percent < MIN_BATTERY_PERCENT:
+            raise ValueError("low_battery")
+        if self.feedback is None or len(self.feedback.temperature) != 29:
+            raise ValueError("missing_motor_temperature")
+        for index, temperatures in enumerate(self.feedback.temperature):
+            if len(temperatures) != 2:
+                raise ValueError("invalid_motor_temperature")
+            name = G1_29_JOINT_NAMES[index]
+            check_bound("motor_casing_temperature_limit", name, temperatures[0], MOTOR_CASING_LIMIT_C, "C")
+            check_bound("motor_winding_temperature_limit", name, temperatures[1], MOTOR_WINDING_LIMIT_C, "C")
+        if self.feedback.tau_est:
+            for index, limits in self._monitored_joints():
+                check_torque(G1_29_JOINT_NAMES[index], limits, self.feedback.tau_est[index])
 
     def feedback_fresh(self, now):
         return (
@@ -185,6 +221,11 @@ class G1ArmAdapter:
                     f"feedback age: measured={age} secs, "
                     f"required=0 <= age < {HARDWARE_FEEDBACK_TIMEOUT_SECS} secs"
                 )
+            try:
+                self.check_health()
+                check_base_motion(self.gyro, self.quat)
+            except ValueError as error:
+                return self.reject_arm(str(error))
             if self.feedback.start_button_pressed or self.f3_pressed:
                 return self.reject_arm("Start and F3 must be released")
             for index, limits in self._monitored_joints():
@@ -214,7 +255,9 @@ class G1ArmAdapter:
         """Initialize output history before workers start or under both adapter locks."""
         self.command = None
         self.command_expires_secs = None
-        self.previous_targets = self.previous_velocities = None
+        self.q_applied = None
+        self.dq_applied = self.tau_applied = None
+        self.command_time = None
         self.first_output_secs = self.last_output_secs = None
         self.last_worker_cycle_secs = None
         self.last_written_ownership_weight = 0.0
@@ -234,6 +277,9 @@ class G1ArmAdapter:
             if self.abort_reason is None:
                 self.abort_reason = reason
             self.command = None
+            if request_damping:
+                self.hold_failed = True
+                self.walk_stop = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
                 self.stop_requested.set()
 
@@ -260,7 +306,7 @@ class G1ArmAdapter:
             self.last_submission_secs = now
 
     def step(self):
-        """Check freshness and target slew before one serialized arm SDK write."""
+        """Validate the proposal and freshness before one arm SDK write."""
         with self.lock:
             if not self.armed or self.abort_reason or self.stop_requested.is_set():
                 return
@@ -285,8 +331,14 @@ class G1ArmAdapter:
                 self.abort("hardware_command_expired")
                 return
             try:
+                self.check_health()
+            except ValueError as error:
+                self.abort(str(error), request_damping=True)
+                return
+            try:
+                self.record_response()
                 self.joint_diagnostics.record(
-                    self.command, self.feedback, self.previous_targets
+                    self.command, self.feedback
                 )
                 targets = self.checked_targets(now)
                 elapsed = (
@@ -302,18 +354,19 @@ class G1ArmAdapter:
                     self.abort("hardware_write_failed")
                     return
                 self.last_written_ownership_weight = weight
+                if weight == 1.0:
+                    self.q_applied = {
+                        index: values["q"] for index, values in targets.items()
+                    }
+                    self.dq_applied = {i: v["dq"] for i, v in targets.items()}
+                    self.tau_applied = {i: v["tau"] for i, v in targets.items()}
+                    self.command_time = self.clock()
                 if weight > 0:
                     with self.stop_lock:
                         self.ownership_taken = True
                 if self.first_output_secs is None:
                     self.first_output_secs = now
                 self.last_output_secs = now
-                self.previous_targets = {
-                    index: values[0] for index, values in self._accepted_commands.items()
-                }
-                self.previous_velocities = {
-                    index: values[1] for index, values in self._accepted_commands.items()
-                }
             except Exception as error:  # noqa: BLE001
                 self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
 
@@ -326,40 +379,26 @@ class G1ArmAdapter:
         finally:
             self.lock.release()
 
+    def record_response(self):
+        """Record later feedback without treating response error as a fault."""
+        if self.q_applied is not None and self.feedback.received_at_secs > self.command_time:
+            self.joint_diagnostics.record_response(self.q_applied, self.feedback)
+
     def _abort_if_motion_exceeds_limits(self):
-        """Stop if a joint or the body stays over the speed line for 50 ms."""
-        now = self.feedback.received_at_secs
-        for index, limits in self._monitored_joints():
-            speed = self.feedback.dq[index]
-            if not math.isfinite(speed):
-                self.abort(f"{G1_29_JOINT_NAMES[index]}: joint_velocity_limit nonfinite")
-                return
-            if abs(speed) > limits.max_velocity_rad_secs:
-                started = self._joint_over_since.setdefault(index, now)
-                if now - started >= SPEED_HOLD_S:
-                    try:
-                        check_measured_velocity(
-                            G1_29_JOINT_NAMES[index], limits, speed
-                        )
-                    except ValueError as error:
-                        self.abort(str(error))
-                        return
-            else:
-                self._joint_over_since.pop(index, None)
-        rate = math.sqrt(sum(value * value for value in self.gyro))
-        if not math.isfinite(rate):
-            self.abort("base_angular_speed_limit nonfinite")
-            return
-        if rate > BASE_ANGULAR_SPEED_LIMIT_RAD_S:
-            if self._base_over_since is None:
-                self._base_over_since = now
-            elif now - self._base_over_since >= SPEED_HOLD_S:
-                self.abort(
-                    "base_angular_speed_limit "
-                    f"value={rate:.6g} limit={BASE_ANGULAR_SPEED_LIMIT_RAD_S} rad/s"
-                )
-        else:
-            self._base_over_since = None
+        """Enforce physical speed ceilings immediately on fresh feedback."""
+        try:
+            self.check_health()
+            for index, limits in self._monitored_joints():
+                check_measured_velocity(G1_29_JOINT_NAMES[index], limits, self.feedback.dq[index])
+            check_base_motion(self.gyro, self.quat)
+            if self.q_applied is not None:
+                for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
+                    tau_demand = (limits.kp * (self.q_applied[index] - self.feedback.q[index])
+                                  + limits.kd * (self.dq_applied[index] - self.feedback.dq[index])
+                                  + self.tau_applied[index])
+                    check_torque(G1_29_JOINT_NAMES[index], limits, tau_demand)
+        except ValueError as error:
+            self.abort(str(error), request_damping=True)
 
     def _monitored_joints(self):
         """Legs use the same command rules as the waist and arms."""
@@ -369,35 +408,24 @@ class G1ArmAdapter:
         )
 
     def checked_targets(self, now):
-        """Use configured gains, zero feedforward torque and bounded position/velocity."""
+        """Check proposals with the profile gains used by the arm controller."""
         targets = {}
-        accepted = {}
-        dt = 0 if self.last_output_secs is None else now - self.last_output_secs
+        initial = self.last_output_secs is None
         for index, limits in self._monitored_joints():
-            q = self.command["q"][index]
-            dq = self.command["dq"][index]
+            q_proposed = self.command["q"][index]
+            dq_proposed = self.command["dq"][index]
             tau = self.command["tau"][index]
             joint = G1_29_JOINT_NAMES[index]
-            measured = self.feedback.q[index]
-            previous = None if self.previous_targets is None else (
-                self.previous_targets[index], self.previous_velocities[index])
-            check_command(joint, limits, q, dq, tau, measured, previous, dt,
+            q_measured = self.feedback.q[index]
+            check_command(joint, limits, q_proposed, dq_proposed, tau, q_measured, initial,
                           self.profile.initial_position_tolerance_rad,
                           self.profile.initial_velocity_tolerance_rad_secs)
-            check_torque(joint, limits, limits.kp * (q - measured)
-                         + limits.kd * (dq - self.feedback.dq[index]) + tau)
-            if previous is None:
-                q, dq = measured, 0.0
-            accepted[index] = (q, dq)
+            tau_demand = (limits.kp * (q_proposed - q_measured)
+                          + limits.kd * (dq_proposed - self.feedback.dq[index]) + tau)
+            check_torque(joint, limits, tau_demand)
             if index in UPPER_BODY_INDICES:
-                targets[index] = {
-                    "q": q,
-                    "dq": dq,
-                    "kp": limits.kp,
-                    "kd": limits.kd,
-                    "tau": 0.0,
-                }
-        self._accepted_commands = accepted
+                targets[index] = {"q": q_proposed, "dq": dq_proposed, "kp": limits.kp,
+                                  "kd": limits.kd, "tau": tau}
         return targets
 
     def stop_once(self):

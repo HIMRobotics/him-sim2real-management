@@ -14,9 +14,8 @@
       "kp": 150,
       "kd": 2,
       "max_velocity_rad_secs": 32,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.146667,
-      "max_torque_nm": 88
+      "max_torque_nm": 88,
+      "max_command_gap_rad": 0.5
     },
     "left_hip_roll": {
       "position_min_rad": -0.5236,
@@ -24,9 +23,8 @@
       "kp": 150,
       "kd": 2,
       "max_velocity_rad_secs": 20,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.231667,
-      "max_torque_nm": 139
+      "max_torque_nm": 139,
+      "max_command_gap_rad": 0.5
     },
     "left_hip_yaw": {
       "position_min_rad": -2.7576,
@@ -34,9 +32,8 @@
       "kp": 150,
       "kd": 2,
       "max_velocity_rad_secs": 32,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.146667,
-      "max_torque_nm": 88
+      "max_torque_nm": 88,
+      "max_command_gap_rad": 0.5
     },
     "left_knee": {
       "position_min_rad": -0.087267,
@@ -44,9 +41,8 @@
       "kp": 200,
       "kd": 4,
       "max_velocity_rad_secs": 20,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.17375,
-      "max_torque_nm": 139
+      "max_torque_nm": 139,
+      "max_command_gap_rad": 0.5
     },
     "left_ankle_pitch": {
       "position_min_rad": -0.87267,
@@ -54,9 +50,8 @@
       "kp": 40,
       "kd": 2,
       "max_velocity_rad_secs": 30,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.21875,
-      "max_torque_nm": 35
+      "max_torque_nm": 35,
+      "max_command_gap_rad": 0.5
     },
     "left_ankle_roll": {
       "position_min_rad": -0.2618,
@@ -64,9 +59,8 @@
       "kp": 40,
       "kd": 2,
       "max_velocity_rad_secs": 30,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.21875,
-      "max_torque_nm": 35
+      "max_torque_nm": 35,
+      "max_command_gap_rad": 0.5
     },
     "right_hip_pitch": {
       "position_min_rad": -2.5307,
@@ -74,9 +68,8 @@
       "kp": 150,
       "kd": 2,
       "max_velocity_rad_secs": 32,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.146667,
-      "max_torque_nm": 88
+      "max_torque_nm": 88,
+      "max_command_gap_rad": 0.5
     },
     "right_hip_roll": {
       "position_min_rad": -2.9671,
@@ -84,9 +77,8 @@
       "kp": 150,
       "kd": 2,
       "max_velocity_rad_secs": 20,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.231667,
-      "max_torque_nm": 139
+      "max_torque_nm": 139,
+      "max_command_gap_rad": 0.5
     },
     "right_hip_yaw": {
       "position_min_rad": -2.7576,
@@ -94,9 +86,8 @@
       "kp": 150,
       "kd": 2,
       "max_velocity_rad_secs": 32,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.146667,
-      "max_torque_nm": 88
+      "max_torque_nm": 88,
+      "max_command_gap_rad": 0.5
     },
     "right_knee": {
       "position_min_rad": -0.087267,
@@ -104,9 +95,8 @@
       "kp": 200,
       "kd": 4,
       "max_velocity_rad_secs": 20,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.17375,
-      "max_torque_nm": 139
+      "max_torque_nm": 139,
+      "max_command_gap_rad": 0.5
     },
     "right_ankle_pitch": {
       "position_min_rad": -0.87267,
@@ -114,9 +104,8 @@
       "kp": 40,
       "kd": 2,
       "max_velocity_rad_secs": 30,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.21875,
-      "max_torque_nm": 35
+      "max_torque_nm": 35,
+      "max_command_gap_rad": 0.5
     },
     "right_ankle_roll": {
       "position_min_rad": -0.2618,
@@ -124,179 +113,161 @@
       "kp": 40,
       "kd": 2,
       "max_velocity_rad_secs": 30,
-      "max_acceleration_rad_secs2": 1.0,
-      "max_tracking_error_rad": 0.21875,
-      "max_torque_nm": 35
+      "max_torque_nm": 35,
+      "max_command_gap_rad": 0.5
     },
     "waist_yaw": {
       "position_min_rad": -26.18,
       "position_max_rad": 26.18,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 320.0,
-      "max_acceleration_rad_secs2": 5.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 88.0
+      "max_velocity_rad_secs": 32.0,
+      "max_torque_nm": 88.0,
+      "max_command_gap_rad": 0.5
     },
     "waist_roll": {
       "position_min_rad": -5.2,
       "position_max_rad": 5.2,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 300.0,
-      "max_acceleration_rad_secs2": 5.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 35.0
+      "max_velocity_rad_secs": 30.0,
+      "max_torque_nm": 35.0,
+      "max_command_gap_rad": 0.5
     },
     "waist_pitch": {
       "position_min_rad": -5.2,
       "position_max_rad": 5.2,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 300.0,
-      "max_acceleration_rad_secs2": 5.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 35.0
+      "max_velocity_rad_secs": 30.0,
+      "max_torque_nm": 35.0,
+      "max_command_gap_rad": 0.5
     },
     "left_shoulder_pitch": {
       "position_min_rad": -30.892,
       "position_max_rad": 26.704,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "left_shoulder_roll": {
       "position_min_rad": -15.882,
       "position_max_rad": 22.515,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "left_shoulder_yaw": {
       "position_min_rad": -26.18,
       "position_max_rad": 26.18,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "left_elbow": {
       "position_min_rad": -10.472,
       "position_max_rad": 20.944,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "left_wrist_roll": {
       "position_min_rad": -19.722221,
       "position_max_rad": 19.722221,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "left_wrist_pitch": {
       "position_min_rad": -16.144296,
       "position_max_rad": 16.144296,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 220.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 5.0
+      "max_velocity_rad_secs": 22.0,
+      "max_torque_nm": 5.0,
+      "max_command_gap_rad": 0.5
     },
     "left_wrist_yaw": {
       "position_min_rad": -16.144296,
       "position_max_rad": 16.144296,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 220.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 5.0
+      "max_velocity_rad_secs": 22.0,
+      "max_torque_nm": 5.0,
+      "max_command_gap_rad": 0.5
     },
     "right_shoulder_pitch": {
       "position_min_rad": -30.892,
       "position_max_rad": 26.704,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "right_shoulder_roll": {
       "position_min_rad": -22.515,
       "position_max_rad": 15.882,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "right_shoulder_yaw": {
       "position_min_rad": -26.18,
       "position_max_rad": 26.18,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "right_elbow": {
       "position_min_rad": -10.472,
       "position_max_rad": 20.944,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 3.0,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "right_wrist_roll": {
       "position_min_rad": -19.722221,
       "position_max_rad": 19.722221,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 370.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 25.0
+      "max_velocity_rad_secs": 37.0,
+      "max_torque_nm": 25.0,
+      "max_command_gap_rad": 0.5
     },
     "right_wrist_pitch": {
       "position_min_rad": -16.144296,
       "position_max_rad": 16.144296,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 220.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 5.0
+      "max_velocity_rad_secs": 22.0,
+      "max_torque_nm": 5.0,
+      "max_command_gap_rad": 0.5
     },
     "right_wrist_yaw": {
       "position_min_rad": -16.144296,
       "position_max_rad": 16.144296,
       "kp": 60.0,
       "kd": 1.5,
-      "max_velocity_rad_secs": 220.0,
-      "max_acceleration_rad_secs2": 10.0,
-      "max_tracking_error_rad": 0.5,
-      "max_torque_nm": 5.0
+      "max_velocity_rad_secs": 22.0,
+      "max_torque_nm": 5.0,
+      "max_command_gap_rad": 0.5
     }
   }
 }

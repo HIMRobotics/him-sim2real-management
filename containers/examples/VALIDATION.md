@@ -2,6 +2,62 @@
 
 Validated on the development ARM64 host with real ONNX inference and MuJoCo, using the local backend and default prepared environments. No robot motor commands were sent.
 
+## Current command-gap and response checks
+
+The shared guard now compares a proposed angle with the current measured angle,
+with a 0.5 rad ceiling. It does not compare consecutive proposals. Measured speed
+uses the per-joint model ceilings immediately. Response error is recorded after
+actuation and does not reject commands. The experiments below used older checks.
+
+Ten-second local simulation requests with real policy inference produced:
+
+| Policy | Result with checks enabled |
+| --- | --- |
+| GR00T balance | Completed 500 commands over 10 seconds within limits. |
+| Walker | After 5 accepted commands, requested right ankle pitch -0.892688 rad, outside the unchanged -0.87267 rad lower bound. |
+| Stair walker | After 19 accepted commands, requested a left ankle pitch command gap of 0.534488 rad, exceeding 0.5 rad. |
+
+The balance run's largest recorded response error was 0.317639 rad, diagnostic
+only. Temporary rollout outputs were removed. Hardware was not activated.
+
+## Earlier walker target-change comparison, October 6, 2026
+
+With tracking checked after actuation, the original 0.180 rad target-change guard
+rejects the first walking knee command (0.238263 rad). The new 0.5 rad per 20 ms
+guard accepts it. After that interval, the independent knee tracking check still
+rejects 0.194863 rad against its unchanged 0.173750 rad allowance.
+
+An uninterrupted ten-second diagnostic rollout at 0.6 m/s stayed upright. Of 499
+target transitions, 180 exceeded 0.180 rad and none exceeded 0.5 rad. The maximum
+was 0.350117 rad at the left ankle pitch. This supports the wider target-change
+setting for this simulated rollout, not a hardware safety claim or a full safety
+pass. Torque and measured-speed thresholds were unchanged. The inline diagnostic
+left no test script or output files in the repository.
+
+Sampling measured speed every 2 ms in the same uninterrupted rollout found a
+10.209674 rad/s peak at the left knee. Only two samples exceeded 10 rad/s, a
+4 ms excursion. The longest per-joint excursion above 9 rad/s lasted 22 ms,
+below the existing 50 ms persistence requirement. Measured-speed protection
+therefore would not stop this nominal run. This does not explain Unitree's
+choice of a 10 rad/s default or validate a hardware threshold.
+
+## Earlier walker startup experiment, October 6, 2026
+
+Twenty ten-second trials compared ten startup variants at 0.6 m/s, once each
+with safety enforced and disabled. These used the earlier pre-actuation tracking
+check and target-change limits. Model, gains, and limits were unchanged per trial.
+Target blends over 0.1–1 s delayed the first tracking rejection from 0.02 s to
+0.08–0.14 s. Command ramps, active zero-command startup, and longer static holds
+also failed the checks. All enforced runs subsequently fell. All diagnostic
+runs stayed upright, but the baseline violated command rules on 499/500 frames.
+Startup smoothing alone did not resolve compatibility. A 1 s static hold let
+pelvis height drop to 0.641 m before recovery. These simulation-only comparisons
+do not validate hardware handover or establish safe replacement thresholds.
+The temporary experiment script was removed after testing. Saved reports and
+replays remain in the ignored `containers/sim/output/startup-transition-01/`.
+
+## Earlier validation
+
 | Policy | Safety checks | Duration | Result |
 | --- | --- | --- | --- |
 | Stair walker | Off | 20 simulated seconds | 1,000 accepted commands. Foot contact on all three treads, stood on top, finished upright, no fall. Minimum pelvis height approximately 0.770 m. |

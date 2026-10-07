@@ -4,7 +4,7 @@
   "calibrated": false,
   "joint_position_tolerance_rad": 0.05,
   "fall_height_m": 0.28,
-  "fall_upright_min": 0.3,
+  "fall_upright_min": 0.5403023058681398,
   "maxima": {},
-  "uncalibrated_metrics": ["joint_velocity", "joint_acceleration", "tracking_error", "target_rate", "base_linear_speed", "base_angular_speed", "contact_force", "clipping"]
+  "uncalibrated_metrics": ["joint_velocity", "joint_acceleration", "base_linear_speed", "base_angular_speed", "contact_force", "clipping"]
 }

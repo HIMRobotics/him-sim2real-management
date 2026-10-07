@@ -102,7 +102,7 @@ This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not
 describe the complete stairs submission. By default, decoded targets outside
 actuator ranges are violations even though the simulator clips applied targets.
-With `--clip-to-stops`, command, tracking, and torque checks use the clipped target
+With `--clip-to-stops`, command and torque checks use the clipped target
 instead. Reports record this option and retain the raw target and clipping amount.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
@@ -196,107 +196,42 @@ Two profiles apply by default. `--profile` selects global simulator limits
 Wheel builds include the file's contents, with no repository or ROS dependency
 at runtime.
 
-The joint rules actively reject target positions outside their individual bounds,
-excessive commanded velocity, excessive changes in position and velocity targets,
-nonzero feedforward torque, and target-to-measured tracking error. On the first
-command they also enforce 0.03 rad position mismatch and 0.05 rad/s desired speed.
+The joint rules reject out-of-range position and desired velocity, excessive
+command-to-measurement gap, and excessive feedforward or total PD torque demand.
+Initial alignment remains 0.03 rad and initial desired speed 0.05 rad/s.
 
 ### Shared speed checks
 
-Every joint's commanded and measured speed cap is **9 rad/s** in the standard
-profile. The measured body angular-speed cap is **5.4 rad/s**. Measured overspeed
-must persist for **50 ms** to trigger a violation, allowing shorter impact spikes.
-Command-speed and target-change checks apply immediately.
+Measured velocity is checked immediately against Unitree revision-1.0 model
+limits: 32 rad/s for hip pitch/yaw and waist yaw, 20 for hip roll/knees, 30 for
+ankles and waist roll/pitch, 37 for shoulders/elbows/wrist roll, and 22 for wrist
+pitch/yaw. Body angular velocity is limited to 6 rad/s **per axis**, without a
+persistence delay. Upright scenarios retain the height check and use a 1 rad
+maximum tilt. Non-upright counterfactuals omit the upright fall check.
 
-The per-joint `max_velocity_rad_secs` fields live in
-[`robot_safety/profiles/g1_type5.template.json`](../../robot_safety/profiles/g1_type5.template.json)
-and are shared through the [package link](src/policy_safety/profiles/g1_type5.template.json).
-[`robot_safety/joint_checks.py`](../../robot_safety/joint_checks.py) defines
-`BASE_ANGULAR_SPEED_LIMIT_RAD_S = 5.4` and
-`SPEED_HOLD_S = 0.05`. Both measured-speed monitors use the loaded joint profile
-and the shared body-speed and hold-time constants.
+### Command and response checks
 
-These thresholds are below the Unitree runtime defaults of 10 rad/s joint speed
-and 6 rad/s body spin, documented with sources in the
-[profile guide](../../robot_safety/profiles/README.md#upstream-safety-checks-reviewed-september-28-2026).
-The hold time means they do not guarantee a stop before a rapid spike crosses
-Unitree's thresholds. The URDF motor ratings of 20–37 rad/s remain in
-`g1_type5.official_limits.json`. Position stops retain the official URDF ranges.
-The live `g1-safety-stops` service must restart to load changed limits, as described
-in the [watchdog guide](../../robot_safety/README.md#background-safety-watchdog).
+`q_proposed` is the pending absolute position command. `q_measured` is current
+feedback. Before applying a command, `abs(q_proposed - q_measured)` must not exceed
+`max_command_gap_rad`, **0.5 rad** for every joint in the supplied profiles.
+There is no consecutive-command delta check. Position, torque and speed bounds
+still apply independently. Simulation retains the submitted policy's gains.
 
-### Command, tracking, and torque checks
+`q_applied` is the accepted position command. After a complete 20 ms interval,
+`response_error = q_measured - q_applied` is recorded as a diagnostic peak, not a
+hard-stop criterion. This replaces the old fixed tracking-error tolerances.
+Legacy report readers still recognize old tracking violations in saved reports.
 
-| Joint group | Target speed (rad/s) | Target velocity change per second (rad/s²) | Tracking error (rad) |
-| --- | ---: | ---: | ---: |
-| Legs | 9 | 1 | 0.146667 to 0.231667 |
-| Shoulders/elbows | 9 | 1 | 0.30 |
-| Waist | 9 | 0.5 | 0.05 |
-| Wrists | 9 | 1 | 0.05 |
+The global shared profile covers all 29 joints. The standalone package links the
+same profile and dependency-free `joint_checks.py`. Removed custom-profile fields
+must be replaced with `max_command_gap_rad`, as explained in the
+[profile guide](../../robot_safety/profiles/README.md).
 
-Position-target deltas must satisfy `abs(q_target - previous_q_target) <= speed_limit * control_dt`.
-Velocity-target deltas must satisfy `abs(dq_target - previous_dq_target) <= acceleration_limit * control_dt`.
-Tracking error must satisfy `abs(q_target - measured_q) <= tracking_limit`.
-Commands are checked before applying them. Tracking is checked again after every
-physics step. Checkpoints preserve the previous accepted position and velocity
-targets, so branches do not reset or bypass the delta checks.
+Hardware remains restricted to arm/waist submissions and uses its configured
+controller gains. F3 recovery is a separate stop path. The hardware adapter
+checks available measured torque, temperatures and the BMS stream. The simulator
+has no battery or thermal model and does not claim to validate those protections.
 
-At simulator startup, the configured standing or counterfactual pose is installed
-as both measured position and held target. The shared startup check validates this
-hold before inference. The first policy target then uses the ordinary command-delta,
-tracking and torque checks against that baseline. The 0.03 rad alignment tolerance
-is not applied to the first requested movement. Checkpoint branches retain their
-previous command history and do not repeat startup. Hardware arm handover keeps its
-existing initial-command alignment check.
-
-The current position-target adapter has desired velocity and feedforward torque
-equal to zero. Its commanded-velocity-change check is therefore trivially zero.
-It does **not** bound measured acceleration or acceleration derived from target
-positions. The position-target delta and tracking checks still apply. Simulator
-timesteps supply `control_dt`, not wall-clock inference duration. Hardware
-ownership handover and replacement of the first hardware output with measured
-positions are not simulated. Policy-specific gains are retained rather than
-replaced with the hardware profile's gains.
-
-The standard profile covers **all 29 joints**, including the legs. Hardware and
-simulation call the same dependency-free `robot_safety/joint_checks.py` functions.
-The standalone wheel includes that source as `joint_checks` without ROS or SDK imports.
-These limits screen submitted policies. Hardware F3 soft-reset GR00T balancing
-does not apply them. The hardware gate remains restricted to arm/waist submissions.
-Missing joint entries are errors, including older 17-joint custom profiles.
-
-Leg position and torque bounds use the Unitree model values. Target velocity
-uses the standard profile's 9 rad/s cap.
-Local commanded-velocity-change limits are 1 rad/s² for all legs. Tracking
-allowances are 0.146667 rad for hip pitch/yaw, 0.231667 rad for hip roll,
-0.173750 rad for knees and 0.218750 rad for ankles. They derive from
-`0.25 * model_effort / reference_kp`, adapting NVIDIA's G1 action-scaling rule
-as a provisional tracking-error budget. This adaptation is our screening choice,
-not a published tracking safety threshold. The simulator retains its actual gains
-for the independent full PD-torque check. See the
-[profile documentation](../../robot_safety/profiles/README.md) for sources and derivation.
-
-The evaluator checks PD torque demand before each physics step and applied joint
-torque afterward. Both must satisfy the shared profile's Nm bounds. The existing
-MuJoCo model bounds are also retained. Torque demand uses the simulator's actual
-actuator gains, so clamping cannot conceal an excessive demand.
-
-To select the current repository template explicitly, add:
-
-```bash
---joint-profile robot_safety/profiles/g1_type5.template.json
-```
-
-Additional global metric maxima remain separately configurable, including
-measured acceleration, base linear speed, and contact force. Scalar metrics use
-rad/s, rad/s², rad, m/s, N, and Nm as appropriate. Contact force is the largest contact force-vector
-magnitude at that physics step, including self-contact.
-
-Supply `--profile FILE.json` to set `maxima` and reviewed fall/position limits.
-Limits are scalar maxima across joints, in addition to the model's per-joint
-bounds. A profile marked `calibrated: true` requires every metric threshold and an
-empty `uncalibrated_metrics` list. This flag records operator review, it is not
-automatic calibration. Never tune thresholds solely to make a submitted policy pass.
 
 ## Reports, replay, and workflow
 
@@ -311,10 +246,9 @@ The table counts problems and tracking violations out of the scenarios in each
 gait, each gait's pushes, and each starting pose. One run counts in every class
 it hits, so the fractions can overlap. A tracking miss counts under both
 `tracking violations` and `misses`. A limit, a flail, a fall, any other violation,
-or an error is a `problem`. `flailing` is a joint faster than 9 rad/s, or the body spinning faster
-than 5.4 rad/s, held for at least 50 ms. A shorter impact, such as a foot flick
-after a shove, does not count. Position, speed, torque, and range breaches are `limits`.
-A skipped branch is counted separately. Tracking violations affect the exit status.
+or an error is a `problem`. `flailing` means a measured joint speed exceeds its
+model limit or any body angular-velocity axis exceeds 6 rad/s, on any sample. Position, speed, torque, and range breaches are `limits`.
+A skipped branch is counted separately. New runs record response errors without creating tracking violations. Historical tracking violations retain their old classification.
 The JSON `scenario_summary` retains the `warnings` key for compatibility.
 
 Videos are separate from the screening report. `render` replays the same
@@ -394,9 +328,9 @@ establish whether the policy is physically safe.
 
 Zero violations only means no *enforced* checks failed in the scenarios reported
 so far. The provisional global profile has no scalar thresholds for measured joint
-velocity/acceleration, target rate, tracking error, base speeds, or contact force.
-The separate joint profile nevertheless enforces command deltas, tracking, and
-sustained measured joint speed for its covered joints. The shared body-speed
+velocity/acceleration, base speeds, or contact force.
+The separate joint profile nevertheless enforces command gaps, position bounds,
+and immediate measured joint speed for its covered joints. The shared body-speed
 check also applies. `acceptance_checks` lists global gaps and
 `joint_movement_checks` lists per-joint coverage. The evaluator checks unsaturated PD torque demand as well as the resulting
 applied torque. By default, the independent decoded-target check prevents clipping

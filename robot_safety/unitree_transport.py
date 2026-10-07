@@ -29,7 +29,7 @@ SOFT_RESET_PHRASE = "Soft Reset"
 class UnitreeArmTransport:
     """Own arm_sdk publication and a separate locomotion RPC client."""
 
-    def __init__(self, interface, domain, on_state):
+    def __init__(self, interface, domain, on_state, on_battery):
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
             MotionSwitcherClient,
         )
@@ -40,7 +40,7 @@ class UnitreeArmTransport:
         )
         from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
         from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
-        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_, LowCmd_, LowState_
         from unitree_sdk2py.utils.crc import CRC
 
         ChannelFactoryInitialize(domain, interface)
@@ -72,6 +72,8 @@ class UnitreeArmTransport:
         self.subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
         # No SDK queue that could conceal old samples behind new receipt timestamps.
         self.subscriber.Init(on_state)
+        self.bms_subscriber = ChannelSubscriber("rt/lf/bmsstate", BmsState_)
+        self.bms_subscriber.Init(on_battery)
 
     def write_arm(self, targets, weight):
         """Send only explicitly mapped upper-body targets, plus SDK ownership weight."""
@@ -87,7 +89,7 @@ class UnitreeArmTransport:
     def release_motion(self):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
         switcher = self.switcher
-        code, mode = switcher.CheckMode()
+        _code, mode = switcher.CheckMode()
         if isinstance(mode, dict) and mode.get("name"):
             self.saved_motion_name = mode["name"]
         self._set_motion_silent(True)
@@ -149,8 +151,7 @@ class UnitreeArmTransport:
         """Speak after the stock line is muted. A voice failure must not block the release."""
         try:
             audio = self._audio()
-            if audio.tts_index < 1:
-                audio.tts_index = 1
+            audio.tts_index = max(audio.tts_index, 1)
             audio.TtsMaker(SOFT_RESET_PHRASE, ENGLISH_SPEAKER_ID)
         except Exception:  # noqa: BLE001
             return
@@ -190,4 +191,5 @@ class UnitreeArmTransport:
 
     def close(self):
         self.subscriber.Close()
+        self.bms_subscriber.Close()
         self.publisher.Close()

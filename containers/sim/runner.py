@@ -9,17 +9,16 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from joint_checks import (
-    BASE_ANGULAR_SPEED_LIMIT_RAD_S,
-    SPEED_HOLD_S,
     JointViolation,
+    check_base_motion,
 )
 from metrics import MotionMetrics
-from plant import CONTROL_DT, PHYSICS_DT, POSES, Plant
+from plant import PHYSICS_DT, POSES, Plant
 from policy_safety.adapter import PolicyViolation
 from policy_safety.joint_rules import JointRules
 
 OBSERVATION_TIMEOUT = 0.2
-ACTION_TIMEOUT = 0.2
+ACTION_TIMEOUT = 0.1
 SANITY = {
     "q": (-10.0, 10.0),
     "dq": (-50.0, 50.0),
@@ -52,7 +51,6 @@ class Runner:
         self.observation_id = 0
         self.observations = {}
         self.last_sequence = -1
-        self.previous = None
         self.last_command_time = None
         self.active = None
         self.reason = None
@@ -60,13 +58,8 @@ class Runner:
         self.commands = 0
         self.steps = 0
         self.sim_time = 0.0
-        speed_caps = np.full(29, np.inf)
-        for index, _name, limits in self.rules.entries:
-            speed_caps[index] = limits.max_velocity_rad_secs
-        self.speed_caps = speed_caps
-        self.hold_steps = max(1, round(SPEED_HOLD_S / PHYSICS_DT))
-        self.joint_over = np.zeros(29, dtype=int)
-        self.base_over = 0
+        self.response_error = None
+        self.max_response_error = 0.0
         self.trace_qpos = []
         self.trace_time = []
         self.record_trace = (
@@ -107,10 +100,7 @@ class Runner:
         self.commands += 1
         self.last_sequence = int(frame["sequence"])
         self.last_command_time = float(time)
-        self.previous = (
-            np.asarray(frame["q"], dtype=float).copy(),
-            np.asarray(frame["dq"], dtype=float).copy(),
-        )
+
         self.active = {
             key: np.asarray(frame[key], dtype=float).copy()
             for key in ("q", "dq", "kp", "kd", "tau")
@@ -145,32 +135,30 @@ class Runner:
                 break
             if not self.safety_checks:
                 continue
-            self.joint_over = np.where(
-                np.abs(dq) > self.speed_caps, self.joint_over + 1, 0
-            )
-            if np.any(self.joint_over >= self.hold_steps):
-                index = int(np.argmax(self.joint_over))
-                violation = (
-                    "joint_velocity_limit",
-                    {"joint": self.plant.joint_names[index]},
-                )
+            if self.plant.fallen():
+                violation = ("fall", {"height": self.plant.state()["height"]})
                 break
-            base_speed = float(
-                np.linalg.norm(
-                    self.plant.data.qvel[
-                        self.plant.base_vadr + 3 : self.plant.base_vadr + 6
-                    ]
-                )
-            )
-            self.base_over = (
-                self.base_over + 1 if base_speed > BASE_ANGULAR_SPEED_LIMIT_RAD_S else 0
-            )
-            if self.base_over >= self.hold_steps:
-                violation = ("base_angular_speed_limit", {"value": base_speed})
+            try:
+                self.rules.check_measured_velocity(dq)
+                check_base_motion(self.plant.data.qvel[
+                    self.plant.base_vadr + 3:self.plant.base_vadr + 6])
+                if self.active is not None and self.control_path == "submission":
+                    tau_demand = self.plant.demand(
+                        self.active["q"], self.active["dq"], self.active["kp"],
+                        self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
+                    self.rules.check_torque(tau_demand)
+                    self.rules.check_torque(self.plant.data.qfrc_actuator[self.plant.vadr])
+            except JointViolation as exc:
+                violation = (exc.reason, exc.details)
                 break
         self.steps += 1
         if violation is None and self.plant.fallen():
             violation = ("fall", {"height": self.plant.state()["height"]})
+        if violation is None and self.reason is None and self.active is not None and self.control_path == "submission":
+            q_applied = self.active["q"]
+            q_measured = self.plant.q()
+            self.response_error = (q_measured - q_applied).tolist()
+            self.max_response_error = max(self.max_response_error, float(np.max(np.abs(self.response_error))))
         if violation is not None and self.reason is None:
             self._latch(*violation)
         self._remember()
@@ -186,6 +174,10 @@ class Runner:
         return {
             "command_protocol": submission,
             "command_limits": submission and self.safety_checks,
+            "response_error": False,
+            "response_error_diagnostic": submission,
+            "motor_temperature": False,
+            "battery": False,
             "observation_freshness": submission and self.safety_checks,
             "action_timeout": self.safety_checks,
             "joint_speed": self.safety_checks,
@@ -210,6 +202,7 @@ class Runner:
             "status": status,
             "reason": self.reason,
             "detail": self.detail,
+            "response_error_rad": {"last": self.response_error, "max_abs": self.max_response_error},
             "commands": self.commands,
             "steps": self.steps,
             "seconds": self.sim_time,
@@ -365,18 +358,13 @@ class Runner:
             arrays[name] = array
         if not self.safety_checks:
             return None, None
-        previous = None
-        if self.previous is not None:
-            previous = {"target": self.previous[0], "velocity": self.previous[1]}
-        dt = CONTROL_DT if previous is None else time - self.last_command_time
         try:
             self.rules.check_command(
                 arrays["q"],
                 arrays["dq"],
                 arrays["tau"],
                 measured,
-                previous,
-                dt,
+                initial=self.active is None,
             )
             demand = self.plant.demand(
                 arrays["q"],

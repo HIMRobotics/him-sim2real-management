@@ -8,9 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 from robot_safety.hardware_adapter import G1ArmAdapter
-from robot_safety.hardware_constants import UPPER_BODY_INDICES
+from robot_safety.hardware_constants import G1_29_JOINT_NAMES, UPPER_BODY_INDICES
 from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.unitree_transport import UnitreeArmTransport
 
@@ -31,8 +30,7 @@ def profile_data():
                 "kp": 2.0,
                 "kd": 0.5,
                 "max_velocity_rad_secs": 0.1,
-                "max_acceleration_rad_secs2": 0.2,
-                "max_tracking_error_rad": 0.1,
+                "max_command_gap_rad": 0.1,
                 "max_torque_nm": 100.0,
             }
             for i in range(29)
@@ -94,6 +92,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter = G1ArmAdapter(load_profile(profile_data()), lambda: self.now)
         self.transport = FakeTransport()
         self.adapter.transport = self.transport
+        self.adapter.receive_battery(SimpleNamespace(soc=100))
         self.state()
         self.assertTrue(self.adapter.check_ready_mode())
         self.command = {name: [0.0] * 29 for name in ("q", "dq", "kp", "kd", "tau")}
@@ -103,7 +102,7 @@ class HardwareAdapterTests(unittest.TestCase):
         remote[2] = (4 if pressed else 0) | (128 if f3 else 0)
         self.adapter.receive_state(
             SimpleNamespace(
-                motor_state=[SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)],
+                motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 mode_machine=machine,
                 wireless_remote=remote,
             )
@@ -394,7 +393,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.now += 0.01
         remote = [0] * 40
-        motors = [SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)]
+        motors = [SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)]
         motors[16] = SimpleNamespace(q=0.04, dq=0.2)
         self.adapter.receive_state(
             SimpleNamespace(
@@ -449,26 +448,25 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIsNotNone(self.adapter.abort_reason)
         self.assertEqual(self.transport.writes, [])
 
-    def test_leg_command_tracking_and_torque_are_rejected(self):
+    def test_leg_command_target_step_is_rejected(self):
         self.run_first()
         self.now += 0.005
         self.command["q"][3] = 0.2
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         reason = self.adapter.abort_reason
-        self.assertIn("left_knee: joint_tracking_error_limit", reason)
-        self.assertIn("limit=0.1", reason)
+        self.assertIn("left_knee: joint_command_gap_limit", reason)
         self.assertEqual(len(self.transport.writes), 1)
         self.assertNotIn(3, self.transport.writes[-1][0])
 
-    def test_leg_velocity_change_is_rejected(self):
+    def test_leg_velocity_limit_is_rejected(self):
         self.run_first()
         self.now += 0.005
-        self.command["dq"][3] = 0.05
+        self.command["dq"][3] = 0.101
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         self.assertIn(
-            "left_knee: joint_velocity_target_change_limit",
+            "left_knee: joint_target_velocity_limit",
             self.adapter.abort_reason,
         )
         self.assertEqual(len(self.transport.writes), 1)
@@ -482,27 +480,77 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIn("left_knee: joint_torque_limit", self.adapter.abort_reason)
         self.assertEqual(self.transport.writes, [])
 
-    def test_tracking_limits_and_velocity_discontinuities_are_rejected(self):
+    def test_commanded_speed_is_rejected(self):
         self.run_first()
         self.now += 0.005
-        self.command["dq"][16] = 0.05
+        self.command["dq"][16] = 0.101
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         self.assertIsNotNone(self.adapter.abort_reason)
         self.assertEqual(len(self.transport.writes), 1)
 
-    def test_output_rejection_preserves_joint_and_tracking_measurements(self):
+    def test_output_rejection_preserves_proposed_offset_measurements(self):
         self.run_first()
         self.now += 0.005
         self.command["q"][16] = 0.2
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         reason = self.adapter.abort_reason
-        self.assertIn("left_shoulder_roll: joint_tracking_error_limit", reason)
-        self.assertIn("limit=0.1", reason)
+        self.assertIn("left_shoulder_roll: joint_command_gap_limit", reason)
         self.assertIn("value=0.2", reason)
         self.assertEqual(len(self.transport.writes), 1)
         self.assertTrue(self.adapter.stop_requested.is_set())
+        ranges = self.adapter.joint_diagnostics_snapshot()["left_shoulder_roll"]
+        self.assertEqual(ranges["command_gap_rad"]["max_abs"], 0.2)
+        self.assertEqual(ranges["response_error_rad"]["samples"], 0)
+
+    def test_tracking_waits_for_feedback_after_a_successful_full_weight_write(self):
+        self.adapter.profile = replace(self.adapter.profile, handover_secs=0.005)
+        self.run_first()
+        self.assertIsNone(self.adapter.q_applied)
+        self.now += 0.01
+        self.state()
+        self.command["q"][16] = 0.0005
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(self.adapter.q_applied[16], 0.0005)
+        self.adapter.record_response()
+        self.assertEqual(
+            self.adapter.joint_diagnostics_snapshot()["left_shoulder_roll"]
+            ["response_error_rad"]["samples"], 0,
+        )
+        self.now += 0.01
+        self.state()
+        # A new proposal does not change the response recorded for the prior write.
+        self.command["q"][16] = 0.0
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 3)
+        self.assertAlmostEqual(
+            self.adapter.joint_diagnostics_snapshot()["left_shoulder_roll"]
+            ["response_error_rad"]["max_abs"], 0.0005,
+        )
+
+    def test_failed_writes_and_uncontrolled_legs_do_not_create_tracking_targets(self):
+        self.adapter.profile = replace(self.adapter.profile, handover_secs=0.005)
+        self.run_first()
+        self.now += 0.01
+        self.state()
+        self.adapter.step()
+        self.assertEqual(set(self.adapter.q_applied), set(UPPER_BODY_INDICES))
+        previous = dict(self.adapter.q_applied)
+        stamp = self.adapter.command_time
+        self.now += 0.01
+        self.state()
+        self.command["q"][16] = 0.0005
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.transport.write_success = False
+        self.adapter.step()
+        self.assertEqual(self.adapter.abort_reason, "hardware_write_failed")
+        self.assertEqual(self.adapter.q_applied, previous)
+        self.assertEqual(self.adapter.command_time, stamp)
 
     def test_sdk_value_error_preserves_original_message(self):
         def invalid_write(*_args):
@@ -619,32 +667,67 @@ class HardwareAdapterTests(unittest.TestCase):
 
     def test_measured_speed_and_body_spin_abort(self):
         self.run_first()
-        motors = [SimpleNamespace(q=0.0, dq=0.0) for _ in range(35)]
-        motors[3].dq = 0.2
-        self._state(motors)
+        motors = [SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)]
+        self._state(motors, gyro=(5.0, 5.0, 0.0))
         self.assertIsNone(self.adapter.abort_reason)
-        self.now += 0.049
+        motors[3].dq = 0.101
         self._state(motors)
-        self.assertIsNone(self.adapter.abort_reason)
-        motors[3].dq = 0.0
-        self._state(motors)
-        motors[3].dq = 0.2
-        self.now += 0.01
-        self._state(motors)
-        self.assertIsNone(self.adapter.abort_reason)
-        self.now += 0.05
-        self._state(motors)
-        self.assertIn("left_knee", self.adapter.abort_reason)
-        self.assertIn("joint_velocity_limit", self.adapter.abort_reason)
-
+        self.assertIn("left_knee: joint_velocity_limit", self.adapter.abort_reason)
         self.adapter.abort_reason = None
         motors[3].dq = 0.0
-        self._state(motors)
-        self._state(motors, gyro=(6.1, 0.0, 0.0))
-        self.assertIsNone(self.adapter.abort_reason)
-        self.now += 0.05
-        self._state(motors, gyro=(6.1, 0.0, 0.0))
+        self._state(motors, gyro=(6.01, 0.0, 0.0))
         self.assertIn("base_angular_speed_limit", self.adapter.abort_reason)
+
+    def test_temperature_battery_and_missing_health_reject(self):
+        for fault, reason in (("winding", "motor_winding_temperature_limit"),
+                              ("casing", "motor_casing_temperature_limit"),
+                              ("battery", "low_battery"),
+                              ("missing", "missing_motor_temperature")):
+            with self.subTest(fault=fault):
+                self.setUp()
+                if fault == "battery":
+                    self.adapter.receive_battery(SimpleNamespace(soc=19))
+                else:
+                    temps = [(85, 120)] * 29
+                    if fault == "winding": temps[0] = (85, 121)
+                    if fault == "casing": temps[0] = (86, 120)
+                    self.adapter.feedback = replace(self.adapter.feedback, temperature=() if fault == "missing" else tuple(temps))
+                self.assertFalse(self.adapter.arm())
+                self.assertIn(reason, self.adapter.arm_rejection_reason)
+
+    def test_health_fault_during_execution_aborts(self):
+        self.run_first()
+        self.adapter.receive_battery(SimpleNamespace(soc=19))
+        self.assertEqual(self.adapter.abort_reason, "low_battery")
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.setUp()
+        self.run_first()
+        motors = [SimpleNamespace(q=0., dq=0., temperature=(85, 120), tau_est=0.) for _ in range(35)]
+        self._state(motors)
+        self.assertIsNone(self.adapter.abort_reason)
+        motors[3].temperature = (85, 121)
+        self._state(motors)
+        self.assertIn("motor_winding_temperature_limit", self.adapter.abort_reason)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 1)
+
+    def test_stale_battery_blocks_next_write_and_requests_damping(self):
+        self.run_first()
+        self.adapter.battery_time = self.now - 5.0
+        count = len(self.transport.writes)
+        self.adapter.step()
+        self.assertEqual(self.adapter.abort_reason, "battery_feedback_timeout")
+        self.assertEqual(len(self.transport.writes), count)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 1)
+
+    def test_invalid_battery_before_arming_does_not_send_control(self):
+        self.adapter.receive_battery(SimpleNamespace(soc=float("nan")))
+        self.adapter.stop_once()
+        self.assertEqual(self.adapter.abort_reason, "invalid_battery_feedback")
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.assertFalse(self.transport.writes)
 
 
 class TransportEncodingTests(unittest.TestCase):
@@ -658,7 +741,7 @@ class TransportEncodingTests(unittest.TestCase):
             )
         }
         with patch.dict("sys.modules", modules):
-            transport = UnitreeArmTransport("fake", 0, Mock())
+            transport = UnitreeArmTransport("fake", 0, Mock(), Mock())
             self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
             self.assertIs(transport._audio(), sdk.AudioClient.return_value)
         sdk.MotionSwitcherClient.assert_called_once()
@@ -725,7 +808,10 @@ class TransportEncodingTests(unittest.TestCase):
         self.assertEqual(message.crc, 12345)
 
     def test_soft_reset_mutes_developer_mode_then_speaks(self):
-        from robot_safety.unitree_transport import SOFT_RESET_PHRASE, UnitreeArmTransport
+        from robot_safety.unitree_transport import (
+            SOFT_RESET_PHRASE,
+            UnitreeArmTransport,
+        )
 
         events = []
 

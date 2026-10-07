@@ -8,7 +8,6 @@ from joint_checks import (
     check_command,
     check_measured_velocity,
     check_torque,
-    check_tracking,
 )
 
 from .adapter import PolicyViolation
@@ -52,50 +51,27 @@ class JointRules:
             "rules": [
                 "target_position",
                 "target_velocity",
-                "position_target_change",
-                "velocity_target_change",
-                "tracking_error",
+                "command_gap",
                 "initial_target_mismatch",
                 "initial_target_velocity",
-                "zero_feedforward_torque",
+                "feedforward_torque",
                 "torque_demand_and_applied_bounds",
             ],
-            "semantics": "Velocity-change limits apply to commanded dq, not measured or position-derived acceleration. Simulation validates the initial hold, then checks policy motion against that baseline. Profile gains and hardware ownership handover are not imported.",
+            "semantics": "Before actuation: compare proposed position with current measured position, enforce position, speed and torque limits. Response error is measured minus applied command after the interval, diagnostic only. No consecutive-command delta limit.",
         }
 
-    def check_command(self, target, velocity, torque, measured, previous, dt):
-        for values in (target, velocity, torque, measured):
-            if (
-                np.asarray(values).shape != (len(self.names),)
-                or not np.isfinite(values).all()
-            ):
+    def check_command(self, q_proposed, velocity, torque, q_measured, *, initial=False):
+        for values in (q_proposed, velocity, torque, q_measured):
+            if np.asarray(values).shape != (len(self.names),) or not np.isfinite(values).all():
                 raise PolicyViolation("nonfinite_or_invalid_joint_command")
         for i, name, limits in self.entries:
-            prior = (
-                None
-                if previous is None
-                else (previous["target"][i], previous["velocity"][i])
-            )
-            check_command(
-                name,
-                limits,
-                target[i],
-                velocity[i],
-                torque[i],
-                measured[i],
-                prior,
-                dt,
-                self.profile["initial_position_tolerance_rad"],
-                self.profile["initial_velocity_tolerance_rad_secs"],
-            )
+            check_command(name, limits, q_proposed[i], velocity[i], torque[i], q_measured[i],
+                          initial, self.profile["initial_position_tolerance_rad"],
+                          self.profile["initial_velocity_tolerance_rad_secs"])
 
     def check_measured_velocity(self, measured_dq):
         for i, name, limits in self.entries:
             check_measured_velocity(name, limits, measured_dq[i])
-
-    def check_tracking(self, target, measured):
-        for i, name, limits in self.entries:
-            check_tracking(name, limits, target[i], measured[i])
 
     def check_torque(self, torque):
         for i, name, limits in self.entries:

@@ -93,7 +93,7 @@ class RunnerTest(unittest.TestCase):
         with patch.object(
             runner.plant, "step_physics", return_value=np.full(29, 100.0)
         ):
-            for step in range(runner.hold_steps + 1):
+            for step in range(2):
                 runner.step(step * 0.02)
         self.assertIsNone(runner.reason)
 
@@ -204,21 +204,52 @@ class RunnerTest(unittest.TestCase):
         self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
         held = runner.active["q"].copy()
         q = list(state["q"])
-        q[0] = q[0] + 0.2
+        q[0] = q[0] + 0.501
         reason = runner.command(hold(runner, state, 1, q=q), 0.02)
-        self.assertEqual(reason, "joint_tracking_error_limit")
+        self.assertEqual(reason, "joint_command_gap_limit")
         np.testing.assert_allclose(runner.active["q"], held)
         for step in range(25):
             runner.step(0.03 + step * 0.02)
         self.assertGreater(runner.plant.state()["height"], 0.5)
 
+    def test_tracking_uses_response_after_a_complete_control_interval(self):
+        for follows_target in (True, False):
+            with self.subTest(follows_target=follows_target):
+                runner = Runner()
+                index = 15
+                state = runner.feedback(0.0)
+                self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+                state = runner.feedback(0.02)
+                target = list(state["q"])
+                target[index] += 0.02
+                self.assertIsNone(runner.command(hold(runner, state, 1, q=target), 0.02))
+                ticks = 0
+
+                def move_on_last_tick(
+                    follows_target=follows_target, runner=runner,
+                    index=index, target=target,
+                ):
+                    nonlocal ticks
+                    ticks += 1
+                    if follows_target and ticks == runner.plant.substeps:
+                        runner.plant.data.qpos[runner.plant.qadr[index]] = target[index]
+                    return runner.plant.dq()
+
+                with patch.object(runner.plant, "step_physics", side_effect=move_on_last_tick):
+                    runner.step(0.02)
+                self.assertEqual(ticks, runner.plant.substeps)
+                self.assertAlmostEqual(runner.sim_time, 0.02)
+                self.assertIsNone(runner.reason)
+                expected_error = 0.0 if follows_target else -0.02
+                self.assertAlmostEqual(runner.response_error[index], expected_error)
+
     def test_feedforward_torque_rejected(self):
         runner = Runner()
         state = runner.feedback(0.0)
         tau = [0.0] * 29
-        tau[0] = 1.0
+        tau[0] = 89.0
         reason = runner.command(hold(runner, state, 0, tau=tau), 0.0)
-        self.assertEqual(reason, "nonzero_feedforward_torque")
+        self.assertEqual(reason, "joint_feedforward_torque_limit")
         self.assertEqual(runner.report()["status"], "violation")
         self.assertEqual(runner.command(hold(runner, state, 1), 0.02), reason)
 

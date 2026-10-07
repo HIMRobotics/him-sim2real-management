@@ -5,8 +5,8 @@ import os
 import socket
 import time
 
-from std_msgs.msg import String
 from him_safety_interfaces.msg import Abort
+from std_msgs.msg import String
 
 from . import ros_topics as topics
 from .hardware_adapter import G1ArmAdapter
@@ -17,8 +17,8 @@ from .hardware_profile import (
     READINESS_RPC_TIMEOUT_SECS,
     HardwareProfile,
 )
-from .ros_nodes import MotorGateNode
 from .motor_gate import MotorCommandGate
+from .ros_nodes import MotorGateNode
 from .unitree_transport import UnitreeArmTransport
 
 
@@ -53,7 +53,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.startup_ready = False
         self.adapter = G1ArmAdapter(profile)
         self.adapter.transport = UnitreeArmTransport(
-            interface, domain, self.adapter.receive_state
+            interface, domain, self.adapter.receive_state, self.adapter.receive_battery
         )
         self.adapter.start_workers()
         self.get_logger().warn(
@@ -233,14 +233,15 @@ class HardwareMotorGateNode(MotorGateNode):
         sampled = {
             name: values
             for name, values in joints.items()
-            if values["tracking_error_rad"]["samples"]
+            if values["command_gap_rad"]["samples"]
+            or values["response_error_rad"]["samples"]
         }
         if not sampled:
             return
         payload = {
             "session_id": self.motor_gate.policy_session_id,
             "abort_reason": self.adapter.abort_reason,
-            "scope": "targets_checked_before_sdk_write",
+            "scope": "proposed_command_gaps_and_responses_to_prior_full_weight_writes",
             "joints": joints,
         }
         message = String()
@@ -251,12 +252,18 @@ class HardwareMotorGateNode(MotorGateNode):
                 self.get_logger().info(f"Joint extrema {name}: {json.dumps(values)}")
             self.final_diagnostics_logged = True
         else:
+            tracked = {
+                name: values for name, values in sampled.items()
+                if values["response_error_rad"]["samples"]
+            }
+            if not tracked:
+                return
             name = max(
-                sampled, key=lambda key: sampled[key]["tracking_error_rad"]["max_abs"]
+                tracked, key=lambda key: tracked[key]["response_error_rad"]["max_abs"]
             )
-            error = sampled[name]["tracking_error_rad"]
+            error = sampled[name]["response_error_rad"]
             self.get_logger().info(
-                f"Run tracking extrema: largest={name}, "
+                f"Run response-error extrema: largest={name}, "
                 f"min={error['min']:.6f}, max={error['max']:.6f} rad. "
                 f"All joints: {topics.JOINT_DIAGNOSTICS}"
             )
