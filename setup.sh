@@ -163,6 +163,7 @@ run_args=(
   -e "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
   -e "G1_EXECUTION_MODE=$mode"
   -e "G1_THRASH_MODE=$thrash"
+  -e "G1_TASK_COMMAND=${G1_TASK_COMMAND:-}"
 )
 if [[ -n "${G1_TRIAL_CONFIG:-}" ]]; then
   trial_config="$(realpath "$G1_TRIAL_CONFIG")"

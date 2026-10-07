@@ -59,6 +59,7 @@ services:
       G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
       G1_TRIAL_CONFIG: ${G1_TRIAL_CONFIG:+/trial.json}
       G1_THRASH_MODE: ${G1_SIM_THRASH_MODE:-monitor}
+      G1_TASK_COMMAND: ${G1_TASK_COMMAND:-}
       ROBOT_INTERFACE: lo
       ROBOT_DOMAIN: "0"
       ROS_DOMAIN_ID: "97"

@@ -23,6 +23,8 @@ class PolicyNode(Node):
         super().__init__("example_policy")
         self.policy = policy
         self.mode = mode
+        self.task_command = json.loads(os.environ.get("G1_TASK_COMMAND") or
+                                       ("null" if mode == "sim" else "[0,0,0]"))
         trial_path = os.environ.get("G1_TRIAL_CONFIG")
         self.trial = MovementTrial(json.loads(Path(trial_path).read_text())) if trial_path else None
         if self.trial and (policy.name == "balance" or os.environ.get("G1_THRASH_MODE") != "enforce"):
@@ -96,10 +98,10 @@ class PolicyNode(Node):
         if state["observation_id"] <= self.last_observation:
             return
         self.last_observation = state["observation_id"]
-        if self.mode != "sim":
-            state["task_command"] = [0., 0., 0.]
-            if self.policy.name != "balance" and "base_velocity" not in state:
-                raise RuntimeError("policy requires measured base velocity")
+        if self.task_command is not None:
+            state["task_command"] = self.task_command
+        if self.mode != "sim" and self.policy.name != "balance" and "base_velocity" not in state:
+            raise RuntimeError("policy requires measured base velocity")
         if self.trial and state.get("control_ready", False):
             state["task_command"] = self.trial.command(state, time.monotonic())
         started = time.monotonic()

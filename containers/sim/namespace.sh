@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Sim needs root to enter the isolated network. Re-running with sudo."
-  exec sudo --preserve-env=G1_SIM_BACKEND,G1_SIM_VIEW_PORT,G1_SIM_SECONDS,G1_SIM_PYTHON,G1_SIM_THRASH_MODE,G1_JOINT_PROFILE,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=G1_SIM_BACKEND,G1_SIM_VIEW_PORT,G1_SIM_SECONDS,G1_SIM_PYTHON,G1_SIM_THRASH_MODE,G1_JOINT_PROFILE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
 fi
 
 stop_sim() {
@@ -130,6 +130,7 @@ run_session() {
     fi
     "$runtime" run -d --name "$user_name" --network "container:$net_name" --ipc "container:$net_name" \
       "${trial_args[@]}" -e "G1_THRASH_MODE=${G1_SIM_THRASH_MODE:-monitor}" \
+      -e "G1_TASK_COMMAND=${G1_TASK_COMMAND:-}" \
       -v "$repo_dir/containers/sim/fastdds.xml:/fastdds.xml:ro" \
       -e ROBOT_INTERFACE=lo \
       -e G1_SIM_NETNS=1 \
