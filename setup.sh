@@ -195,7 +195,11 @@ if [[ -n "${G1_TRIAL_CONFIG:-}" && "$thrash" != enforce ]]; then
 fi
 set +u
 source /opt/ros/foxy/setup.bash
-source "${HIM_SAFETY_ROS_INSTALL:-$HOME/.him-safety/ros-install}/setup.bash"
+operator_home="$HOME"
+if [[ -n "${SUDO_USER:-}" ]]; then
+  operator_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+fi
+source "${HIM_SAFETY_ROS_INSTALL:-$operator_home/.him-safety/ros-install}/setup.bash"
 set -u
 export CYCLONEDDS_HOME="${CYCLONEDDS_HOME:-/home/unitree/cyclonedds_ws/install/cyclonedds}"
 export LD_LIBRARY_PATH="$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}"
