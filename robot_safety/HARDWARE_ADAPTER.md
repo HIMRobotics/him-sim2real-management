@@ -251,8 +251,11 @@ are `phase` (`supported_straight`, `unsupported_straight`, or `circle`),
 `stationary_speed_m_s`. Numeric settings must be positive measured/qualified
 values. `qualified` records operator signoff, not an automated safety claim.
 The provisional yaw settling threshold is 0.05 rad/s. Never invent braking data
-to enable a trial. Initial speeds are fixed at 0.10 m/s and circle yaw at
-0.10 rad/s, ramped together. Changing these settings requires requalification.
+to enable a trial. `speed_m_s` defaults to 0.10. For straight trials, optional
+`heading_gain` and `lateral_gain` steer relative to the measured starting pose,
+bounded by `max_yaw_rate_rad_s` (default 0.30). Both gains default to zero.
+Circles use yaw rate equal to forward speed for the 1 m radius. Forward and
+yaw commands ramp together. Changing these settings requires requalification.
 
 Straight trials target 2 m with endpoint error at most 0.10 m and maximum
 lateral deviation below 0.20 m. Circles require a measured counterclockwise full

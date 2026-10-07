@@ -5,16 +5,22 @@ import math
 
 class MovementTrial:
     def __init__(self, settings):
-        self.settings = settings
+        self.settings = settings = dict(settings)
         self.phase = settings["phase"]
         if self.phase not in ("supported_straight", "unsupported_straight", "circle"):
             raise ValueError("unknown trial phase")
         if settings.get("qualified") is not True:
             raise ValueError("trial requires reviewed ramp and stopping qualification")
-        for key in ("ramp_secs", "braking_distance_m", "settle_secs", "stationary_speed_m_s"):
+        for key, default in (("speed_m_s", 0.1), ("heading_gain", 0.),
+                             ("lateral_gain", 0.), ("max_yaw_rate_rad_s", 0.3)):
+            settings.setdefault(key, default)
+        for key in ("ramp_secs", "braking_distance_m", "settle_secs", "stationary_speed_m_s",
+                    "speed_m_s", "heading_gain", "lateral_gain", "max_yaw_rate_rad_s"):
             value = settings[key]
-            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-                raise ValueError("qualification must supply positive " + key)
+            allow_zero = key in ("heading_gain", "lateral_gain")
+            if (type(value) not in (int, float) or not math.isfinite(value)
+                    or value < 0 or (value == 0 and not allow_zero)):
+                raise ValueError("invalid qualification setting: " + key)
         self.start = None
         self.braking_at = self.settled_at = None
         self.angle = 0.0
@@ -28,9 +34,10 @@ class MovementTrial:
         if (len(position) != 3 or len(velocity) != 6 or len(quat) != 4
                 or not all(math.isfinite(v) for v in (*position, *velocity, *quat, now))):
             raise ValueError("invalid trial measurements")
+        w, qx, qy, qz = quat
+        heading = math.atan2(2 * (w * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
         if self.start is None:
-            w, qx, qy, qz = quat
-            self.heading = math.atan2(2 * (w * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            self.heading = heading
             self.start, self.started_at = tuple(position), now
         dx, dy = position[0] - self.start[0], position[1] - self.start[1]
         c, s = math.cos(self.heading), math.sin(self.heading)
@@ -67,4 +74,10 @@ class MovementTrial:
                                "requires_operator_review": True}
         else:
             self.settled_at = None
-        return [0.1 * scale, 0., 0.1 * scale if circle else 0.]
+        yaw = self.settings["speed_m_s"]
+        if not circle:
+            heading_error = math.atan2(math.sin(heading - self.heading), math.cos(heading - self.heading))
+            yaw = -self.settings["heading_gain"] * heading_error - self.settings["lateral_gain"] * y
+            limit = self.settings["max_yaw_rate_rad_s"]
+            yaw = max(-limit, min(limit, yaw))
+        return [self.settings["speed_m_s"] * scale, 0., yaw * scale]

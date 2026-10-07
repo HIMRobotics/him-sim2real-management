@@ -49,10 +49,11 @@ class HardwareNodeTests(unittest.TestCase):
         shoulder = payload["joints"]["left_shoulder_roll"]
         self.assertEqual(shoulder["command_gap_rad"]["max_abs"], 0.1)
         self.assertEqual(shoulder["response_error_rad"]["samples"], 0)
-        node.get_logger.assert_not_called()
+        self.assertIn('"command_gap_rad"', node.get_logger().info.call_args[0][0])
         diagnostics.record_response({16: 0.05}, feedback)
         HardwareMotorGateNode.publish_joint_diagnostics(node)
-        self.assertIn("largest=left_shoulder_roll", node.get_logger().info.call_args[0][0])
+        logged = json.loads(node.get_logger().info.call_args[0][0].split(": ", 1)[1])
+        self.assertEqual(logged["joints"]["left_shoulder_roll"]["response_error_rad"]["samples"], 1)
         snapshot = diagnostics.snapshot()
         warning = {"reason": "joint_position_clipped", "q_proposed": 1.2,
                    "q_commanded": 1.0, "count": 1}

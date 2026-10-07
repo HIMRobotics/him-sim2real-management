@@ -30,6 +30,21 @@ class TrialTests(unittest.TestCase):
             trial.command(self.state(), 40.)
         self.assertFalse(trial.result["success"])
 
+    def test_steering_uses_start_frame_and_ramps_to_zero(self):
+        settings = dict(self.trial().settings, speed_m_s=0.45, heading_gain=2., lateral_gain=1.)
+        trial = MovementTrial(settings)
+        state = self.state()
+        state["quat"] = [math.sqrt(0.5), 0., 0., math.sqrt(0.5)]
+        trial.command(state, 0.)
+        state["position"] = [-0.1, 1., 0.8]
+        self.assertAlmostEqual(trial.command(state, 1.)[0], 0.45)
+        self.assertAlmostEqual(trial.command(state, 1.)[2], -0.1)
+        state["quat"] = [0., 0., 0., 1.]
+        self.assertEqual(trial.command(state, 2.)[2], -0.3)
+        state["position"] = [0., 2., 0.8]
+        trial.command(state, 3.)
+        self.assertEqual(trial.command(state, 4.), [0., 0., 0.])
+
     def test_circle_requires_a_full_measured_lap(self):
         trial = self.trial("circle")
         trial.command(self.state(), 0.)
