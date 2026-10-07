@@ -2,6 +2,33 @@
 
 Validated on the development ARM64 host with real ONNX inference and MuJoCo, using the local backend and default prepared environments. No robot motor commands were sent.
 
+## Low-speed deployment screening
+
+At commit `396d8bf`, a 40-second walker run with model gains, a constant
+`[0.10, 0, 0]` task command and thrash enforcement accepted 2,000 commands.
+There were no clipping warnings, safety trips or simulated falls. Maximum
+forward progress was 0.0341 m, final displacement was 0.0132 m forward and
+0.0030 m lateral, and endpoint error to the 2 m target was 1.9868 m.
+This fails the movement objective despite the report's `within_limits` status.
+Do not advance this configuration to hardware movement qualification.
+
+Reproduce from the repository root:
+
+```bash
+.venv-policy-safety/bin/python containers/examples/prepare.py walker
+G1_TASK_COMMAND='[0.1,0,0]' \
+G1_JOINT_PROFILE="$PWD/.cache/sim_examples/walker/container/project/joint_profile.json" \
+G1_SIM_THRASH_MODE=enforce \
+./sim.sh --example walker --local --seconds 40 \
+  --output containers/sim/output/hardware-low-speed-screen
+```
+
+The retained local output contains `report.json`, `trace.npz`, and a
+`qualification.json` summary with code/model/configuration/scene hashes.
+This screens inference and physics using simulated timestamps. It does not
+validate Docker/ROS transport, wall-clock deadlines, qualified ramps/braking,
+or physical stopping. No speed, gain, model or safety limit was changed.
+
 ## Current command-gap and response checks
 
 Position proposals are clipped to the joint bounds with per-joint warnings.
