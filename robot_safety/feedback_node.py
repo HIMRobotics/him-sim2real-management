@@ -1,11 +1,18 @@
 """Read live G1 joint measurements and Start state from SDK rt/lowstate."""
 
+import json
 import time
 
 from him_safety_interfaces.msg import RobotFeedback
+from std_msgs.msg import String
 
 from . import ros_topics as topics
-from .feedback import SDK_DISCOVERY_TIMEOUT_SECS, FeedbackInbox
+from .feedback import (
+    SDK_DISCOVERY_TIMEOUT_SECS,
+    FeedbackInbox,
+    base_state_from_sdk,
+    policy_state,
+)
 from .hardware_constants import LOW_STATE_TOPIC, NUM_JOINTS
 from .ros_nodes import SafetyNode
 
@@ -28,6 +35,20 @@ class RobotFeedbackNode(SafetyNode):
             RobotFeedback, topics.ROBOT_FEEDBACK, self.feedback_qos
         )
         self.sdk_subscriber = None
+        self.base_subscriber = None
+        self.base = None
+        self.pending = {}
+        self.hardware_status = {}
+        self.publish_policy = self.declare_parameter("publish_policy_state", False).value
+        self.base_topic = self.declare_parameter("base_state_topic", "").value
+        self.base_frame = self.declare_parameter("base_velocity_frame", "").value
+        self.require_base = self.declare_parameter("require_base_state", False).value
+        if self.require_base and (not self.base_topic or self.base_frame not in ("world", "body")):
+            raise ValueError("required base state needs an explicit SDK topic and velocity frame")
+        self.policy_publisher = self.create_publisher(String, "/safety/policy_state", self.feedback_qos)
+        self.create_subscription(RobotFeedback, topics.POLICY_OBSERVATION,
+                                 self.on_observation, self.feedback_qos)
+        self.create_subscription(String, "/safety/hardware_status", self.on_status, self.command_qos)
         self.create_timer(self.config.period, self.publish_feedback)
 
     def start_sdk(self):
@@ -41,6 +62,51 @@ class RobotFeedbackNode(SafetyNode):
         ChannelFactoryInitialize(self.sdk_domain, self.sdk_interface)
         self.sdk_subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
         self.sdk_subscriber.Init(self.on_sdk_state, self.config.runtime_queue_capacity)
+        if self.base_topic:
+            from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+
+            self.base_subscriber = ChannelSubscriber(self.base_topic, SportModeState_)
+            self.base_subscriber.Init(self.on_base_state)
+
+    def on_status(self, message):
+        self.hardware_status = json.loads(message.data)
+
+    def on_base_state(self, message):
+        try:
+            latest = next(reversed(self.pending.values()), None)
+            sample = base_state_from_sdk(message, time.monotonic(), self.base_frame,
+                                         latest.quat if latest else ())
+            if self.base and sample["base_source_time_secs"] <= self.base["base_source_time_secs"]:
+                raise ValueError("nonadvancing_base_state")
+            self.base = sample
+        except (AttributeError, TypeError, ValueError, OverflowError) as error:
+            self.latch_abort(str(error))
+
+    def on_observation(self, message):
+        if not self.publish_policy or self.abort_reason:
+            return
+        sample = self.pending.get(message.received_at_secs)
+        if sample is None:
+            return
+        try:
+            state = policy_state(sample, message.observation_id, self.host_boot_id)
+            base = self.base
+            if base and 0 <= time.monotonic() - base["base_received_at_secs"] < self.config.robot_timeout:
+                state.update(base)
+                state["base_velocity"] = (*base["linear_velocity"], *sample.gyro)
+            elif self.require_base:
+                if time.monotonic() - self.time_started_secs >= SDK_DISCOVERY_TIMEOUT_SECS:
+                    self.latch_abort("base_feedback_timeout")
+                return
+            state["control_ready"] = self.hardware_status.get("handover_complete", False)
+            released = self.hardware_status.get("motion_released_at_secs")
+            if self.require_base and released is not None:
+                state["control_ready"] &= bool(base and base["base_received_at_secs"] > released)
+            output = String()
+            output.data = json.dumps(state, allow_nan=False)
+            self.policy_publisher.publish(output)
+        except (TypeError, ValueError) as error:
+            self.latch_abort(str(error))
 
     def on_sdk_state(self, message):
         # feedback.py converts and queues the sample on the SDK callback thread.
@@ -65,6 +131,9 @@ class RobotFeedbackNode(SafetyNode):
                 self.latch_abort("stale_or_reordered_sdk_feedback")
                 return
             self.time_last_feedback_secs = sample.received_at_secs
+            self.pending[sample.received_at_secs] = sample
+            while len(self.pending) > self.config.observation_history_size:
+                del self.pending[next(iter(self.pending))]
             message = RobotFeedback()
             message.host_boot_id = self.host_boot_id
             message.received_at_secs = sample.received_at_secs
@@ -83,4 +152,6 @@ class RobotFeedbackNode(SafetyNode):
     def destroy_node(self):
         if self.sdk_subscriber is not None:
             self.sdk_subscriber.Close()
+        if self.base_subscriber is not None:
+            self.base_subscriber.Close()
         return super().destroy_node()
