@@ -23,6 +23,12 @@ class TrialTests(unittest.TestCase):
         self.assertTrue(trial.result["success"])
         self.assertEqual(trial.command(self.state(2.), 50.), [0., 0., 0.])
 
+    def test_ramp_clock_starts_at_handoff(self):
+        trial = self.trial()
+        sample = dict(self.state(), policy_handoff_at_secs=10.0)
+        self.assertAlmostEqual(trial.command(sample, 10.5)[0], 0.05)
+        self.assertEqual(trial.started_at, 10.0)
+
     def test_no_measured_motion_times_out(self):
         trial = self.trial()
         trial.command(self.state(), 0.)

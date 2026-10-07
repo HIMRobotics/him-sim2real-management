@@ -83,7 +83,7 @@ class HardwareMotorGateNode(MotorGateNode):
         """Report startup readiness only after warmup and fresh released buttons."""
         adapter = self.adapter
         if (
-            self.startup_ready or (not getattr(adapter, "whole_body", False) and adapter.balance_policy is None)
+            self.startup_ready or adapter.balance_policy is None
             or not adapter.feedback_fresh(time.monotonic())
             or adapter.feedback.start_button_pressed or adapter.f3_pressed
             or adapter.abort_reason or self.motor_gate.abort_reason
@@ -107,9 +107,10 @@ class HardwareMotorGateNode(MotorGateNode):
             and self.adapter is not None
             and self.adapter.abort_reason is None
             and self.adapter.last_written_ownership_weight == 1.0
+            and (not self.adapter.whole_body or self.adapter.policy_launched)
         )
         response.message = (
-            "Full ownership weight sent" if response.success else "handover incomplete"
+            "Policy handoff authorized" if response.success else "handover incomplete"
         )
         return response
 
@@ -256,6 +257,7 @@ class HardwareMotorGateNode(MotorGateNode):
         # RPC acceptance and stock FSM are evidence, not proof of physical damping.
         status = json.dumps(
             {
+                **(self.adapter.startup.status() if self.adapter.whole_body else {}),
                 "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
                 "hardware_profile_path": self.hardware_profile_path,

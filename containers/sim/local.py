@@ -74,10 +74,16 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
         command_file = os.environ.get("G1_COMMAND_FILE") or ""
         schedule = load_schedule(command_file) if command_file else None
 
+        command_started = None
+
         def command(current, time, _step):
+            nonlocal command_started
             state = current.feedback(time)
+            if state["control_ready"] and command_started is None:
+                command_started = state["policy_handoff_at_secs"]
             if schedule is not None:
-                state["task_command"] = schedule.at(time).tolist()
+                elapsed = 0.0 if command_started is None else time - command_started
+                state["task_command"] = schedule.at(elapsed).tolist()
             elif task_command is not None:
                 state["task_command"] = task_command
             current.command(policy.command(state), time)

@@ -295,7 +295,8 @@ class SimBridge(Node):
             self.lowstate.publish(state)
 
     def publish_state(self, state):
-        state = dict(state, received_at_secs=time.monotonic(), control_ready=True)
+        state = dict(state, received_at_secs=time.monotonic(),
+                     control_ready=bool(state.get("control_ready", False)))
         message = RobotFeedback()
         message.host_boot_id = self.checker.host_boot_id if self.checker else "mujoco-sim"
         message.received_at_secs = time.monotonic() if self.checker else self.clock()

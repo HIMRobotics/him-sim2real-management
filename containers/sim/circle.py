@@ -79,16 +79,14 @@ class CircleWalker:
     def targets(self, plant):
         state = plant.state()
         q = np.asarray(state["q"], dtype=np.float32)
-        if not self.started:
-            return q.astype(np.float64)
         now = float(state["sim_time"])
-        if self.gait_start is None:
+        if self.started and self.gait_start is None:
             self.gait_start = now
         observation = self.walker.observation(
             q,
             np.asarray(state["dq"], dtype=np.float32),
             state["quat"],
             np.asarray(state["base_velocity"], dtype=np.float32),
-            self.schedule.at(now - self.gait_start),
+            self.schedule.at(now - self.gait_start) if self.started else np.zeros(3),
         )
         return self.walker.decode(self.walker.infer(observation))

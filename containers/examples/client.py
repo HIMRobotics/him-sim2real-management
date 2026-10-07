@@ -109,15 +109,18 @@ class PolicyNode(Node):
         if state["observation_id"] <= self.last_observation:
             return
         self.last_observation = state["observation_id"]
+        policy_now = state.get("sim_time", time.monotonic())
         if self.schedule is not None:
             if self.command_started is None and state.get("control_ready", False):
-                self.command_started = time.monotonic()
-            elapsed = 0.0 if self.command_started is None else time.monotonic() - self.command_started
+                self.command_started = state.get("policy_handoff_at_secs")
+                if self.command_started is None:
+                    self.command_started = policy_now
+            elapsed = 0.0 if self.command_started is None else max(0.0, policy_now - self.command_started)
             state["task_command"] = self.schedule.at(elapsed).tolist()
         elif self.task_command is not None:
             state["task_command"] = self.task_command
         if self.trial and state.get("control_ready", False):
-            state["task_command"] = self.trial.command(state, time.monotonic())
+            state["task_command"] = self.trial.command(state, policy_now)
         started = time.monotonic()
         frame = self.policy.command(state)
         inference_secs = time.monotonic() - started

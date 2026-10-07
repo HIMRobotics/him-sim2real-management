@@ -38,7 +38,11 @@ class MovementTrial:
         heading = math.atan2(2 * (w * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
         if self.start is None:
             self.heading = heading
-            self.start, self.started_at = tuple(position), now
+            handoff = state.get("policy_handoff_at_secs")
+            self.started_at = now if handoff is None else float(handoff)
+            if not math.isfinite(self.started_at) or self.started_at > now:
+                raise ValueError("invalid trial handoff time")
+            self.start = tuple(position)
         dx, dy = position[0] - self.start[0], position[1] - self.start[1]
         c, s = math.cos(self.heading), math.sin(self.heading)
         x, y = c * dx + s * dy, -s * dx + c * dy

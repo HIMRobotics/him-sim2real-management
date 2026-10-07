@@ -158,9 +158,12 @@ class BridgeTests(unittest.TestCase):
         message = node.sim_state_pub.publish.call_args.args[0]
         published = json.loads(message.data)
         self.assertEqual({key: published[key] for key in state}, state)
-        self.assertTrue(published["control_ready"])
+        self.assertFalse(published["control_ready"])
         self.assertGreater(published["received_at_secs"], 0)
         node.policy_state_pub.publish.assert_called_once_with(message)
+        node.publish_state(dict(state, control_ready=True))
+        ready = json.loads(node.policy_state_pub.publish.call_args.args[0].data)
+        self.assertTrue(ready["control_ready"])
 
     def test_namespace_guard_uses_actual_interfaces(self):
         bridge = load_bridge()

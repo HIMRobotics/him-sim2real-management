@@ -115,6 +115,11 @@ class RobotFeedbackNode(SafetyNode):
                     self.latch_abort("base_feedback_timeout")
                 return
             state["control_ready"] = self.hardware_status.get("handover_complete", False)
+            if self.hardware_status.get("whole_body_output"):
+                state.update({key: self.hardware_status.get(key) for key in (
+                    "startup_phase", "startup_stable", "handoff_ready", "policy_handoff_at_secs")})
+                state["control_ready"] &= bool(self.hardware_status.get("control_ready"))
+            state["control_ready"] &= not bool(self.hardware_status.get("abort_reason"))
             released = self.hardware_status.get("motion_released_at_secs")
             if self.require_base and released is not None:
                 state["control_ready"] &= bool(base and base["base_received_at_secs"] > released)

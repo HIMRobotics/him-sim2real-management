@@ -46,7 +46,7 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual(report["status"], "completed")
         motion = report["motion"]
         self.assertGreater(
-            motion["final_position"][0] - motion["start_position"][0], 2.0
+            motion["final_position"][0] - motion["start_position"][0], 1.5
         )
         self.assertFalse(motion["fell"])
         self.assertTrue(motion["upright_at_end"])
@@ -97,7 +97,7 @@ class ExampleTests(unittest.TestCase):
             self.assertEqual(on["status"], "within_limits")
             self.assertIsNone(on["reason"])
 
-    def test_first_command_holds_pose_and_policy_does_not_modify_state(self):
+    def test_startup_warms_policy_without_modifying_state(self):
         for name in ("walker", "balance"):
             with self.subTest(policy=name):
                 project = prepare(name)
@@ -108,7 +108,9 @@ class ExampleTests(unittest.TestCase):
                 state = runner.feedback(0.0)
                 before = json.dumps(state, sort_keys=True)
                 frame = policy.command(state)
-                self.assertEqual(frame["q"], state["q"])
+                self.assertFalse(state["control_ready"])
+                self.assertEqual(len(frame["q"]), 29)
+                self.assertTrue(np.isfinite(frame["q"]).all())
                 self.assertIsNone(runner.command(frame, 0.0))
                 np.testing.assert_allclose(runner.active["kp"], policy.kp)
                 np.testing.assert_allclose(runner.active["kd"], policy.kd)

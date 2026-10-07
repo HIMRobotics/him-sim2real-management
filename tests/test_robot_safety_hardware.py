@@ -99,8 +99,8 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.step()
         targets, machine = self.transport.write_body.call_args[0]
         self.assertEqual((len(targets), machine), (29, 5))
-        self.assertEqual(targets[0]["kp"], 2.)
-        self.assertEqual(targets[0]["tau"], 0.01)
+        self.assertEqual(targets[0]["kp"], 150.)
+        self.assertEqual(targets[0]["tau"], 0.0)
         self.assertEqual(len(self.adapter.q_applied), 29)
         recorded = self.adapter.joint_diagnostics_snapshot()[G1_29_JOINT_NAMES[0]]["applied_command"]
         self.assertEqual(recorded, dict(targets[0], written_at_secs=self.now))
@@ -172,11 +172,11 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 0)
 
-    def test_launch_gate_eases_to_the_first_pose_until_left_and_b(self):
+    def test_startup_requires_stability_then_new_left_and_b(self):
+        import numpy as np
+
         self.adapter.whole_body = True
-        self.adapter.launch_gate = True
-        self.adapter.policy_launched = False
-        self.adapter.stance_blend_secs = 1.0
+        self.adapter.balance_policy = Mock(update=Mock(return_value=np.zeros(15)))
         self.transport.write_body = Mock(return_value=True)
         self.assertTrue(self.adapter.arm())
         self.command["q"] = [0.4] * 29
@@ -185,38 +185,40 @@ class HardwareAdapterTests(unittest.TestCase):
             self.adapter.submit(self.command, self.now + 0.15)
             self.adapter.step()
 
+        def buttons(pressed):
+            remote = [0] * 40
+            remote[3] = ((1 << 7) | (1 << 1)) if pressed else 0
+            self.adapter.receive_state(SimpleNamespace(
+                motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
+                mode_machine=5,
+                imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
+                wireless_remote=remote,
+            ))
+
         step()
-        self.assertEqual(self.transport.release_calls, 1)
         step()
-        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.0)
-        for _ in range(50):
-            self.now += 0.01
-            self.state()
-            step()
-        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.2, places=2)
-        self.command["q"] = [0.9] * 29
-        self.now += 0.01
-        self.state()
-        step()
-        self.assertLess(self.transport.write_body.call_args[0][0][0]["q"], 0.5)
+        buttons(True)
         self.assertFalse(self.adapter.policy_launched)
-        while self.now < 11.0:
+        for _ in range(220):
             self.now += 0.01
-            self.state()
+            self.adapter.receive_battery(SimpleNamespace(soc=100))
+            buttons(True)
             step()
+        self.assertTrue(self.adapter.startup.ready)
         self.assertFalse(self.adapter.policy_launched)
-        remote = [0] * 40
-        remote[3] = (1 << 7) | (1 << 1)
-        self.adapter.receive_state(SimpleNamespace(
-            motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
-            mode_machine=5,
-            imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
-            wireless_remote=remote,
-        ))
-        self.command["q"] = [0.9] * 29
+        self.assertEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.)
+        buttons(False)
+        buttons(True)
         step()
         self.assertTrue(self.adapter.policy_launched)
-        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.9)
+        self.assertEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.)
+        for _ in range(110):
+            self.now += 0.01
+            self.adapter.receive_battery(SimpleNamespace(soc=100))
+            buttons(False)
+            step()
+        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.4)
+        self.assertIsNone(self.adapter.abort_reason)
 
     def test_bad_whole_body_command_never_releases_stock_control(self):
         self.adapter.whole_body = True
@@ -785,7 +787,7 @@ class HardwareAdapterTests(unittest.TestCase):
                     self.assertTrue(stopped.wait(0.5))
                     self.assertEqual(self.transport.stop_calls, 1)
                     self.assertEqual(self.adapter.abort_reason, "controller_stop")
-                    self.assertTrue(self.adapter.stop_requested.is_set())
+                    self.assertEqual(self.adapter.stop_requested.is_set(), not whole_body)
                 finally:
                     release.set()
                     writer.join(timeout=1.0)
@@ -931,7 +933,9 @@ class TransportEncodingTests(unittest.TestCase):
                         "comm.motion_switcher.motion_switcher_client", "g1.audio.g1_audio_client",
                     )
                 }
-                with patch.dict("sys.modules", modules):
+                with patch.dict("sys.modules", modules), patch(
+                    "robot_safety.unitree_transport.MotorWriterLock"
+                ):
                     transport = UnitreeArmTransport("fake", 0, Mock(), Mock(), output_enabled=enabled)
                     self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
                     self.assertIs(transport._audio(), sdk.AudioClient.return_value)

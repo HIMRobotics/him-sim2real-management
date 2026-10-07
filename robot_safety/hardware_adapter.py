@@ -3,6 +3,7 @@
 import math
 import time
 from copy import deepcopy
+from dataclasses import replace
 from threading import Event, Lock, RLock, Thread
 
 from .balance_policy import LEG_KD, LEG_KP, MODEL_PATH, BalancePolicy
@@ -43,6 +44,7 @@ from .joint_checks import (
     torque_demand,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
+from .startup_balance import StartupBalance
 
 
 class G1ArmAdapter:
@@ -52,7 +54,7 @@ class G1ArmAdapter:
                  launch_gate=False, stance_blend_secs=5.0):
         self.profile = profile
         self.whole_body = whole_body
-        self.launch_gate = bool(launch_gate)
+        self.launch_gate = bool(launch_gate or whole_body)
         if not math.isfinite(stance_blend_secs) or stance_blend_secs < 0:
             raise ValueError("stance blend duration must be finite and non-negative")
         self.stance_blend_secs = float(stance_blend_secs)
@@ -71,6 +73,7 @@ class G1ArmAdapter:
         self.lock = RLock()
         self.stop_lock = Lock()
         self.feedback = None
+        self.feedback_tick = None
         self.battery_percent = None
         self.battery_time = None
         self.machine_type = None
@@ -119,11 +122,19 @@ class G1ArmAdapter:
                 soft = self.f3_detector.update(
                     self.f3_pressed, sample.received_at_secs
                 )
-                if self.launch_gate and self.launch_detector.update(
+                launch = self.launch_detector.update(
                     decode_left_pressed(message.wireless_remote),
                     decode_b_pressed(message.wireless_remote),
-                ):
-                    self.launch_requested = True
+                )
+                tick = getattr(message, "tick", None)
+                if tick is not None and self.feedback_tick is not None:
+                    delta = (int(tick) - self.feedback_tick) % (2 ** 32)
+                    if delta >= 2 ** 31:
+                        raise ValueError("hardware_feedback_tick_reversed")
+                    if delta == 0 and self.feedback is not None:
+                        sample = replace(sample, received_at_secs=self.feedback.received_at_secs)
+                if tick is not None:
+                    self.feedback_tick = int(tick)
                 self.feedback = sample
                 imu = getattr(message, "imu_state", None)
                 if imu is not None:
@@ -131,6 +142,13 @@ class G1ArmAdapter:
                     self.gyro = tuple(float(value) for value in imu.gyroscope)
                 if self.armed and self.abort_reason is None:
                     self._abort_if_motion_exceeds_limits()
+                    if self.whole_body and self.first_output_secs is not None:
+                        self.startup.observe(self.clock(), sample.received_at_secs,
+                                             sample.q, sample.dq, sample.quat, sample.gyro)
+                        if launch and not stop and not soft and not self.abort_reason:
+                            self.startup.authorize(self.clock())
+                    elif launch and self.launch_gate and not self.whole_body:
+                        self.launch_requested = True
                 with self.stop_lock:
                     self.pose_snapshot = tuple(
                         sample.q[index] for index in UPPER_BODY_INDICES
@@ -273,11 +291,17 @@ class G1ArmAdapter:
                         f"{joint_name} speed: measured={velocity:.6f} rad/s, "
                         f"maximum absolute={self.profile.initial_velocity_tolerance_rad_secs} rad/s"
                     )
+            if self.whole_body:
+                if not self._ensure_balance_policy():
+                    return self.reject_arm("startup_balance_model_unavailable")
             # Serialize granting control with an abort arriving from another thread.
             with self.stop_lock:
                 if self.abort_reason:
                     return self.reject_arm(f"already stopped: {self.abort_reason}")
                 self._reset_session()
+                if self.whole_body:
+                    self.balance_policy.reset()
+                    self.startup.policy = self.balance_policy
                 self.last_submission_secs = now
                 self.armed = True
             return True
@@ -296,6 +320,10 @@ class G1ArmAdapter:
         self.hold_targets = self.arm_hold_q = None
         self.joint_diagnostics = JointDeltaDiagnostics()
         self.position_warnings = {}
+        self.startup = StartupBalance()
+        self.applied_gains = {}
+        self.policy_launched = False if self.whole_body else not self.launch_gate
+        self.launch_requested = False
 
     def reject_arm(self, reason):
         """Record the failed readiness check without changing motor settings."""
@@ -308,6 +336,7 @@ class G1ArmAdapter:
         with self.stop_lock:
             if self.abort_reason is None:
                 self.abort_reason = reason
+                self.startup.fail()
             self.command = None
             if request_damping or (self.whole_body and self.armed and self.ownership_taken):
                 self.hold_failed = True
@@ -409,6 +438,7 @@ class G1ArmAdapter:
                     return
                 self.balance_released = True
                 self.motion_released_at_secs = self.clock()
+                self.startup = StartupBalance(self.balance_policy)
             except Exception:  # noqa: BLE001 - An uncertain release requires restoration.
                 self.balance_released = True
                 self.abort("hardware_release_failed")
@@ -437,6 +467,7 @@ class G1ArmAdapter:
                     }
                     self.dq_applied = {i: v["dq"] for i, v in targets.items()}
                     self.tau_applied = {i: v["tau"] for i, v in targets.items()}
+                    self.applied_gains = {i: (v["kp"], v["kd"]) for i, v in targets.items()}
                     self.command_time = self.clock()
                 if weight > 0:
                     with self.stop_lock:
@@ -463,7 +494,8 @@ class G1ArmAdapter:
                     if index in self.q_applied:
                         result[G1_29_JOINT_NAMES[index]]["applied_command"] = {
                             "q": self.q_applied[index], "dq": self.dq_applied[index],
-                            "tau": self.tau_applied[index], "kp": limits.kp, "kd": limits.kd,
+                            "tau": self.tau_applied[index],
+                            "kp": self.applied_gains[index][0], "kd": self.applied_gains[index][1],
                             "written_at_secs": self.command_time,
                         }
             return result
@@ -487,8 +519,8 @@ class G1ArmAdapter:
                     if index not in self.q_applied:
                         continue
                     tau_demand = torque_demand(
-                        self.q_applied[index], self.dq_applied[index], limits.kp,
-                        limits.kd, self.tau_applied[index], self.feedback.q[index],
+                        self.q_applied[index], self.dq_applied[index], self.applied_gains[index][0],
+                        self.applied_gains[index][1], self.tau_applied[index], self.feedback.q[index],
                         self.feedback.dq[index],
                     )
                     check_torque(G1_29_JOINT_NAMES[index], limits, tau_demand)
@@ -534,11 +566,23 @@ class G1ArmAdapter:
     def checked_targets(self, now):
         """Check proposals with the profile gains used by the arm controller."""
         command = self.command
-        if self.launch_gate and not self.policy_launched:
+        entries = list(self._monitored_joints())
+        if self.whole_body:
+            command = dict(command, kp=[v.kp for _, v in entries],
+                           kd=[v.kd for _, v in entries])
+            command = self.startup.command(
+                now, self.feedback.received_at_secs,
+                dict(q=self.feedback.q, dq=self.feedback.dq, quat=self.quat, gyro=self.gyro),
+                command,
+            )
+            self.policy_launched = self.startup.handoff is not None
+            entries = [(i, replace(v, kp=float(command["kp"][i]), kd=float(command["kd"][i])))
+                       for i, v in entries]
+        elif self.launch_gate and not self.policy_launched:
             command = self._stance_command(now)
         targets = checked_targets(
             command,
-            ((index, G1_29_JOINT_NAMES[index], limits) for index, limits in self._monitored_joints()),
+            ((index, G1_29_JOINT_NAMES[index], limits) for index, limits in entries),
             self.feedback.q, self.feedback.dq, initial=self.last_output_secs is None,
             initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
             warnings=self.position_warnings,
@@ -709,8 +753,7 @@ class G1ArmAdapter:
 
     def start_workers(self):
         """Run output deadlines and stop RPC retries independently of ROS callbacks."""
-        if not self.whole_body:
-            self._ensure_balance_policy()
+        self._ensure_balance_policy()
 
         def output_loop():
             while not self.shutdown_requested.wait(HARDWARE_PERIOD_SECS):

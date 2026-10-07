@@ -91,13 +91,7 @@ class ExamplePolicy:
         if self.arm_pose is None:
             self.arm_pose = q[15:].copy()
             self.hold_pose = q.copy()
-        if not state.get("control_ready", True):
-            # Hardware eases to this pose, then left + B sets control_ready.
-            target = (self.hold_pose if self.name == "balance"
-                      else np.asarray(self.policy.default, dtype=float)).copy()
-        elif self.sequence == 0:
-            target = self.hold_pose.copy()
-        elif self.name == "balance":
+        if self.name == "balance":
             lower = self.policy.update(q, state["dq"], state["quat"], state["gyro"])
             target = np.concatenate((lower, self.arm_pose))
         else:
@@ -107,11 +101,12 @@ class ExamplePolicy:
                 state["quat"],
                 ([0.0, 0.0, 0.0, *state["gyro"]]
                  if self.name == "walker" else state["base_velocity"]),
-                self.velocity_command(state),
+                (self.velocity_command(state) if state.get("control_ready", True)
+                 else np.zeros(3, dtype=np.float32)),
             )
             target = self.policy.decode(self.policy.infer(observation))
             if self.name == "stairs":
-                if self.phase == "cross" and 1.88 <= state["position"][0] < 2.05:
+                if state.get("control_ready", True) and self.phase == "cross" and 1.88 <= state["position"][0] < 2.05:
                     phase = self.phase_time % 0.8
                     if phase < 0.25:
                         target[[0, 6]], target[[3, 9]], target[[4, 10]] = (

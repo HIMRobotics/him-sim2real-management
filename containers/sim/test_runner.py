@@ -60,6 +60,8 @@ class RunnerTest(unittest.TestCase):
             trace = root / "trace.npz"
             with patch.dict(os.environ, {"G1_SIM_LIVE": str(live), "G1_SIM_TRACE": str(trace)}):
                 runner = Runner(record_trace=True)
+                # Isolate output diagnostics after startup has completed.
+                runner.startup.command = lambda now, stamp, state, command, **kw: command
                 state = runner.feedback(0.0)
                 runner.command(hold(runner, state, 0), 0.0)
                 runner.step(0.0)
@@ -211,6 +213,8 @@ class RunnerTest(unittest.TestCase):
 
     def test_clipped_ankle_is_sent_and_used_for_response(self):
         runner = Runner()
+        # Isolate output diagnostics after startup has completed.
+        runner.startup.command = lambda now, stamp, state, command, **kw: command
         index = runner.plant.joint_names.index("right_ankle_pitch_joint")
         runner.plant.data.qpos[runner.plant.qadr[index]] = -0.86
         state = runner.feedback(0.0)
@@ -301,7 +305,7 @@ class RunnerTest(unittest.TestCase):
             self.skipTest("cached walker weights are not on this machine")
         runner = Runner()
         start = None
-        for step in range(150):
+        for step in range(250):
             result = runner.circle(step * 0.02)
             self.assertIsNone(result.get("reason"))
             position = runner.plant.state()["position"]
@@ -381,6 +385,8 @@ class RunnerTest(unittest.TestCase):
         for follows_target in (True, False):
             with self.subTest(follows_target=follows_target):
                 runner = Runner()
+                # Isolate output diagnostics after startup has completed.
+                runner.startup.command = lambda now, stamp, state, command, **kw: command
                 index = 15
                 state = runner.feedback(0.0)
                 self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
@@ -410,6 +416,8 @@ class RunnerTest(unittest.TestCase):
 
     def test_direct_command_warns_on_torque_without_stopping(self):
         runner = Runner()
+        # Isolate output diagnostics after startup has completed.
+        runner.startup.command = lambda now, stamp, state, command, **kw: command
         runner.control_path = "direct"
         runner.commands = 1
         runner.last_command_time = 0.0
@@ -422,6 +430,7 @@ class RunnerTest(unittest.TestCase):
             "kd": np.full(29, 1.5),
             "tau": np.zeros(29),
         }
+        runner.submitted = runner.active
         with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
             result = runner.step(0.02)
         self.assertIsNone(result["reason"])

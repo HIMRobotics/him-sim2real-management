@@ -26,6 +26,9 @@ def resolve_model_path():
     override = os.environ.get("HIM_BALANCE_ONNX")
     if override:
         return Path(override)
+    bundled = Path(__file__).resolve().parents[1] / "examples/policies/walker/balance.onnx"
+    if bundled.is_file():
+        return bundled
     beside_package = Path(__file__).resolve().parents[1] / _MODEL_RELATIVE
     if beside_package.is_file():
         return beside_package
@@ -137,12 +140,20 @@ class BalancePolicy:
     def __init__(self, model_path, session=None):
         import onnxruntime as ort
 
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
         self.session = (
             session
             if session is not None
-            else ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            else ort.InferenceSession(model_path, sess_options=options, providers=["CPUExecutionProvider"])
         )
         self.input_name = self.session.get_inputs()[0].name
+        self.reset()
+
+    def reset(self):
+        """Discard prior-session history before measured-state initialization."""
+        self.history_seeded = False
         self.action = np.zeros(NUM_ACTIONS, dtype=np.float32)
         self.history = collections.deque(
             [np.zeros(SINGLE_OBS_DIM, dtype=np.float32)] * OBS_HISTORY_LEN,
@@ -161,7 +172,13 @@ class BalancePolicy:
     def update(self, q, dq, quat_wxyz, gyro):
         """Append one frame and return clipped lower-body position targets."""
         frame = single_observation(q, dq, quat_wxyz, gyro, self.action)
-        self.history.append(frame)
+        if not np.isfinite(frame).all():
+            raise ValueError("nonfinite balance observation")
+        if not getattr(self, "history_seeded", False):
+            self.history.extend([frame.copy() for _ in range(OBS_HISTORY_LEN)])
+            self.history_seeded = True
+        else:
+            self.history.append(frame)
         packed = np.zeros((1, NUM_OBS), dtype=np.float32)
         for index, item in enumerate(self.history):
             packed[0, index * SINGLE_OBS_DIM : (index + 1) * SINGLE_OBS_DIM] = item
