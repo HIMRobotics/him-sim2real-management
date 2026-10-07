@@ -124,7 +124,12 @@ run_session() {
     in_netns "$net_pid" env "${sim_env[@]}" bash -c "$hold_cmd" >"$out_dir/hold.log" 2>&1 &
     echo $! >"$out_dir/hold.pid"
   else
+    trial_args=()
+    if [[ -n "${G1_TRIAL_CONFIG:-}" ]]; then
+      trial_args=(-v "$(realpath "$G1_TRIAL_CONFIG"):/trial.json:ro" -e G1_TRIAL_CONFIG=/trial.json)
+    fi
     "$runtime" run -d --name "$user_name" --network "container:$net_name" --ipc "container:$net_name" \
+      "${trial_args[@]}" -e "G1_THRASH_MODE=${G1_SIM_THRASH_MODE:-monitor}" \
       -v "$repo_dir/containers/sim/fastdds.xml:/fastdds.xml:ro" \
       -e ROBOT_INTERFACE=lo \
       -e G1_SIM_NETNS=1 \

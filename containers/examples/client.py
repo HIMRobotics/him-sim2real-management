@@ -76,6 +76,8 @@ class PolicyNode(Node):
         if self.done:
             return
         state = json.loads(message.data)
+        if self.mode != "sim" and state.get("host_boot_id") != Path("/proc/sys/kernel/random/boot_id").read_text().strip():
+            raise RuntimeError("policy state came from another host clock")
         if self.session_id is None and self.mode == "sim":
             self.session_id = state["session_id"]
         if state["session_id"] and self.session_id and state["session_id"] != self.session_id:
@@ -98,13 +100,18 @@ class PolicyNode(Node):
                 raise RuntimeError("policy requires measured base velocity")
         if self.trial and state.get("control_ready", False):
             state["task_command"] = self.trial.command(state, time.monotonic())
+        started = time.monotonic()
         frame = self.policy.command(state)
+        inference_secs = time.monotonic() - started
+        if self.trial and inference_secs > 0.02:
+            raise RuntimeError("policy inference deadline exceeded")
         command = JointCommand()
         for key, value in frame.items():
             setattr(command, key, value)
         self.pub.publish(command)
         if self.mode != "sim" or self.trial:
             print(json.dumps({"state": state, "command": frame,
+                              "inference_secs": inference_secs,
                               "trial": self.trial.result if self.trial else None}, allow_nan=False), flush=True)
 
     def on_abort(self, message):
@@ -144,7 +151,7 @@ def main():
             if time.monotonic() - node.last_received > (0.2 if node.session_id else 15):
                 raise RuntimeError("policy state timeout")
     finally:
-        if node.session_id:
+        if node.session_id and rclpy.ok():
             abort = Abort()
             abort.source, abort.reason = node.get_name(), "policy_container_exit"
             node.abort_pub.publish(abort)

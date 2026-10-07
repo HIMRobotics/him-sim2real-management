@@ -53,9 +53,12 @@ services:
       - sim
     volumes:
       - ./fastdds.xml:/fastdds.xml:ro
+      - ${G1_TRIAL_CONFIG:-/dev/null}:/trial.json:ro
     environment:
       G1_SIM_NETNS: "1"
       G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
+      G1_TRIAL_CONFIG: ${G1_TRIAL_CONFIG:+/trial.json}
+      G1_THRASH_MODE: ${G1_SIM_THRASH_MODE:-monitor}
       ROBOT_INTERFACE: lo
       ROBOT_DOMAIN: "0"
       ROS_DOMAIN_ID: "97"

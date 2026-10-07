@@ -117,6 +117,8 @@ class SafetyCheckerNode(SafetyNode):
         self.config = replace(self.config, thrash=ThrashConfig(**settings))
         self.supervisor = Supervisor(self.config)
         self.thrash_event_logged = False
+        self.create_timer(1.0, lambda: self.get_logger().info(
+            "Thrash telemetry: " + json.dumps(self.supervisor.thrash_detector.snapshot())))
         self.postcheck_publisher = self.create_publisher(
             CheckedCommand, topics.POSTCHECK_COMMAND, self.command_qos
         )
