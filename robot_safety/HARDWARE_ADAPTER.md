@@ -269,3 +269,22 @@ feet weight-bearing, with the gantry following without towing and a second
 operator handling stopping. Hashes, commands, measured state, inference timing,
 trial results, clipping diagnostics, thrash telemetry and stop reasons are saved
 in the run logs. Configuration/policy changes require renewed qualification.
+
+## Implementation validation
+
+The implementation passed 116 safety tests, 8 balance/trial/preflight tests,
+72 simulation tests, and 26 distinct ROS integration tests. These include fake
+hardware and the shared container client through the existing checker/gate.
+Use focused tests for subsequent changes rather than repeating all suites.
+
+Five-second ONNX/MuJoCo smoke runs with the generated walker gains and enforced
+thrash checks accepted all 250 commands for stationary, 0.10 m/s straight, and
+0.10 m/s plus 0.10 rad/s turning commands, without simulated falls. However,
+the straight run advanced only 0.032 m. These short runs do not qualify the
+2 m route or a full circle. Investigate the measured response before hardware
+movement, without automatically increasing speed or relaxing limits.
+
+Docker image build/run remains unverified because this account cannot access
+the Docker daemon. No hardware output was enabled or robot services restarted.
+Measured base feedback after control release, physical stopping/restoration,
+and the supported qualification campaign remain to be validated on the robot.
