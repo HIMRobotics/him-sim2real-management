@@ -99,6 +99,43 @@ class SafetyGraphTests(unittest.TestCase):
         )
         self.assertEqual(self.checker.abort_reason, "invalid_action")
 
+    def test_shared_container_client_reaches_the_same_checked_gate(self):
+        import importlib.util
+        import sys
+
+        from std_msgs.msg import String
+
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location("policy_client_test", root / "containers/examples/client.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"controllers": Mock()}), patch.object(
+            sys, "path", [str(root / "containers/examples"), *sys.path]
+        ):
+            spec.loader.exec_module(module)
+        command = self.arm()
+        for index, mode in enumerate(("sim", "dry-run"), 1):
+            policy = Mock()
+            policy.name = "balance"
+            frame = {key: list(getattr(command, key)) for key in ("q", "dq", "kp", "kd", "tau")}
+            frame.update(session_id=command.session_id, sequence=index, observation_id=command.observation_id)
+            policy.command.return_value = frame
+            client = module.PolicyNode(policy, mode)
+            self.executor.add_node(client)
+            try:
+                self.wait_for(lambda client=client: client.pub.get_subscription_count() > 0)
+                state = {"session_id": command.session_id, "observation_id": command.observation_id,
+                         "received_at_secs": time.monotonic(), "host_boot_id": self.checker.host_boot_id}
+                client.session_id = command.session_id
+                message = String()
+                message.data = json.dumps(state)
+                client.on_state(message)
+                client.publish_command()
+                self.wait_for(lambda index=index: self.motor.motor_gate.last_command_sequence == index)
+                self.assertEqual(self.motor.motor_gate.last_checked_command["q"], frame["q"])
+            finally:
+                self.executor.remove_node(client)
+                client.destroy_node()
+
     def test_silent_checker_causes_independent_gate_damping(self):
         self.checker.on_precheck(self.arm())
         self.wait_for(
