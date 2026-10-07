@@ -421,6 +421,14 @@ class G1ArmAdapter:
             result = self.joint_diagnostics.snapshot()
             for name, warning in self.position_warnings.items():
                 result[name]["position_clipping"] = warning.copy()
+            if self.q_applied is not None:
+                for index, limits in self._monitored_joints():
+                    if index in self.q_applied:
+                        result[G1_29_JOINT_NAMES[index]]["applied_command"] = {
+                            "q": self.q_applied[index], "dq": self.dq_applied[index],
+                            "tau": self.tau_applied[index], "kp": limits.kp, "kd": limits.kd,
+                            "written_at_secs": self.command_time,
+                        }
             return result
         finally:
             self.lock.release()

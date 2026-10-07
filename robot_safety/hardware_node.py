@@ -1,4 +1,4 @@
-"""Opt-in motor gate that writes Unitree upper-body targets and requests body damping."""
+"""Opt-in motor gate for checked Unitree joint commands and stock damping."""
 
 import json
 import os
@@ -254,31 +254,14 @@ class HardwareMotorGateNode(MotorGateNode):
         message = String()
         message.data = json.dumps(payload)
         self.joint_diagnostics_publisher.publish(message)
+        self.get_logger().info(f"Joint diagnostics: {message.data}")
         for name, values in sampled.items():
             if "position_clipping" in values:
                 self.get_logger().warning(
                     f"Joint position clipped {name}: {json.dumps(values['position_clipping'])}"
                 )
         if final:
-            for name, values in sampled.items():
-                self.get_logger().info(f"Joint extrema {name}: {json.dumps(values)}")
             self.final_diagnostics_logged = True
-        else:
-            tracked = {
-                name: values for name, values in sampled.items()
-                if values["response_error_rad"]["samples"]
-            }
-            if not tracked:
-                return
-            name = max(
-                tracked, key=lambda key: tracked[key]["response_error_rad"]["max_abs"]
-            )
-            error = sampled[name]["response_error_rad"]
-            self.get_logger().info(
-                f"Run response-error extrema: largest={name}, "
-                f"min={error['min']:.6f}, max={error['max']:.6f} rad. "
-                f"All joints: {topics.JOINT_DIAGNOSTICS}"
-            )
 
     def destroy_node(self):
         if self.adapter is not None and self.adapter.transport is not None:

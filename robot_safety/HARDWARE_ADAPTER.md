@@ -269,6 +269,9 @@ feet weight-bearing, with the gantry following without towing and a second
 operator handling stopping. Hashes, commands, measured state, inference timing,
 trial results, clipping diagnostics, thrash telemetry and stop reasons are saved
 in the run logs. Configuration/policy changes require renewed qualification.
+Hardware joint diagnostics include the most recent applied targets, velocities,
+feedforward torques, effective gains and write timestamp, sampled once a second
+and on faults. Proposed container commands are logged at inference cadence.
 
 ## Implementation validation
 

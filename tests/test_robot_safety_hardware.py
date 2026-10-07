@@ -102,6 +102,8 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(targets[0]["kp"], 2.)
         self.assertEqual(targets[0]["tau"], 0.01)
         self.assertEqual(len(self.adapter.q_applied), 29)
+        recorded = self.adapter.joint_diagnostics_snapshot()[G1_29_JOINT_NAMES[0]]["applied_command"]
+        self.assertEqual(recorded, dict(targets[0], written_at_secs=self.now))
         self.adapter.abort("fault")
         self.adapter.stop_once()
         self.assertEqual(self.transport.restore_calls, 1)
