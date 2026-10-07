@@ -14,6 +14,21 @@ sys.path.insert(0, str(ROOT))
 
 from robot_safety.balance_policy import DEFAULT_JOINT_POSITIONS
 
+# Simulation presets reuse the existing controller and model bundle.
+SCENARIOS = {
+    "walker/thrash": ("walker", "supine", 0, "enforce"),
+    "walker/thrash-monitor": ("walker", "supine", 0, "monitor"),
+}
+
+
+def run_settings(name):
+    """Resolve an example into controller, pose, checks and detector mode."""
+    if name in SCENARIOS:
+        return SCENARIOS[name]
+    if name in ("stairs", "walker", "balance"):
+        return name, "standing", 1, "default"
+    raise ValueError("unknown example: " + name)
+
 
 def copy_file(source, target):
     source, target = Path(source), Path(target)
@@ -108,7 +123,11 @@ def prepare(name, destination=None, *, container=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("example", choices=("stairs", "walker", "balance"))
+    parser.add_argument("example", choices=("stairs", "walker", "balance", *SCENARIOS))
     parser.add_argument("--assets-only", action="store_true")
+    parser.add_argument("--settings", action="store_true", help="Print simulation preset settings.")
     args = parser.parse_args()
-    print(prepare(args.example, container=not args.assets_only))
+    if args.settings:
+        print(*run_settings(args.example))
+    else:
+        print(prepare(run_settings(args.example)[0], container=not args.assets_only))

@@ -60,43 +60,28 @@ class ThrashConfig:
     slow_cutoff_hz: float = 4.0
     fast_cutoff_hz: float = 25.0
     averaging_secs: float = 0.15
-    persistence_secs: float = 0.2
-    history_secs: float = 2.0
-    min_cycles: int = 3
-    deadband_rad_secs: float = 0.1
-    min_excursion_rad: float = 0.02
-    activity_rms: float = 1.0
-    severe_rms: float = 2.5
-    irregularity_cv: float = 0.35
-    local_joints: int = 2
-    distributed_joints: int = 3
+    persistence_secs: float = 0.5
+    weighted_rms_limit: float = 1.5
     velocity_scales: tuple = ()
-    regions: tuple = ()
+    joint_weights: tuple = ()
 
     def __post_init__(self):
         if self.mode not in ("off", "monitor", "enforce"):
             raise ValueError("thrash mode must be off, monitor or enforce")
         for name, value in self.__dict__.items():
-            if name in ("mode", "velocity_scales", "regions"):
+            if name in ("mode", "velocity_scales", "joint_weights"):
                 continue
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"invalid thrash setting: {name}")
-        if self.fast_cutoff_hz <= self.slow_cutoff_hz or self.severe_rms <= self.activity_rms:
-            raise ValueError("thrash cutoffs and severity thresholds must be ordered")
-        for name in ("min_cycles", "local_joints", "distributed_joints"):
-            if type(getattr(self, name)) is not int:
-                raise ValueError(f"thrash {name} must be an integer")
-        if not 2 <= self.min_cycles <= 6:
-            raise ValueError("thrash min_cycles must be between 2 and 6")
-        if not isinstance(self.velocity_scales, tuple) or any(
-            type(v) not in (int, float) or not math.isfinite(v) or v <= 0
-            for v in self.velocity_scales
-        ):
-            raise ValueError("thrash velocity scales must be finite and positive")
-        if not isinstance(self.regions, tuple) or any(
-            type(v) is not int or v < 0 for v in self.regions
-        ):
-            raise ValueError("thrash regions must be nonnegative integers")
+        if self.fast_cutoff_hz <= self.slow_cutoff_hz:
+            raise ValueError("thrash filter cutoffs must be ordered")
+        for name in ("velocity_scales", "joint_weights"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(
+                type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                for v in values
+            ):
+                raise ValueError(f"thrash {name} must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -149,8 +134,8 @@ class Config:
             raise TypeError("command_limits must be JointCommandLimits")
         if not isinstance(self.thrash, ThrashConfig):
             raise TypeError("thrash must be ThrashConfig")
-        for values in (self.thrash.velocity_scales, self.thrash.regions):
+        for values in (self.thrash.velocity_scales, self.thrash.joint_weights):
             if values and len(values) != self.joints:
-                raise ValueError("thrash scales and regions must match the joint count")
+                raise ValueError("thrash scales and weights must match the joint count")
         validate_bounds(self.robot_position_bounds_rad)
         validate_bounds(self.robot_velocity_bounds_rad_per_sec)

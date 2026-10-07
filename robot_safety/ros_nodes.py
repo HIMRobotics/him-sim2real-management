@@ -26,7 +26,7 @@ from .config import COMMAND_FIELDS, Config, ThrashConfig
 from .controller import StartDoublePressDetector
 from .core import Supervisor, SupervisorPhase
 from .motor_gate import MotorCommandGate
-from .thrash import default_regions
+from .thrash import default_weights
 
 
 def command_from_ros(message):
@@ -110,8 +110,8 @@ class SafetyCheckerNode(SafetyNode):
             default = field.default
             if field.name == "velocity_scales":
                 default = [1.0] * self.config.joints
-            elif field.name == "regions":
-                default = list(default_regions(self.config.joints))
+            elif field.name == "joint_weights":
+                default = list(default_weights(self.config.joints))
             value = self.declare_parameter(f"thrash.{field.name}", default).value
             settings[field.name] = tuple(value) if isinstance(default, list) else value
         self.config = replace(self.config, thrash=ThrashConfig(**settings))

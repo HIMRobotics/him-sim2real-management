@@ -93,54 +93,63 @@ during startup. No limits were relaxed to make these examples pass.
 
 Local and ROS simulations both use `robot_safety/thrash.py` and `ThrashConfig`,
 the same implementation and defaults as the real checker. Local mode samples
-measured velocities at each 2 ms physics step using simulation time. ROS mode
-uses checker feedback receipt times at the bridge's 20 ms cadence, so sampling
-and detection latency differ. There is only one active detector per path.
-The direct circle path also uses the shared detector when safety is enabled.
+measured velocities at each 2 ms physics step using simulation time. Safety-enabled
+ROS mode uses checker feedback receipt times at the bridge's 20 ms cadence.
+With other checks disabled, ROS runs sample in the plant as local runs do.
+There is only one active detector per path, with different sampling latency.
+The walker scenarios reuse the existing walker model and submission command
+path, not the direct `--circle` shortcut:
 
 ```bash
-./sim.sh --example walker --local --seconds 10 --view
-./sim.sh --example walker --local --seconds 10 --view --thrash-mode enforce
+# Belly-up, only thrash enforcement enabled.
+./sim.sh --example walker/thrash --local --seconds 20 --view
+
+# Same experiment, readings without thrash stops.
+./sim.sh --example walker/thrash-monitor --local --seconds 20 --view
+
+# Upright comparison to check false positives.
+./sim.sh --example walker/thrash-monitor --pose standing --local --seconds 20 --view
 ```
 
-`--thrash-mode monitor` is the default with safety checks on. It records detections without stopping
-motion. `enforce` latches a stop and rejects later commands. `off` disables only
-thrash detection. With `--no-safety-checks`, the detector defaults to off, but an
-explicit `--thrash-mode monitor` keeps numeric telemetry and detections running
-without enforcing motion limits or stopping on thrash. An explicit `enforce`
-still stops on thrash. `G1_SIM_THRASH_MODE` supplies the mode when the flag is omitted.
-Hardware still selects the equivalent `thrash.mode` checker ROS parameter.
+Use `./desktop_sim.sh` with the same arguments on desktop. Omit `--local` to
+exercise the ROS submission path. Both scenarios default to `supine` with
+other safety checks disabled. Explicit `--pose` and `--safety-checks` override
+those defaults. Protocol validation and non-finite simulation failures remain
+active. Settings live in `containers/examples/prepare.py`, without a separate
+policy or detector implementation.
 
-To observe the belly-up walker without safety stops:
-
-```bash
-./desktop_sim.sh --circle --pose supine --seconds 20 --no-safety-checks --thrash-mode monitor --view
-```
+Ordinary submissions monitor thrashing when safety checks are enabled and
+turn detection off with `--no-safety-checks`. For custom simulation setups,
+`G1_SIM_THRASH_MODE=monitor|enforce|off` configures the shared detector. Walker
+scenarios select their own mode. Hardware uses the `thrash.mode` checker ROS
+parameter. There is no detector-specific launcher flag.
 
 Reports include `thrash.mode`, the first `thrash.event`, current metrics, and
 separate `checks.thrash_monitoring` / `checks.thrash_enforcement` flags. The
 finished-run viewer shows the mode and any detection. Other checks passing
 does not mean a monitored thrash warning was absent.
 
-New traces and live views also show frame-aligned per-joint oscillatory RMS,
-motion RMS, cycle irregularity (CV), and normal/severe evidence in milliseconds,
-alongside their configured thresholds. RMS values are normalized by each
-joint's velocity scale, not torque or a probability. Space pauses and arrow
-keys step both the robot and its readings. Older traces show telemetry as
-unavailable. For a local circle walk with monitoring, use
-`./desktop_sim.sh --circle --seconds 20 --thrash-mode monitor --view`.
+New traces and live views show whole-body weighted oscillation RMS, its limit,
+and the continuous time above that limit. Per-joint rows show oscillatory RMS,
+motion RMS, weight, and percentage of the total weighted energy. Hips, knees
+and waist weigh 4, shoulders 3, ankles 2, elbows 1, and wrists 0.25. The shared
+score is `sqrt(sum(weight * oscillatory_RMS²) / sum(weight))`, with a provisional
+limit of 1.5 for 500 ms. CV and the former local/distributed/severe rules no
+longer stop motion. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
+for details. These are motion-risk weights, not measured joint inertias.
 
-Before gain unification, the provisional thresholds flagged the bundled walker's leg motion
-around 1.99 simulated seconds during a completed 10-second monitoring run.
-Treat this as a calibration case, not evidence of unstable walking. These
-defaults are not a validated locomotion envelope. No automatic threshold
-adaptation or task exemption is applied.
+Space pauses and arrow keys step both motion and readings. **Go to start / Home**
+jumps to the first frame and pauses. **Restart replay / R** plays from the
+beginning, preserving the camera and without rerunning the simulation. Old traces preserve
+their original detections and are labeled as legacy recordings. Start a new run
+to see the new score. Detection defaults remain provisional, without automatic
+threshold adaptation or task exemptions.
 
 ## Stop reasons in the viewer
 
 The viewer records the first policy-stop reason, time, affected joint or base
 axis, measured value and limit where available. Thrash enforcement includes the
-involved joints and their RMS, CV and evidence values. The card distinguishes
+whole-body score, limit, duration and largest joint contributors. The card distinguishes
 PD torque demand from applied torque. Live frames and new traces retain this
 metadata, and older replays can recover it from the adjacent report. Later
 faults do not replace the original cause. A stopped policy may be followed by
@@ -156,14 +165,14 @@ still contributes to the separate PD torque calculation.
 | Joint target/measured velocity, feedforward torque, PD/applied torque | Checked submissions, with measured velocity also checked in direct circle mode |
 | Base angular speed and standing fall | Safety checks on, with upright fall disabled for floor poses |
 | Command/observation/feedback/loop deadlines | Safety checks on, according to the control path |
-| Thrashing | Only `--thrash-mode enforce`, independently of other safety checks |
+| Thrashing | Enforcement mode, including `walker/thrash`, independently of other safety checks |
 | Malformed commands, wrong session/sequence, unknown observation IDs | Submission protocol, including unchecked runs |
 | Non-finite simulation, policy/plant exceptions, process shutdown | All modes |
 | External abort, expired postcheck envelope or silent checker | ROS gateway paths |
 
 A requested duration ending is normal completion. Waiting for a policy until
 the ROS startup deadline expires produces `no_command`, rather than a safety
-pass. With `--no-safety-checks --thrash-mode monitor`, motion limits and thrash
+pass. With `walker/thrash-monitor`, motion limits and thrash
 stops are disabled, while diagnostics continue.
 
 ## Other simulation checks

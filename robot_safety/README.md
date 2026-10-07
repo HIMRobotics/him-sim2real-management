@@ -124,32 +124,45 @@ gate then uses its existing stop/output handling. Previously delivered commands
 remain subject to abort delivery and their existing expiry deadlines. `off`
 disables this detector only. Existing watchdogs and checks remain active.
 
-The detector uses fast/slow velocity filters, exponentially averaged squared
-activity, substantial direction reversals, local and distributed body-region
-checks, and evidence that rises during suspicious motion and decays twice as
-fast otherwise. Severe single-joint activity can trigger independently. Moderate
-activity requires two joints in one region or three across at least two regions.
-Timing or amplitude variation across complete cycles increases suspicion when
-activity is elevated, including slower irregular motion. Regular severe
-oscillation still triggers. Startup partial cycles are discarded. Evidence uses
-receipt timestamps, ignores duplicates and resets after telemetry gaps or a new
-session. Supervisor freshness checks independently reject stale input.
+The detector subtracts a slow velocity filter from a fast filter, then averages
+squared oscillation for each joint. Its single whole-body score is:
 
-All `ThrashConfig` fields in `config.py` are startup ROS parameters prefixed with
-`thrash.`. Defaults are provisional: 4/25 Hz filters, 150 ms averaging, 200 ms
-evidence, at least three cycles in a two-second history, and up to six retained
-cycles per joint. Cycle estimation adds latency beyond the evidence duration.
-Telemetry must sample the motion sufficiently quickly to resolve its reversals.
+```text
+joint_energy[j] = EMA(((fast_velocity[j] - slow_velocity[j]) / velocity_scale[j])²)
+whole_body_RMS = sqrt(sum(weight[j] * joint_energy[j]) / sum(weight))
+```
 
-`thrash.velocity_scales` is a positive array in SDK joint order, with one scale
-per joint in rad/s. Filtered and total RMS velocities are divided by these
-scales before comparison with `activity_rms` (1.0) and `severe_rms` (2.5).
-The default scales are all 1.0, not validated task envelopes. `thrash.regions`
-defaults to left leg, right leg, waist, left arm and right arm for the 29-joint
-G1. Other joint counts default to a separate region per joint. Configure scales
-and regions independently of policy commands and calibrate them against the
-intended tasks. The detector cannot infer intent or guarantee discrimination
-between allowed running/table-tennis motion and faults with the same telemetry.
+Squaring before summing prevents opposite joint movements from cancelling.
+The score must remain at or above `weighted_rms_limit` (1.5) continuously for
+`persistence_secs` (0.5). Dropping below the limit resets the timer. There are
+no CV, cycle-count, region-count, or separate severe-joint stop rules.
+The first event is recorded as `thrashing_energy`, with the score, limit,
+duration, and the three largest joint contributors. This is a normalized
+motion-energy proxy, not physical energy in joules or a probability of danger.
+
+| Joint group | Relative weight per joint |
+| --- | ---: |
+| Hips, knees, waist | 4 |
+| Shoulders | 3 |
+| Ankles | 2 |
+| Elbows | 1 |
+| Wrists | 0.25 |
+
+Weights express motion risk, not measured inertias. They are symmetric between
+left and right. One very energetic joint can still dominate the weighted sum.
+Other joint counts default to equal weights. Root/base motion is not included
+in this joint score and retains its separate physical checks.
+
+All `ThrashConfig` fields are startup ROS parameters prefixed with `thrash.`.
+`thrash.joint_weights` and `thrash.velocity_scales` accept positive arrays in SDK
+joint order. Scales default to 1 rad/s. The fast/slow filters remain 25/4 Hz with
+150 ms squared-motion averaging. Duplicate timestamps are ignored, and gaps or
+new sessions reset filter history and persistence. Freshness checks remain
+independent. The old activity/severe/CV/region/cycle parameters were removed.
+
+The provisional limit was checked against recorded upright and tilted walking
+and supine motion. It is not validated for running, table tennis, or hardware.
+Keep monitoring as the default while calibrating for the intended tasks.
 
 For an isolated dry-run graph, select enforcement on the existing checker with:
 
@@ -159,14 +172,14 @@ ros2 run him_safety_nodes safety_node checker --ros-args -p thrash.mode:=enforce
 
 This command does not launch or arm a motor gate. Use monitoring and replay
 evaluation to choose task settings before hardware enforcement. Tests cover
-synthetic oscillation, irregularity, transient rejection and gateway abort
+weighted oscillation, transient rejection and gateway abort
 propagation, not physical detection rates or stopping performance.
 
 The simulator reuses this detector too. Safety-enabled ROS simulation runs this
 same checker and routes postcheck commands through `MotorCommandGate` to MuJoCo.
 The ROS-free local runner calls the same detector with physics timestamps and
-uses its existing latch/output path. Select `--thrash-mode monitor|enforce|off`
-with `./sim.sh`. See [simulation wiring and calibration notes](../containers/SIM_RUN.md#shared-thrash-detection).
+uses its existing latch/output path. Use `./sim.sh --example walker/thrash --local --view` for a belly-up
+thrash-only stop test, or `walker/thrash-monitor` to observe without thrash stops. See [simulation wiring and calibration notes](../containers/SIM_RUN.md#shared-thrash-detection).
 
 ## Topics and services
 

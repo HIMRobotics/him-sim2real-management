@@ -165,3 +165,32 @@ also remains unverified on this host, which lacks the Compose plugin. The comman
 in [README.md](README.md#full-dockerros-execution) reproduce the integration checks.
 No hardware deployment was tested. Local rollout success does not establish
 matching Docker wall-clock timing or hardware performance.
+
+## Weighted thrash detector calibration
+
+The shared detector now uses whole-body weighted oscillatory RMS, with a
+provisional limit of 1.5 continuously exceeded for 500 ms. CV, cycle counts,
+body-region counts and separate severe-joint rules no longer trigger stops.
+Monitoring remains the default. Old replay labels preserve historical results.
+
+Recorded upright circle walking (30 s), straight walking (20 s), and a 10°
+pitch/10° yaw start (20 s) produced no detections. Replaying measured velocities
+at 2 ms and 20 ms intervals also produced no detections. Supine circle and
+straight-walker recordings triggered at approximately 0.73–0.74 s at both rates.
+These are simulation observations, not hardware validation.
+
+A separate forward-pitch sweep used the existing straight walker, fixed 10° yaw,
+20 s per case, monitoring only, and other safety stops disabled. The root rotated
+about a fixed toe anchor without changing joint angles. All four toe collision
+points started in contact, with 0.01 mm numerical overlap and zero velocity.
+
+| Initial pitch | First detection | Outcome |
+| --- | --- | --- |
+| 20° | None | Recovered upright |
+| 25° | None | Recovered upright |
+| 30° | 0.970 s | Fell |
+| 35° | 0.922 s | Fell |
+| 40° | 0.770 s | Fell |
+
+This is one deterministic trajectory per angle, not a universal safe tilt limit.
+The custom scenes and recordings were temporary experiments, not new examples.

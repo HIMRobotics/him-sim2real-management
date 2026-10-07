@@ -133,8 +133,9 @@ class RunnerTest(unittest.TestCase):
 
                 def oscillate(runner=runner, initial_q=initial_q):
                     phase = 2 * math.pi * 8 * (runner.sim_time + 0.002)
-                    runner.plant.data.qpos[runner.plant.qadr[15]] = initial_q[15] + 0.12 * math.sin(phase)
-                    runner.plant.data.qvel[runner.plant.vadr[15]] = 0.12 * 2 * math.pi * 8 * math.cos(phase)
+                    joints = [0, 1, 2, 3, 6, 7, 8, 9]
+                    runner.plant.data.qpos[runner.plant.qadr[joints]] = initial_q[joints] + 0.12 * math.sin(phase)
+                    runner.plant.data.qvel[runner.plant.vadr[joints]] = 0.12 * 2 * math.pi * 8 * math.cos(phase)
                     return runner.plant.dq()
 
                 with patch.object(runner.plant, "step_physics", side_effect=oscillate):
@@ -147,7 +148,7 @@ class RunnerTest(unittest.TestCase):
                             break
                 report = runner.report()
                 if mode == "enforce":
-                    self.assertEqual(runner.reason, "thrashing_severe")
+                    self.assertEqual(runner.reason, "thrashing_energy")
                     self.assertIsNone(runner.active)
                     self.assertEqual(runner.command(hold(runner, state, step + 1), now), runner.reason)
                     self.assertEqual(report["thrash"]["event"]["reason"], runner.reason)
@@ -162,11 +163,11 @@ class RunnerTest(unittest.TestCase):
         runner = Runner(thrash_config=ThrashConfig(mode="off"))
         state = runner.feedback(0.0)
         runner.command(hold(runner, state, 0), 0.0)
-        runner.handle({"op": "abort", "reason": "thrashing_local"})
+        runner.handle({"op": "abort", "reason": "thrashing_energy"})
         runner.handle({"op": "abort", "reason": "later_fault"})
-        self.assertEqual(runner.reason, "thrashing_local")
+        self.assertEqual(runner.reason, "thrashing_energy")
         self.assertIsNone(runner.active)
-        event = {"reason": "thrashing_local", "joint_indices": [15, 16]}
+        event = {"reason": "thrashing_energy", "joint_indices": [15, 16]}
         report = runner.handle({"op": "report", "thrash": {"mode": "enforce", "event": event}})
         self.assertEqual(report["thrash"]["event"], event)
         self.assertTrue(report["checks"]["thrash_enforcement"])
@@ -309,6 +310,7 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(end["height"], 0.5)
         self.assertGreater(end["upright"], 0.8)
         self.assertGreater(moved, 0.3)
+        self.assertIsNone(runner.thrash_detector.event)
 
     def test_circle_reports_partial_checks_in_report_and_standalone_replay(self):
         import json

@@ -134,20 +134,20 @@ class SafetyGraphTests(unittest.TestCase):
             feedback = RobotFeedback()
             feedback.host_boot_id = self.checker.host_boot_id
             feedback.received_at_secs = now
-            feedback.q = [0.12 * math.sin(phase)] + [0.0] * 28
-            feedback.dq = [0.12 * 2 * math.pi * 8 * math.cos(phase)] + [0.0] * 28
+            feedback.q = [0.4 * math.sin(phase)] + [0.0] * 28
+            feedback.dq = [0.4 * 2 * math.pi * 8 * math.cos(phase)] + [0.0] * 28
             with patch("robot_safety.ros_nodes.time", SimpleNamespace(monotonic=lambda now=now: now)):
                 self.checker.on_feedback(feedback)
             if self.checker.abort_reason:
                 break
-        self.assertEqual(self.checker.abort_reason, "thrashing_severe")
+        self.assertEqual(self.checker.abort_reason, "thrashing_energy")
         command.sequence = 2
         command.observation_id = self.checker.supervisor.latest_observation_id
         with patch.object(self.checker.postcheck_publisher, "publish") as publish:
             self.checker.on_precheck(command)
             publish.assert_not_called()
         self.wait_for(lambda: self.motor.motor_gate.abort_reason is not None)
-        self.assertEqual(self.motor.motor_gate.abort_reason, "thrashing_severe")
+        self.assertEqual(self.motor.motor_gate.abort_reason, "thrashing_energy")
         self.assertEqual(self.motor.motor_gate.cycle(time.monotonic())["kind"], "damping")
         self.assertEqual(self.motor.motor_gate.last_command_sequence, 1)
 
@@ -202,8 +202,8 @@ class SimGatewayGraphTests(unittest.TestCase):
         phase = 2 * math.pi * 8 * (time.monotonic() - self.started)
         return {"ok": True, "reason": self.plant_reason, "session_id": "plant-session",
                 "observation_id": self.observation_id,
-                "q": [0.12 * math.sin(phase)] + [0.0] * 28,
-                "dq": [0.12 * 2 * math.pi * 8 * math.cos(phase)] + [0.0] * 28}
+                "q": [0.4 * math.sin(phase)] + [0.0] * 28,
+                "dq": [0.4 * 2 * math.pi * 8 * math.cos(phase)] + [0.0] * 28}
 
     def on_state(self, message):
         state = json.loads(message.data)
@@ -220,7 +220,7 @@ class SimGatewayGraphTests(unittest.TestCase):
     def test_simulated_feedback_stops_shared_checker_and_plant(self):
         self.start("enforce")
         self.wait_for(lambda: self.plant_reason is not None, timeout=5)
-        self.assertEqual(self.plant_reason, "thrashing_severe")
+        self.assertEqual(self.plant_reason, "thrashing_energy")
         self.assertEqual(self.checker.supervisor.stop_reason, self.plant_reason)
         self.assertEqual(self.bridge.motor_gate.abort_reason, self.plant_reason)
         self.assertGreater(self.command_count, 0)
@@ -246,7 +246,7 @@ class SimGatewayGraphTests(unittest.TestCase):
         self.bridge.finish()
         report = json.loads(self.bridge.report_path.read_text())
         self.assertEqual(report["thrash"]["mode"], "monitor")
-        self.assertEqual(report["thrash"]["event"]["reason"], "thrashing_severe")
+        self.assertEqual(report["thrash"]["event"]["reason"], "thrashing_energy")
 
     def test_sim_gate_stops_when_checker_stops_relaying(self):
         self.start("monitor")

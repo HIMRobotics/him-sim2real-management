@@ -70,7 +70,7 @@ run_session() {
     "G1_SIM_POSE=$pose"
     "G1_SIM_SCENE=$scene"
     "G1_SIM_SAFETY_CHECKS=$safety_checks"
-    "G1_SIM_THRASH_MODE=$thrash_mode"
+    "G1_SIM_THRASH_MODE=${G1_SIM_THRASH_MODE:-}"
     "G1_SIM_EXAMPLE=$example"
     "G1_SIM_SECONDS=$seconds"
     "G1_SIM_REPORT=$out_dir/report.json"

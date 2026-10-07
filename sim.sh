@@ -23,7 +23,7 @@ Usage: ./sim.sh [--image NAME] [--scene PATH] [--seconds N]
                 [--pose NAME | --counterfactuals] [--self-test] [--circle]
                 [--command FILE] [--view]
                 [--battery] [--push none|small|medium|heavy]
-                [--example stairs|walker|balance] [--local] [--output DIR]
+                [--example NAME] [--local] [--output DIR]
        ./sim.sh replay [TRACE]
        ./sim.sh stop
 
@@ -34,10 +34,11 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --scene PATH        Load a host-side MuJoCo XML scene and its relative assets.
                     Default: the bundled G1 on a flat floor.
 --safety-checks     Enable safety checks (default).
---thrash-mode MODE  Thrash detector: monitor, enforce, or off. Independent of safety checks.
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
---example NAME     Run a bundled ONNX controller in its matching environment.
+--example NAME     Bundled stairs, walker, or balance controller.
+                   walker/thrash: belly-up walker, only thrash stops enabled.
+                   walker/thrash-monitor: same experiment, readings without thrash stops.
 --local            Run an example directly in MuJoCo without Docker/ROS/sudo.
 --output DIR       Store this run separately for comparison and replay.
 --circle           Walk with the cached G1 walker. Command file defaults to
@@ -178,7 +179,7 @@ pose_set=0
 image="${G1_IMAGE:-}"
 scene=""
 safety_checks=1
-thrash_mode="${G1_SIM_THRASH_MODE:-}"
+safety_set=0
 example=""
 local_mode=0
 stopping=0
@@ -203,29 +204,25 @@ while [[ $# -gt 0 ]]; do
     --seconds) seconds="${2:?--seconds needs a duration}"; seconds_set=1; shift 2 ;;
     --image) image="${2:?--image needs a name}"; shift 2 ;;
     --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
-    --safety-checks) safety_checks=1; shift ;;
-    --no-safety-checks) safety_checks=0; shift ;;
-    --thrash-mode) thrash_mode="${2:?--thrash-mode needs monitor, enforce, or off}"; shift 2 ;;
-    --example) example="${2:?--example needs stairs, walker, or balance}"; shift 2 ;;
+    --safety-checks) safety_checks=1; safety_set=1; shift ;;
+    --no-safety-checks) safety_checks=0; safety_set=1; shift ;;
+    --example) example="${2:?--example needs a name}"; shift 2 ;;
     --local) local_mode=1; shift ;;
     --output) out_dir="${2:?--output needs a directory}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ -z "$thrash_mode" ]]; then
-  thrash_mode=off
-  [[ "$safety_checks" -eq 0 ]] || thrash_mode=monitor
+if [[ -n "$example" ]]; then
+  settings="$("$python" "$repo_dir/containers/examples/prepare.py" "$example" --settings)"
+  read -r example default_pose default_safety detector_mode <<<"$settings"
+  [[ "$pose_set" -eq 1 ]] || pose="$default_pose"
+  [[ "$safety_set" -eq 1 ]] || safety_checks="$default_safety"
+  if [[ "$detector_mode" != default ]]; then
+    export G1_SIM_THRASH_MODE="$detector_mode"
+  fi
 fi
-case "$thrash_mode" in
-  monitor|enforce|off) export G1_SIM_THRASH_MODE="$thrash_mode" ;;
-  *) echo "--thrash-mode must be monitor, enforce, or off" >&2; exit 2 ;;
-esac
 
-if [[ -n "$example" && "$example" != stairs && "$example" != walker && "$example" != balance ]]; then
-  echo "--example must be stairs, walker, or balance" >&2
-  exit 2
-fi
 if [[ -n "$example" && ( -n "$image" || "$self_test" -eq 1 || "$circle" -eq 1 ) ]]; then
   echo "Use --example by itself, without --image, --self-test, or --circle." >&2
   exit 2

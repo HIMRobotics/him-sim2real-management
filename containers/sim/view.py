@@ -30,6 +30,11 @@ PAGE = """<!DOCTYPE html>
     background: #1a1a1a; color: #fff; cursor: pointer;
   }
   #start:disabled { background: #888; cursor: default; }
+  #playback { position: absolute; bottom: 18px; right: 12px; z-index: 2;
+    display: flex; gap: 8px; }
+  #playback button { padding: 9px 12px; border: 1px solid #ccd1d5; border-radius: 6px;
+    background: #fff; color: #263238; font: 14px system-ui, sans-serif; cursor: pointer; }
+  #playback button:disabled { opacity: 0.5; cursor: default; }
   #thrash { position: absolute; right: 12px; top: 12px; width: min(450px, 46vw);
     background: #fffffff0; border: 1px solid #d7dce0; border-radius: 10px;
     padding: 14px; font: 13px system-ui, sans-serif; color: #263238; }
@@ -51,18 +56,23 @@ PAGE = """<!DOCTYPE html>
 <body>
 <div id="hud">loading</div>
 <div id="stop" role="status" hidden></div>
+<div id="playback" aria-label="Replay controls">
+  <button id="go-start" type="button" title="Jump to the first frame and pause (Home)" aria-keyshortcuts="Home">Go to start · Home</button>
+  <button id="restart-replay" type="button" title="Replay from the beginning (R)" aria-keyshortcuts="R">Restart replay · R</button>
+</div>
 <aside id="thrash">
   <h2>Thrash readings</h2>
   <div id="thrash-status">Waiting for telemetry</div>
   <div id="thrash-peak"></div>
   <div class="joint-readings"><table>
-    <thead><tr><th>Joint</th><th>Osc. RMS</th><th>Motion RMS</th><th>CV</th><th>Evidence ms<br>normal / severe</th></tr></thead>
+    <thead><tr><th>Joint</th><th>Osc. RMS</th><th>Motion RMS</th><th>Weight</th><th>Energy share</th></tr></thead>
     <tbody id="thrash-joints"></tbody>
   </table></div>
   <small id="thrash-thresholds"></small>
   <small id="thrash-event"></small>
-  <small>RMS is normalized by each joint's velocity scale. CV measures cycle irregularity.
-  These are motion indicators, not a probability of thrashing. Space pauses, arrows step frames.</small>
+  <small>Whole-body score is the weighted RMS of joint oscillations. Weights express relative motion risk,
+  not measured inertia. Energy share shows each joint's contribution. Space pauses, arrows step frames.
+  Home goes to the first frame. R restarts playback without rerunning the simulation.</small>
 </aside>
 <script type="importmap">
 { "imports": { "three": "./three.module.js" } }
@@ -110,21 +120,25 @@ function showThrash(index) {
     if (!sample) event.textContent = "";
     return;
   }
-  const order = metrics.oscillatory_rms.map((_, i) => i)
-    .sort((a, b) => metrics.oscillatory_rms[b] - metrics.oscillatory_rms[a]);
-  const top = order[0];
-  peak.textContent = `Peak oscillation: ${metrics.oscillatory_rms[top].toFixed(3)} · ${motion.joint_names[top].replaceAll("_", " ")}`;
+  const contribution = metrics.energy_share || metrics.oscillatory_rms;
+  const order = contribution.map((_, i) => i).sort((a, b) => contribution[b] - contribution[a]);
+  const top = metrics.oscillatory_rms.indexOf(Math.max(...metrics.oscillatory_rms));
+  peak.textContent = metrics.weighted_rms == null
+    ? `Legacy recording · peak oscillation ${metrics.oscillatory_rms[top].toFixed(3)}`
+    : `Whole-body oscillation: ${metrics.weighted_rms.toFixed(3)} / ${metrics.weighted_rms_limit.toFixed(2)} · ${(1000 * metrics.persistence_elapsed_secs).toFixed(0)} ms`;
   order.forEach((joint, slot) => {
     const row = thrashRows[slot];
     const values = [motion.joint_names[joint].replaceAll("_", " "),
       metrics.oscillatory_rms[joint].toFixed(3), metrics.activity_rms[joint].toFixed(3),
-      metrics.irregularity_cv[joint].toFixed(3),
-      `${(1000 * metrics.evidence_secs[joint]).toFixed(0)} / ${(1000 * metrics.severe_evidence_secs[joint]).toFixed(0)}`];
+      metrics.joint_weights?.[joint]?.toFixed(2) ?? "—",
+      metrics.energy_share ? `${(100 * metrics.energy_share[joint]).toFixed(1)}%` : "—"];
     values.forEach((value, column) => { row.cells[column].textContent = value; });
     row.classList.toggle("flagged", metrics.joint_indices.includes(joint));
   });
   const t = sample.thresholds;
-  if (t) thresholds.textContent = `RMS elevated ≥ ${t.activity_rms.toFixed(2)} · severe ≥ ${t.severe_rms.toFixed(2)} · CV ≥ ${t.irregularity_cv.toFixed(2)} · evidence ${1000 * t.persistence_secs} ms. Cycle and joint-group checks also apply.`;
+  if (t) thresholds.textContent = t.weighted_rms_limit == null
+    ? "Legacy detector thresholds. Replay preserves its original detections."
+    : `Stop threshold: whole-body RMS ≥ ${t.weighted_rms_limit.toFixed(2)} for ${1000 * t.persistence_secs} ms continuously. Timer resets below threshold. No CV or separate joint stop rules.`;
   if (sample.control_path === "direct") thresholds.textContent += " Direct circle: submission-command checks bypassed.";
 }
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -183,10 +197,13 @@ for (const geom of motion.geoms) {
   parts.push(mesh);
 }
 
+const goStartButton = document.getElementById("go-start");
+const restartButton = document.getElementById("restart-replay");
 let frame = 0;
 let mode = motion.live ? "idle" : "replay";
 let paused = false;
 function show(index) {
+  goStartButton.disabled = restartButton.disabled = mode === "idle" || motion.frames < 2;
   if (!motion.frames) return;
   frame = (index + motion.frames) % motion.frames;
   const focus = motion.focus[frame];
@@ -201,7 +218,7 @@ function show(index) {
     );
   });
   trailGeom.setDrawRange(0, frame + 1);
-  const playback = mode === "idle" ? "ready" : mode === "live" ? "live" : (paused ? "paused" : "playing");
+  const playback = mode === "idle" ? "ready" : paused ? "paused" : mode === "live" ? "live" : "playing";
   hud.textContent = `${motion.summary}\n${playback}  ${motion.time[frame].toFixed(2)} s  frame ${frame + 1} / ${motion.frames}`;
   hud.style.whiteSpace = "pre-line";
   showThrash(frame);
@@ -307,10 +324,23 @@ if (motion.live) {
     poll();
   });
 }
+function goToStart(play = false) {
+  if (mode === "idle" || motion.frames < 2) return;
+  paused = !play;
+  last = performance.now();
+  show(0);
+}
+goStartButton.addEventListener("click", () => goToStart());
+restartButton.addEventListener("click", () => goToStart(true));
 window.addEventListener("keydown", (event) => {
-  if (event.code === "Space") { paused = !paused; event.preventDefault(); }
-  else if (event.code === "ArrowLeft") { paused = true; show(frame - 1); }
-  else if (event.code === "ArrowRight") { paused = true; show(frame + 1); }
+  if (event.ctrlKey || event.metaKey || event.altKey || event.target?.isContentEditable
+      || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName || "")) return;
+  if (event.code === "Home" || event.code === "KeyR") {
+    event.preventDefault();
+    if (!event.repeat) goToStart(event.code === "KeyR");
+  } else if (event.code === "Space") { paused = !paused; event.preventDefault(); }
+  else if (event.code === "ArrowLeft") { paused = true; show(frame - 1); event.preventDefault(); }
+  else if (event.code === "ArrowRight") { paused = true; show(frame + 1); event.preventDefault(); }
 });
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -504,6 +534,8 @@ def describe_stop(stop):
         "fall": "Standing fall check triggered",
         "nonfinite_simulation": "Simulation produced non-finite state",
         "invalid_command": "Malformed command or command sanity bound exceeded",
+        "thrashing_energy": "Sustained whole-body oscillation detected",
+        # Historical recordings retain their original reason labels.
         "thrashing_local": "Thrashing detected within one body region",
         "thrashing_distributed": "Thrashing detected across body regions",
         "thrashing_severe": "Severe joint thrashing detected",
@@ -536,9 +568,14 @@ def describe_stop(stop):
             if key in detail:
                 lines.append(f"{key.replace('_', ' ').capitalize()}: {detail[key]}")
         if reason.startswith("thrashing_"):
+            if "weighted_rms" in detail:
+                lines.append(f"Whole-body RMS: {detail['weighted_rms']:.3f} / "
+                             f"{detail['weighted_rms_limit']:.3f}, sustained "
+                             f"{1000 * detail['persistence_elapsed_secs']:.0f} ms")
             for index in indices:
                 values = []
                 for key, label in (("oscillatory_rms", "osc RMS"), ("activity_rms", "motion RMS"),
+                                   ("joint_weights", "weight"), ("energy_share", "energy fraction"),
                                    ("irregularity_cv", "CV"), ("evidence_secs", "normal evidence s"),
                                    ("severe_evidence_secs", "severe evidence s")):
                     samples = detail.get(key, [])
