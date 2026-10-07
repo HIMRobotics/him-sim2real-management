@@ -86,6 +86,69 @@ class FakeTransport:
 
 
 class HardwareAdapterTests(unittest.TestCase):
+    def test_whole_body_checks_then_releases_writes_and_latches(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+        self.assertTrue(self.adapter.arm())
+        self.command["q"] = [0.1] * 29
+        self.command["tau"] = [0.01] * 29
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(self.transport.release_calls, 1)
+        self.transport.write_body.assert_not_called()
+        self.adapter.step()
+        targets, machine = self.transport.write_body.call_args[0]
+        self.assertEqual((len(targets), machine), (29, 5))
+        self.assertEqual(targets[0]["kp"], 2.)
+        self.assertEqual(targets[0]["tau"], 0.01)
+        self.assertEqual(len(self.adapter.q_applied), 29)
+        self.adapter.abort("fault")
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.restore_calls, 1)
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.adapter._release_after_confirmed_damp()
+        self.assertEqual(self.adapter.abort_reason, "fault")
+        self.assertFalse(self.adapter.arm())
+        count = self.transport.write_body.call_count
+        self.adapter.step()
+        self.assertEqual(self.transport.write_body.call_count, count)
+
+    def test_bad_whole_body_command_never_releases_stock_control(self):
+        self.adapter.whole_body = True
+        self.assertTrue(self.adapter.arm())
+        self.command["q"][0] = float("nan")
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(self.transport.release_calls, 0)
+        self.assertIsNotNone(self.adapter.abort_reason)
+
+    def test_blocked_write_does_not_block_feedback_or_abort(self):
+        from threading import Event, Thread
+
+        self.adapter.whole_body = True
+        entered, release = Event(), Event()
+
+        def write(*args):
+            entered.set()
+            release.wait(2)
+            return True
+
+        self.transport.write_body = write
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        worker = Thread(target=self.adapter.step)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(self.adapter.lock.acquire(timeout=0.1))
+            self.adapter.lock.release()
+            self.adapter.abort("controller_stop")
+            self.assertTrue(self.adapter.stop_requested.is_set())
+        finally:
+            release.set()
+            worker.join(1)
+
     def test_startup_and_runtime_pose_gaps_do_not_reject_any_joint(self):
         legacy = profile_data()
         legacy["initial_position_tolerance_rad"] = 0.0001

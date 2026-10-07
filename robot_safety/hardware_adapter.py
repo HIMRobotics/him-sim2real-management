@@ -42,8 +42,11 @@ from .joint_diagnostics import JointDeltaDiagnostics
 class G1ArmAdapter:
     """Connect approved safety-checker commands to robot motors and request damping."""
 
-    def __init__(self, profile, clock=time.monotonic):
+    def __init__(self, profile, clock=time.monotonic, *, whole_body=False):
         self.profile = profile
+        self.whole_body = whole_body
+        self.release_pending = False
+        self.output_lock = Lock()
         self.clock = clock
         self.transport = None
         self.lock = RLock()
@@ -112,7 +115,7 @@ class G1ArmAdapter:
                     if stop:
                         self.hold_failed = True
                         self.walk_stop = False
-                        self.release_damp_when_confirmed = True
+                        self.release_damp_when_confirmed = not self.whole_body
                     elif soft and not self.hold_failed:
                         self.walk_stop = True
                 if stop:
@@ -280,7 +283,7 @@ class G1ArmAdapter:
             if self.abort_reason is None:
                 self.abort_reason = reason
             self.command = None
-            if request_damping:
+            if request_damping or (self.whole_body and self.armed):
                 self.hold_failed = True
                 self.walk_stop = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
@@ -310,6 +313,14 @@ class G1ArmAdapter:
 
     def step(self):
         """Validate the proposal and freshness before one arm SDK write."""
+        if not self.output_lock.acquire(blocking=False):
+            return
+        try:
+            self._step()
+        finally:
+            self.output_lock.release()
+
+    def _step(self):
         with self.lock:
             if not self.armed or self.abort_reason or self.stop_requested.is_set():
                 return
@@ -356,10 +367,38 @@ class G1ArmAdapter:
                     else now - self.first_output_secs
                 )
                 weight_progress = min(elapsed / self.profile.handover_secs, 1.0)
-                weight = weight_progress**2 * (3 - 2 * weight_progress)
+                weight = 1.0 if self.whole_body else weight_progress**2 * (3 - 2 * weight_progress)
                 if self.stop_requested.is_set():
                     return
-                if not self.transport.write_arm(targets, weight):
+            except Exception as error:  # noqa: BLE001
+                self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
+                return
+        if self.whole_body and self.armed and self.command is not None and not self.balance_released:
+            if self.abort_reason or self.stop_requested.is_set():
+                return
+            self.release_pending = True
+            try:
+                self.walk_rpc_code = self.transport.release_motion()
+                # A failed or timed-out release can still have changed ownership.
+                self.balance_released = True
+                if self.walk_rpc_code != 0:
+                    self.abort("hardware_release_failed")
+                    return
+            except Exception:  # noqa: BLE001 - An uncertain release requires restoration.
+                self.balance_released = True
+                self.abort("hardware_release_failed")
+                return
+            finally:
+                self.release_pending = False
+            return
+        # SDK writes must not hold the feedback lock or delay controller monitoring.
+        try:
+            if self.stop_requested.is_set():
+                return
+            written = (self.transport.write_body(targets, self.machine_type)
+                       if self.whole_body else self.transport.write_arm(targets, weight))
+            with self.lock:
+                if not written:
                     self.abort("hardware_write_failed")
                     return
                 self.last_written_ownership_weight = weight
@@ -376,8 +415,8 @@ class G1ArmAdapter:
                 if self.first_output_secs is None:
                     self.first_output_secs = now
                 self.last_output_secs = now
-            except Exception as error:  # noqa: BLE001
-                self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
+        except Exception as error:  # noqa: BLE001
+            self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
 
     def joint_diagnostics_snapshot(self):
         """Skip a busy output lock so diagnostics cannot stall ROS stop handling."""
@@ -404,7 +443,9 @@ class G1ArmAdapter:
                 check_measured_velocity(G1_29_JOINT_NAMES[index], limits, self.feedback.dq[index])
             check_base_motion(self.gyro, self.quat)
             if self.q_applied is not None:
-                for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
+                for index, limits in self._monitored_joints():
+                    if index not in self.q_applied:
+                        continue
                     tau_demand = torque_demand(
                         self.q_applied[index], self.dq_applied[index], limits.kp,
                         limits.kd, self.tau_applied[index], self.feedback.q[index],
@@ -430,11 +471,13 @@ class G1ArmAdapter:
             initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
             warnings=self.position_warnings,
         )
-        return {index: targets[index] for index in UPPER_BODY_INDICES}
+        return targets if self.whole_body else {index: targets[index] for index in UPPER_BODY_INDICES}
 
     def stop_once(self):
         """Damp on double Start, balance on double F3, otherwise hold the arms."""
         # SDK calls stay off the arm-write lock so a stuck motion write cannot delay the stop.
+        if self.release_pending:
+            return
         with self.stop_lock:
             if not self.stop_requested.is_set():
                 return
@@ -541,6 +584,8 @@ class G1ArmAdapter:
 
     def _request_stock_damping(self):
         """Enter stock whole-body damping when the pose hold can no longer be published."""
+        if self.release_pending:
+            return
         if self.balance_released:
             try:
                 restored = self.transport.restore_motion()
@@ -575,6 +620,8 @@ class G1ArmAdapter:
 
     def _release_after_confirmed_damp(self):
         """Stop resending damp so a later stand from the remote is left alone."""
+        if self.whole_body:
+            return
         with self.stop_lock:
             self.arm_hold_q = None
             self.hold_failed = False
@@ -590,7 +637,8 @@ class G1ArmAdapter:
 
     def start_workers(self):
         """Run output deadlines and stop RPC retries independently of ROS callbacks."""
-        self._ensure_balance_policy()
+        if not self.whole_body:
+            self._ensure_balance_policy()
 
         def output_loop():
             while not self.shutdown_requested.wait(HARDWARE_PERIOD_SECS):

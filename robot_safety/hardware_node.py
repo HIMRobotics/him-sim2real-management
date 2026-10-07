@@ -29,6 +29,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.adapter = None
         super().__init__()
         enabled = self.declare_parameter("enable_hardware_output", False).value
+        whole_body = self.declare_parameter("whole_body_output", False).value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
@@ -51,7 +52,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.create_timer(JOINT_DIAGNOSTICS_PERIOD_SECS, self.publish_joint_diagnostics)
         self.last_status = None
         self.startup_ready = False
-        self.adapter = G1ArmAdapter(profile)
+        self.adapter = G1ArmAdapter(profile, whole_body=whole_body)
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state, self.adapter.receive_battery
         )
@@ -64,7 +65,7 @@ class HardwareMotorGateNode(MotorGateNode):
         """Report startup readiness only after warmup and fresh released buttons."""
         adapter = self.adapter
         if (
-            self.startup_ready or adapter.balance_policy is None
+            self.startup_ready or (not getattr(adapter, "whole_body", False) and adapter.balance_policy is None)
             or not adapter.feedback_fresh(time.monotonic())
             or adapter.feedback.start_button_pressed or adapter.f3_pressed
             or adapter.abort_reason or self.motor_gate.abort_reason
@@ -202,6 +203,8 @@ class HardwareMotorGateNode(MotorGateNode):
         status = json.dumps(
             {
                 "hardware_output_enabled": True,
+                "whole_body_output": self.adapter.whole_body,
+                "motion_released": self.adapter.balance_released,
                 "armed": self.adapter.armed,
                 "handover_complete": self.adapter.last_written_ownership_weight == 1.0,
                 "arm_rejection_reason": self.adapter.arm_rejection_reason,
