@@ -120,7 +120,7 @@ class UnitreeArmTransport:
         with self.write_lock:
             return self.publisher.Write(message)
 
-    def release_motion(self):
+    def release_motion(self, *, announce_soft_reset=False):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
         if not self.output_enabled:
             return 0
@@ -131,11 +131,11 @@ class UnitreeArmTransport:
         self._set_motion_silent(True)
         release_code, _ = switcher.ReleaseMode()
         self.motion_restored = False
-        if release_code == 0:
+        if release_code == 0 and announce_soft_reset:
             # Speech must not block the first balance command.
             self._speech_thread = Thread(target=self._say_soft_reset, daemon=True)
             self._speech_thread.start()
-        else:
+        elif release_code != 0:
             self._set_motion_silent(False)
         return release_code
 

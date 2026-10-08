@@ -146,3 +146,54 @@ def test_motion_after_limited_write_can_still_trigger_hard_fault(rig):
     rig.adapter._abort_if_motion_exceeds_limits()
     assert 'joint_torque_limit' in rig.adapter.abort_reason
     assert rig.adapter.hold_failed
+
+
+def test_whole_body_soft_reset_continues_balance_without_damping(rig):
+    start(rig)
+    rig.press_f3_twice()
+    assert rig.adapter.abort_reason == 'hardware_controller_double_f3'
+    assert rig.adapter.walk_stop
+    assert not rig.adapter.hold_failed
+    assert rig.adapter.q_applied is None
+    for _ in range(20):
+        rig.now += 0.02
+        rig.state()
+        rig.adapter.abort('hardware_controller_double_f3')
+        rig.adapter.abort('policy_container_exit')
+        rig.adapter.stop_once()
+        assert rig.adapter.last_worker_cycle_secs == rig.now
+    assert len(rig.transport.lowcmds) == 20
+    assert rig.transport.stop_calls == 0
+    assert rig.adapter.walk_stop
+    assert not rig.adapter.hold_failed
+    rig.adapter.abort('hardware_controller_double_start', request_damping=True)
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+
+
+def test_real_fault_still_overrides_soft_reset(rig):
+    start(rig)
+    rig.press_f3_twice()
+    rig.adapter.stop_once()
+    rig.adapter.abort('hardware_output_worker_stalled')
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+    assert not rig.adapter.walk_stop
+
+
+def test_startup_release_does_not_announce_or_request_soft_reset():
+    from robot_safety.unitree_transport import UnitreeArmTransport
+
+    transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+    transport.output_enabled = True
+    transport.switcher = Mock()
+    transport.switcher.CheckMode.return_value = (0, {'name': 'ai'})
+    transport.switcher.ReleaseMode.return_value = (0, None)
+    transport._set_motion_silent = Mock()
+    transport._say_soft_reset = Mock()
+    transport.locomotion = Mock()
+    with patch('robot_safety.unitree_transport.Thread') as thread:
+        assert transport.release_motion() == 0
+    thread.assert_not_called()
+    transport._say_soft_reset.assert_not_called()
+    transport.locomotion.SetFsmId.assert_not_called()

@@ -42,6 +42,21 @@ before handoff. Command schedules and trial clocks start at handoff. Uploaded
 clients must honor `control_ready` for their own clocks and maintain observation
 history while waiting. The host inhibits their output regardless of compliance.
 
+### Separate startup and soft reset
+
+Startup Balance begins automatically after arming. It does not synthesize a
+controller button or announce "Soft Reset". D-pad left + B authorizes policy
+handoff after stability. Double F3 separately cancels the submitted policy and
+runs the existing recovery Balance path. Recovery continues until a hard stop,
+a real fault, or service shutdown, with no scheduled transition to damping.
+Double Start retains priority and requests damping.
+
+The recovery writer updates its output heartbeat so the stopped submission's
+old timestamp cannot trigger a false stall. Repeated F3 abort notifications and
+the policy client's normal exit cannot convert recovery into damping. Real
+faults still override recovery. The recovery helper retains its existing
+independence from submission command limits.
+
 ### Torque-limited targets
 
 Whole-body output projects excessive position targets into a feasible PD torque

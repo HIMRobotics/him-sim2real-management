@@ -335,11 +335,22 @@ class G1ArmAdapter:
         """Permanently prohibit arm writes and wake the independent damping RPC worker."""
         # Keep stop requests independent of a blocked SDK write.
         with self.stop_lock:
+            soft_reason = "hardware_controller_double_f3"
+            soft_balance = self.walk_stop and not self.hold_failed and (
+                reason == soft_reason
+                or (self.abort_reason == soft_reason and reason == "policy_container_exit")
+            )
+            if soft_balance and self.abort_reason is None:
+                # The recovery writer replaces the submission and its heartbeat.
+                self.q_applied = None
+                self.arm_hold_q = None
+                self.last_worker_cycle_secs = self.clock()
             if self.abort_reason is None:
                 self.abort_reason = reason
                 self.startup.fail()
             self.command = None
-            if request_damping or (self.whole_body and self.armed and self.ownership_taken):
+            if request_damping or (self.whole_body and self.armed and self.ownership_taken
+                                   and not soft_balance):
                 self.hold_failed = True
                 self.walk_stop = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
@@ -623,7 +634,7 @@ class G1ArmAdapter:
             return
         if not self.balance_released:
             try:
-                self.walk_rpc_code = self.transport.release_motion()
+                self.walk_rpc_code = self.transport.release_motion(announce_soft_reset=True)
             except Exception:  # noqa: BLE001
                 self.walk_rpc_code = None
                 return
@@ -635,15 +646,22 @@ class G1ArmAdapter:
         feedback = self.feedback
         q = feedback.q
         if self.arm_hold_q is None:
+            reset = getattr(self.balance_policy, "reset", None)
+            if callable(reset):
+                reset()
             self.arm_hold_q = tuple(q[index] for index in ARM_INDICES)
         try:
             lower = self.balance_policy.update(q, feedback.dq, self.quat, self.gyro)
             now = self.clock()
             if not 0 <= now - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS:
                 raise ValueError("stale balance feedback")
+            if self.hold_failed:
+                self._request_stock_damping()
+                return
             # Soft-reset balancing does not use submission movement limits.
             if not self.transport.write_lower_body(lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0):
                 raise RuntimeError("balance write failed")
+            self.last_worker_cycle_secs = self.clock()
         except Exception as exc:  # noqa: BLE001 - Balance failures enter damping.
             self.abort_reason = "balance_output_error: " + str(exc)
             self.hold_failed = True

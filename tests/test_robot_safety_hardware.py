@@ -72,7 +72,7 @@ class FakeTransport:
         self.writes.append((targets, weight))
         return self.write_success
 
-    def release_motion(self):
+    def release_motion(self, *, announce_soft_reset=False):
         self.release_calls += 1
         return 0
 
@@ -1079,7 +1079,7 @@ class TransportEncodingTests(unittest.TestCase):
         transport.audio = Audio()
         transport.saved_motion_name = None
         transport.motion_restored = False
-        self.assertEqual(transport.release_motion(), 0)
+        self.assertEqual(transport.release_motion(announce_soft_reset=True), 0)
         transport._speech_thread.join(timeout=1.0)
         self.assertEqual(
             events,
