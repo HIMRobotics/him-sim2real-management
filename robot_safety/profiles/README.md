@@ -60,7 +60,11 @@ are the gains it actually sends, and forwards validated feedforward torque.
 
 Position clipping records a warning with the original and clipped angles, bounds,
 count and largest correction per joint. Clipping alone does not latch a stop.
-Torque checks use the clipped command and can still reject it. A small response error does not establish safety. Response diagnostics
+Whole-body output additionally projects position targets into a 90% torque
+budget using measured state and effective gains. The hard torque ceiling stays
+unchanged. `torque_target_clipping` reports these corrections. Infeasible targets
+and measured or last-written-command effort above the hard ceiling still fault.
+Arm-only helpers retain rejection without this projection. A small response error does not establish safety. Response diagnostics
 never latch a stop or silently increase any limit.
 
 ## Next priority: thrashing and flailing detection

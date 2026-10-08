@@ -44,8 +44,43 @@ def torque_demand(q_des, dq_des, kp, kd, tau, q, dq):
     return kp * (q_des - q) + kd * (dq_des - dq) + tau
 
 
+# Leave headroom for measurement changes between output cycles.
+TORQUE_TARGET_FRACTION = 0.9
+
+
+def limit_torque_target(joint, limits, position, velocity, tau, q, dq,
+                        fraction, warnings=None):
+    """Project a position target into the feasible PD effort interval."""
+    if not all(math.isfinite(v) for v in (position, velocity, tau, q, dq, fraction)):
+        raise ValueError("nonfinite_or_invalid_joint_command")
+    if not 0 < fraction < 1:
+        raise ValueError("torque target fraction must be between zero and one")
+    budget = fraction * limits.max_torque_nm
+    offset = limits.kd * (velocity - dq) + tau
+    lower = max(limits.position_min_rad, q + (-budget - offset) / limits.kp)
+    upper = min(limits.position_max_rad, q + (budget - offset) / limits.kp)
+    if lower > upper:
+        raise ValueError("no_feasible_torque_target:" + joint)
+    limited = max(lower, min(upper, position))
+    requested = torque_demand(position, velocity, limits.kp, limits.kd, tau, q, dq)
+    previous = (warnings or {}).get(joint, {}).get("torque_target_clipping", {})
+    if limited != position:
+        _warn(warnings, joint, {"torque_target_clipping": {
+            "active": True, "q_requested": float(position), "q_commanded": float(limited),
+            "requested_torque_nm": float(requested), "command_budget_nm": float(budget),
+            "hard_limit_nm": limits.max_torque_nm,
+            "count": previous.get("count", 0) + 1,
+            "max_correction_rad": max(previous.get("max_correction_rad", 0),
+                                      abs(limited - position)),
+        }})
+    elif previous:
+        previous["active"] = False
+    return limited
+
+
 def checked_targets(command, entries, q, dq, *, initial,
-                    initial_velocity, warnings=None, enforce_torque=True):
+                    initial_velocity, warnings=None, enforce_torque=True,
+                    torque_target_fraction=None):
     """Clip and screen targets using the profile gains that will be applied."""
     targets = {}
     for index, joint, limits in entries:
@@ -54,6 +89,10 @@ def checked_targets(command, entries, q, dq, *, initial,
             command["tau"][index], q[index], initial,
             initial_velocity, warnings, enforce_torque=enforce_torque,
         )
+        if torque_target_fraction is not None:
+            position = limit_torque_target(
+                joint, limits, position, velocity, command["tau"][index],
+                q[index], dq[index], torque_target_fraction, warnings)
         target = {"q": position, "dq": velocity, "kp": limits.kp,
                   "kd": limits.kd, "tau": command["tau"][index]}
         demand = torque_demand(

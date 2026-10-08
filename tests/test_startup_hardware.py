@@ -110,3 +110,39 @@ def test_repeated_sdk_tick_cannot_refresh_telemetry(rig):
     assert rig.adapter.feedback.received_at_secs == original
     assert rig.adapter.abort_reason
     assert rig.adapter.startup.handoff is None
+
+
+def test_balance_overshoot_is_limited_and_recorded(rig):
+    limits = list(rig.adapter.profile.legs)
+    limits[4] = replace(limits[4], max_torque_nm=35)
+    rig.adapter.profile = replace(rig.adapter.profile, legs=tuple(limits))
+    target = np.zeros(15)
+    target[4] = 0.9
+    rig.adapter.balance_policy.update.return_value = target
+    start(rig)
+    assert rig.adapter.abort_reason is None
+    written = rig.transport.write_body.call_args[0][0][4]
+    assert written['q'] * written['kp'] == pytest.approx(31.5)
+    detail = rig.adapter.joint_diagnostics_snapshot()['left_ankle_pitch']['torque_target_clipping']
+    assert detail['hard_limit_nm'] == 35
+    assert detail['requested_torque_nm'] == pytest.approx(36)
+
+
+def test_measured_torque_remains_a_hard_fault(rig):
+    start(rig)
+    torques = [0.0] * 29
+    torques[4] = rig.adapter.profile.legs[4].max_torque_nm + 0.1
+    rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=tuple(torques))
+    rig.adapter._abort_if_motion_exceeds_limits()
+    assert 'joint_torque_limit' in rig.adapter.abort_reason
+    assert rig.adapter.hold_failed
+
+
+def test_motion_after_limited_write_can_still_trigger_hard_fault(rig):
+    test_balance_overshoot_is_limited_and_recorded(rig)
+    q = list(rig.adapter.feedback.q)
+    q[4] = -0.2
+    rig.adapter.feedback = replace(rig.adapter.feedback, q=tuple(q))
+    rig.adapter._abort_if_motion_exceeds_limits()
+    assert 'joint_torque_limit' in rig.adapter.abort_reason
+    assert rig.adapter.hold_failed

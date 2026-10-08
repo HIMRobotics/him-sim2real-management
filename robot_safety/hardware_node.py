@@ -320,6 +320,11 @@ class HardwareMotorGateNode(MotorGateNode):
         self.joint_diagnostics_publisher.publish(message)
         self.get_logger().info(f"Joint diagnostics: {message.data}")
         for name, values in sampled.items():
+            clipping = values.get("torque_target_clipping", {})
+            if clipping.get("active"):
+                self.get_logger().warning(
+                    f"Torque target limited {name}: {json.dumps(clipping)}"
+                )
             if "position_clipping" in values:
                 self.get_logger().warning(
                     f"Joint position clipped {name}: {json.dumps(values['position_clipping'])}"

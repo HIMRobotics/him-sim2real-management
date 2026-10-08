@@ -42,6 +42,28 @@ before handoff. Command schedules and trial clocks start at handoff. Uploaded
 clients must honor `control_ready` for their own clocks and maintain observation
 history while waiting. The host inhibits their output regardless of compliance.
 
+### Torque-limited targets
+
+Whole-body output projects excessive position targets into a feasible PD torque
+interval using the current measured position/velocity and the gains being sent.
+The command budget is 90% of each existing torque ceiling, leaving headroom
+between output cycles. A 35 Nm ankle limit therefore uses a 31.5 Nm predicted
+command budget. The hard profile limits are unchanged.
+
+The limiter applies to startup Balance, handoff and submitted whole-body output.
+Checked simulation applies the same projection. `torque_target_clipping` in
+joint diagnostics records requested effort, the target correction and its count.
+Normal proposals inside the budget are unchanged. Measured torque and effort
+recomputed from the last written command still fault at the original ceiling.
+Nonfinite inputs, excessive feedforward torque and infeasible combinations of
+position and torque constraints still fault on hardware.
+
+This avoids rejecting a new proposal solely for a small predicted overshoot.
+It does not guarantee actual torque or stability between samples. Persistent
+large corrections require review of the stance, support and policy behavior.
+The change passed targeted math/fake-hardware checks and nominal standing and
+first-steps simulations. It has not been actuated on the physical robot.
+
 ### Operator commands
 
 Prepare and build without starting robot processes:

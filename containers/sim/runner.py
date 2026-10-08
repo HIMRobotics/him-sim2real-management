@@ -16,6 +16,8 @@ import numpy as np
 from joint_checks import (
     JointViolation,
     check_base_motion,
+    checked_targets,
+    TORQUE_TARGET_FRACTION,
 )
 from metrics import MotionMetrics
 from plant import PHYSICS_DT, POSES, Plant
@@ -155,6 +157,17 @@ class Runner:
                     self.sim_time, self.sim_time, self.plant.state(), self.submitted, automatic=True)
                 self.active["q"] = self.rules.clip_positions(
                     self.active["q"], self.position_warnings)
+                if self.safety_checks:
+                    entries = ((i, name, replace(limits, kp=float(self.active["kp"][i]),
+                                                kd=float(self.active["kd"][i])))
+                               for i, name, limits in self.rules.entries)
+                    targets = checked_targets(
+                        self.active, entries, self.plant.q(), self.plant.dq(),
+                        initial=False, initial_velocity=self.rules.profile["initial_velocity_tolerance_rad_secs"],
+                        warnings=self.position_warnings, enforce_torque=False,
+                        torque_target_fraction=TORQUE_TARGET_FRACTION)
+                    self.active = {key: np.array([targets[i][key] for i in range(29)])
+                                   for key in COMMAND_FIELDS}
                 self.plant.apply(self.active)
             except Exception as exc:  # noqa: BLE001
                 self._latch("startup_balance_error", {"detail": str(exc)})

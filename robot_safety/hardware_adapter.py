@@ -35,6 +35,7 @@ from .joint_checks import (
     MIN_BATTERY_PERCENT,
     MOTOR_CASING_LIMIT_C,
     MOTOR_WINDING_LIMIT_C,
+    TORQUE_TARGET_FRACTION,
     check_base_motion,
     check_bound,
     check_measured_velocity,
@@ -489,6 +490,8 @@ class G1ArmAdapter:
                     result[name]["position_clipping"] = warning.copy()
                 if warning.get("velocity_reason") == "joint_velocity_clipped":
                     result[name]["velocity_clipping"] = warning.copy()
+                if "torque_target_clipping" in warning:
+                    result[name]["torque_target_clipping"] = warning["torque_target_clipping"].copy()
             if self.q_applied is not None:
                 for index, limits in self._monitored_joints():
                     if index in self.q_applied:
@@ -586,6 +589,7 @@ class G1ArmAdapter:
             self.feedback.q, self.feedback.dq, initial=self.last_output_secs is None,
             initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
             warnings=self.position_warnings,
+            torque_target_fraction=TORQUE_TARGET_FRACTION if self.whole_body else None,
         )
         return targets if self.whole_body else {index: targets[index] for index in UPPER_BODY_INDICES}
 
