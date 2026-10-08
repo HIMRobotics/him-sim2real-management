@@ -115,6 +115,8 @@ class RobotFeedbackNode(SafetyNode):
                     self.latch_abort("base_feedback_timeout")
                 return
             state["control_ready"] = self.hardware_status.get("handover_complete", False)
+            state["left_b_count"] = self.hardware_status.get("left_b_count", 0)
+            state["left_b_at_secs"] = self.hardware_status.get("left_b_at_secs")
             if self.hardware_status.get("whole_body_output"):
                 state.update({key: self.hardware_status.get(key) for key in (
                     "startup_phase", "startup_stable", "handoff_ready", "policy_handoff_at_secs")})

@@ -406,10 +406,13 @@ class FeedbackBridgeTests(unittest.TestCase):
         message.received_at_secs, message.observation_id = now, 17
         bridge.base = {"position": (0., 0., 0.8), "linear_velocity": (0.1, 0., 0.),
                        "base_received_at_secs": now - 0.01, "base_source_time_secs": 123.}
-        bridge.hardware_status = {"handover_complete": True, "motion_released_at_secs": now}
+        bridge.hardware_status = {"handover_complete": True, "motion_released_at_secs": now,
+                                  "left_b_count": 1, "left_b_at_secs": now}
         bridge.on_observation(message)
         state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
         self.assertEqual(state["observation_id"], 17)
+        self.assertEqual(state["left_b_count"], 1)
+        self.assertEqual(state["left_b_at_secs"], now)
         self.assertFalse(state["control_ready"])
         bridge.base["base_received_at_secs"] = time.monotonic()
         bridge.on_observation(message)

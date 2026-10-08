@@ -67,6 +67,8 @@ class G1ArmAdapter:
         self.stance_held_announced = False
         self.launch_announced = False
         self.launch_detector = LeftAndBDetector()
+        self.left_b_count = 0
+        self.left_b_at_secs = None
         self.release_pending = False
         self.motion_released_at_secs = None
         self.clock = clock
@@ -136,6 +138,9 @@ class G1ArmAdapter:
                         sample = replace(sample, received_at_secs=self.feedback.received_at_secs)
                 if tick is not None:
                     self.feedback_tick = int(tick)
+                if launch and (self.feedback is None or sample.received_at_secs > self.feedback.received_at_secs):
+                    self.left_b_count += 1
+                    self.left_b_at_secs = sample.received_at_secs
                 self.feedback = sample
                 imu = getattr(message, "imu_state", None)
                 if imu is not None:

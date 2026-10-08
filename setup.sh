@@ -152,9 +152,13 @@ if [[ -z "$image" ]]; then
   fi
 fi
 
-echo "Code: $(git -C "$repo_dir" rev-parse HEAD)"
-sha256sum "$profile"
-"$runtime" image inspect "$image" --format '{{.Id}}'
+if [[ "$mode" == hardware ]]; then
+  "$runtime" image inspect "$image" --format '{{.Id}}' >/dev/null
+else
+  echo "Code: $(git -C "$repo_dir" rev-parse HEAD)"
+  sha256sum "$profile"
+  "$runtime" image inspect "$image" --format '{{.Id}}'
+fi
 if [[ "$mode" == preflight ]]; then
   echo "Preflight complete. No robot processes or container started."
   exit 0
@@ -193,7 +197,6 @@ fi
 default_thrash=monitor
 [[ "$mode" != hardware ]] || default_thrash=enforce
 thrash="${G1_THRASH_MODE:-$default_thrash}"
-echo "Thrashing detection: $thrash (existing weighted RMS metric)."
 if [[ -n "${G1_TRIAL_CONFIG:-}" && "$thrash" != enforce ]]; then
   echo "Scored trials require G1_THRASH_MODE=enforce." >&2; exit 2
 fi
@@ -216,6 +219,7 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 log_dir="${G1_RUN_LOG:-$repo_dir/.cache/hardware_runs/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$log_dir"
 { git -C "$repo_dir" rev-parse HEAD; sha256sum "$profile"; "$runtime" image inspect "$image" --format '{{.Id}}'; } > "$log_dir/configuration.txt"
+echo "Thrashing detection: $thrash" >> "$log_dir/configuration.txt"
 cp "$profile" "$log_dir/joint_profile.json"
 pids=()
 stop_session_nodes() {
@@ -344,16 +348,10 @@ print("0" if same else "1")
     fi
   fi
   if [[ "$needs_reload" == 1 ]]; then
-    echo "Reloading g1-safety-stops.service so this same watchdog commands the whole body."
-    if [[ -n "$latched_reason" ]]; then
-      echo "Previous stop: $latched_reason"
-      echo "Keep the robot supported. This reload can damp once, then it stays up."
-    else
-      echo "Keep the robot supported until the service is active again. It stays up for the run."
-    fi
+    echo "Reloading safety service. Keep the robot supported: this can request damping." >&2
+    echo "Previous stop: $latched_reason" >> "$log_dir/configuration.txt"
     safety_systemctl restart g1-safety-stops.service
     wait_for_safety_service
-    echo "Safety service is active. Reading its startup gate status."
     current_gate=""
     for _attempt in 1 2 3 4 5; do
       current_gate="$(read_gate_status)"
@@ -377,7 +375,6 @@ raise SystemExit(0 if (
     echo "g1-safety-stops is still latched (${current_gate}). No policy session started." >&2
     exit 2
   fi
-  echo "Publishing /safety/precheck only. g1-safety-stops checks those commands and writes the motors."
 fi
 launch_node checker -p "thrash.mode:=$thrash"
 launch_node controller_stop -p startup_timeout_secs:=5.0
@@ -401,10 +398,8 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" != 1 ]]; then
     -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
 fi
 stop_container
-echo "Starting $image as $container_name on the robot network (interface ${ROBOT_INTERFACE:-eth0}, DDS domain ${ROBOT_DOMAIN:-0})."
-echo "Mode: $mode. Logs: $log_dir. Ctrl+C stops this session and leaves g1-safety-stops running."
-if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 || "${G1_LAUNCH_GATE:-false}" == true ]]; then
-  echo "GR00T Balance stabilizes the robot first. Once stable, left + B authorizes policy handoff. Double Start damps."
+if [[ "$mode" != hardware ]]; then
+  echo "Starting $image as $container_name. Mode: $mode. Logs: $log_dir."
 fi
 
 run_args=(
@@ -445,4 +440,8 @@ else
   run_args+=(--rm)
 fi
 
-"$runtime" run "${run_args[@]}" "$image" "${extra[@]}" 2>&1 | tee "$log_dir/policy.jsonl"
+if [[ "$mode" == hardware ]]; then
+  "$runtime" run "${run_args[@]}" "$image" "${extra[@]}" 2>&1 | tee "$log_dir/policy.jsonl" | python3 -u -m robot_safety.console_output
+else
+  "$runtime" run "${run_args[@]}" "$image" "${extra[@]}" 2>&1 | tee "$log_dir/policy.jsonl"
+fi

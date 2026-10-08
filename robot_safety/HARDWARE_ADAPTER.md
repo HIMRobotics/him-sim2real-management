@@ -165,6 +165,14 @@ host checks, service configuration, command mounts and logs. Logs are under
 `.cache/hardware_runs/`. Dry-run rejects `--enable-hardware-output` and disables
 transport writes/control RPCs. Preflight starts no robot processes.
 
+The hardware terminal hides routine telemetry, bundle hashes and startup banners.
+It prints `D-pad Left + B detected` once per new press and preserves errors,
+tracebacks and the safety-service reload warning. Detection alone does not mean
+handoff was accepted. The existing stability gate and button mapping are unchanged.
+Full container output remains in the run's `policy.jsonl`, with code/image/profile
+identifiers in `configuration.txt`. This filtering also works with existing
+example images. The host service must load the updated button-event telemetry.
+
 ## Output and stop paths
 
 ```text

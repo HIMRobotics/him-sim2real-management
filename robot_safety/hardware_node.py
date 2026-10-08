@@ -267,6 +267,8 @@ class HardwareMotorGateNode(MotorGateNode):
                 "handover_complete": self.adapter.last_written_ownership_weight == 1.0,
                 "launch_gate": self.adapter.launch_gate,
                 "policy_launched": self.adapter.policy_launched,
+                "left_b_count": self.adapter.left_b_count,
+                "left_b_at_secs": self.adapter.left_b_at_secs,
                 "arm_rejection_reason": self.adapter.arm_rejection_reason,
                 "abort_reason": self.adapter.abort_reason,
                 "damping_rpc_code": self.adapter.damping_rpc_code,
