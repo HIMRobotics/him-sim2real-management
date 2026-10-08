@@ -239,6 +239,50 @@ class G1ArmAdapter:
             self.time_ready_mode_confirmed_secs = self.clock()
             return True
 
+    def wait_until_stationary(self, timeout=3.0, window=0.25):
+        """Wait for fresh settled telemetry without taking motor ownership."""
+        if not self.whole_body:
+            return True
+        self.time_ready_mode_confirmed_secs = None
+        deadline = self.clock() + timeout
+        settled_since = previous_stamp = None
+        detail = "stationary feedback window incomplete"
+        while True:
+            with self.lock:
+                now = self.clock()
+                if self.armed or self.abort_reason or self.stop_requested.is_set():
+                    return self.reject_arm("already armed or stopped")
+                if not self.feedback_fresh(now):
+                    return self.reject_arm("fresh feedback required while waiting for stationary start")
+                try:
+                    self.check_health()
+                    check_base_motion(self.gyro, self.quat)
+                except ValueError as error:
+                    return self.reject_arm(str(error))
+                if self.feedback.start_button_pressed or self.f3_pressed:
+                    return self.reject_arm("Start and F3 must be released")
+                stamp = self.feedback.received_at_secs
+                index = max(range(29), key=lambda i: abs(self.feedback.dq[i]))
+                speed = self.feedback.dq[index]
+                limit = self.profile.initial_velocity_tolerance_rad_secs
+                if abs(speed) > limit:
+                    settled_since = None
+                    detail = (f"{G1_29_JOINT_NAMES[index]} speed: measured={speed:.6f} rad/s, "
+                              f"maximum absolute={limit} rad/s")
+                elif previous_stamp is None or stamp > previous_stamp:
+                    if previous_stamp is None or stamp - previous_stamp >= HARDWARE_FEEDBACK_TIMEOUT_SECS:
+                        settled_since = None
+                    if settled_since is None:
+                        settled_since = stamp
+                    if stamp - settled_since >= window:
+                        self.arm_rejection_reason = None
+                        return True
+                    detail = "stationary feedback window incomplete"
+                previous_stamp = stamp
+                if now >= deadline:
+                    return self.reject_arm(f"stationary start timed out after {timeout:g}s: {detail}")
+            time.sleep(HARDWARE_WATCHDOG_POLL_SECS)
+
     def arm(self):
         """Require a recent ready-mode check and fresh stationary joint feedback."""
         with self.lock:
@@ -349,7 +393,8 @@ class G1ArmAdapter:
                 self.abort_reason = reason
                 self.startup.fail()
             self.command = None
-            if request_damping or (self.whole_body and self.armed and self.ownership_taken
+            if request_damping or (self.whole_body and self.armed
+                                   and (self.ownership_taken or self.balance_released)
                                    and not soft_balance):
                 self.hold_failed = True
                 self.walk_stop = False
@@ -439,18 +484,25 @@ class G1ArmAdapter:
             try:
                 self.walk_rpc_code = self.transport.release_motion()
                 if self.walk_rpc_code != 0:
-                    # The stock controller still owns the robot. Put its mode back
-                    # and leave the current pose alone.
+                    # A timeout can leave ownership uncertain. Require an
+                    # acknowledged restoration before treating stock control as active.
                     try:
-                        self.transport.restore_motion()
+                        restored = self.transport.restore_motion() == 0
                     except Exception:  # noqa: BLE001
-                        pass
-                    self.balance_released = False
+                        restored = False
+                    self.balance_released = not restored
                     self.abort("hardware_release_failed")
                     return
                 self.balance_released = True
                 self.motion_released_at_secs = self.clock()
-                self.startup = StartupBalance(self.balance_policy)
+                with self.lock:
+                    if self.abort_reason or self.stop_requested.is_set():
+                        self.abort(self.abort_reason or "hardware_stop_during_release")
+                        return
+                    self.balance_policy.reset()
+                    with self.stop_lock:
+                        if not self.abort_reason and not self.stop_requested.is_set():
+                            self.startup = StartupBalance(self.balance_policy)
             except Exception:  # noqa: BLE001 - An uncertain release requires restoration.
                 self.balance_released = True
                 self.abort("hardware_release_failed")
@@ -461,7 +513,9 @@ class G1ArmAdapter:
                     # ReleaseMode blocks longer than the publish gap. The next
                     # cycle starts from when the RPC returns.
                     self.last_worker_cycle_secs = self.clock()
-            return
+            # Recheck fresh feedback, expiry and stops after the blocking RPC.
+            # Start the entry blend now instead of waiting another output period.
+            return self.step()
         # SDK writes must not hold the feedback lock or delay controller monitoring.
         try:
             if self.stop_requested.is_set():

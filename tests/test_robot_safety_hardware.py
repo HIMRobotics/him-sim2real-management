@@ -95,7 +95,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         self.assertEqual(self.transport.release_calls, 1)
-        self.transport.write_body.assert_not_called()
+        self.transport.write_body.assert_called_once()
         self.adapter.step()
         targets, machine = self.transport.write_body.call_args[0]
         self.assertEqual((len(targets), machine), (29, 5))
@@ -139,7 +139,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         self.assertIsNone(self.adapter.abort_reason)
-        self.transport.write_body.assert_called_once()
+        self.assertEqual(self.transport.write_body.call_count, 2)
 
     def test_whole_body_confirmed_damp_does_not_repeat(self):
         self.adapter.whole_body = True

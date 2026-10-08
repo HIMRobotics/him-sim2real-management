@@ -57,6 +57,45 @@ the policy client's normal exit cannot convert recovery into damping. Real
 faults still override recovery. The recovery helper retains its existing
 independence from submission command limits.
 
+### Initial takeover and stationary readiness
+
+Before whole-body arming, readiness waits up to 3 seconds for a continuous
+250 ms window of fresh feedback with every joint inside the existing initial
+speed tolerance. The strict walker profile still uses 0.05 rad/s. Moving or
+repeated samples cannot establish this window. Failure returns the limiting
+joint and measured speed without releasing stock control. The stock-mode query
+then runs, and arming rechecks all original conditions against current feedback.
+The example client allows 10 seconds for this readiness service, covering both
+the bounded settling wait and the existing mode-query retries.
+
+The initial stock-controller to Balance transition is distinct from the later
+left + B policy handoff. After a successful release, the output worker rechecks
+feedback, command expiry and stops immediately, without another 20 ms sleep.
+It resets Balance history, captures the measured pose and begins at that position
+target. During `startup_phase: entering_balance`, position targets blend from
+that captured pose to live Balance outputs over 0.5 seconds using cubic smoothstep
+(`3t² - 2t³`). Balance gains remain active, desired speeds and feedforward torques
+remain zero, and the existing torque projection and hard checks still apply.
+The stability window starts only after entry completes. Left + B cannot bypass it.
+
+This reduces the initial position-target jump. It does not preserve the stock
+controller's supporting torque, remove delays inside its release RPC, establish
+foot loading, or guarantee smooth physical motion. A fault after release invokes
+the stop path even if the first body command has not yet been written. Failed
+release plus failed restoration is treated as uncertain ownership.
+
+Offline comparison used the first recorded poses from hardware logs
+`20261008-080746` and `20261008-081225`, placed on simulated flat ground.
+The 0.5-second entry reduced peak joint speeds from 3.41/3.18 to 2.11/2.17 rad/s
+over 8-second runs. Both remained upright. A 3-second experimental entry caused
+falls in both cases and is not deployed. The final implementation also completed
+a 10-second first-steps simulation. Reports and experiment code are in
+`.cache/takeover-validation/`. Simulation records some torque exceedances as
+warnings, including proposals that the host inhibits, and is not a hardware
+qualification. No gantry or stock-controller release is simulated. Physical
+jerking remains an unresolved commissioning issue until operator testing confirms
+the cause and response. No physical joint commands were issued to validate this change.
+
 ### Torque-limited targets
 
 Whole-body output projects excessive position targets into a feasible PD torque

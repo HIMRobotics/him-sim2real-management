@@ -56,13 +56,13 @@ class PolicyNode(Node):
 
     def arm(self):
         """Use the existing readiness and session services."""
-        def call(service, kind, request):
+        def call(service, kind, request, timeout=5):
             client = self.create_client(kind, service)
             try:
                 if not client.wait_for_service(timeout_sec=5):
                     raise RuntimeError("missing service: " + service)
                 future = client.call_async(request)
-                rclpy.spin_until_future_complete(self, future, timeout_sec=5)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
                 result = future.result() if future.done() else None
                 if result is None or not result.success:
                     detail = "" if result is None else (result.message or "")
@@ -75,7 +75,8 @@ class PolicyNode(Node):
 
         if self.mode != "sim":
             call("/safety/controller_stop/ready", Trigger, Trigger.Request())
-            call("/safety/motor_gate/ready", Trigger, Trigger.Request())
+            print("Waiting for stationary hardware readiness before arming", flush=True)
+            call("/safety/motor_gate/ready", Trigger, Trigger.Request(), timeout=10)
         session = call("/safety/checker/arm", Trigger, Trigger.Request())
         if self.mode != "sim":
             request = ArmGate.Request()

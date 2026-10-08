@@ -27,6 +27,15 @@ def start(rig):
     rig.adapter.step()
 
 
+def finish_entry(rig):
+    for _ in range(51):
+        rig.now += 0.01
+        rig.state()
+        rig.adapter.submit(rig.command, rig.now + 0.1)
+        rig.adapter.step()
+    assert rig.adapter.abort_reason is None
+
+
 def test_missing_balance_rejects_before_release(rig):
     rig.adapter.balance_policy = None
     with patch('robot_safety.hardware_adapter.BalancePolicy', side_effect=FileNotFoundError):
@@ -57,6 +66,7 @@ def test_inference_failure_after_ownership_requests_damping(rig):
 
 def test_feedback_torque_check_uses_written_balance_gains(rig):
     start(rig)
+    finish_entry(rig)
     assert rig.adapter.applied_gains[0] == (150, 2)
     rig.adapter.profile = replace(rig.adapter.profile, legs=tuple(
         replace(limits, max_torque_nm=10) for limits in rig.adapter.profile.legs))
@@ -69,6 +79,7 @@ def test_feedback_torque_check_uses_written_balance_gains(rig):
 def test_abort_in_balance_or_handoff_latches_and_stops_writes(rig, handoff):
     start(rig)
     if handoff:
+        finish_entry(rig)
         rig.adapter.startup.ready = True
         assert rig.adapter.startup.authorize(rig.now)
     rig.adapter.abort('test_stop', request_damping=True)
@@ -120,6 +131,7 @@ def test_balance_overshoot_is_limited_and_recorded(rig):
     target[4] = 0.9
     rig.adapter.balance_policy.update.return_value = target
     start(rig)
+    finish_entry(rig)
     assert rig.adapter.abort_reason is None
     written = rig.transport.write_body.call_args[0][0][4]
     assert written['q'] * written['kp'] == pytest.approx(31.5)
@@ -197,3 +209,72 @@ def test_startup_release_does_not_announce_or_request_soft_reset():
     thread.assert_not_called()
     transport._say_soft_reset.assert_not_called()
     transport.locomotion.SetFsmId.assert_not_called()
+
+
+def test_release_writes_measured_pose_without_an_extra_output_tick(rig):
+    def release():
+        rig.now += 0.04
+        rig.state()
+        rig.adapter.feedback = replace(rig.adapter.feedback, q=(0.2,) * 29)
+        rig.adapter.submit(rig.command, rig.now + 0.1)
+        return 0
+
+    rig.transport.release_motion = Mock(side_effect=release)
+    assert rig.adapter.arm()
+    rig.adapter.submit(rig.command, rig.now + 0.1)
+    rig.adapter.step()
+    rig.transport.release_motion.assert_called_once()
+    rig.transport.write_body.assert_called_once()
+    targets = rig.transport.write_body.call_args[0][0]
+    assert [targets[i]['q'] for i in range(29)] == pytest.approx([0.2] * 29)
+    assert rig.adapter.startup.entry_started == rig.now
+    assert rig.adapter.startup.phase == 'entering_balance'
+    assert rig.adapter.balance_policy.reset.call_count == 2
+
+
+@pytest.mark.parametrize('failure', ['expired', 'stale', 'stop', 'inference'])
+def test_fault_after_release_never_writes_and_uses_stop_path(rig, failure):
+    def release():
+        if failure == 'expired':
+            rig.now += 0.11
+            rig.state()
+        elif failure == 'stale':
+            rig.now += 0.21
+        elif failure == 'stop':
+            rig.adapter.abort('operator_stop')
+        else:
+            rig.adapter.balance_policy.update.side_effect = RuntimeError('inference failed')
+        return 0
+
+    rig.transport.release_motion = Mock(side_effect=release)
+    assert rig.adapter.arm()
+    rig.adapter.submit(rig.command, rig.now + 0.1)
+    rig.adapter.step()
+    rig.transport.write_body.assert_not_called()
+    assert rig.adapter.abort_reason
+    assert rig.adapter.startup.phase == 'fault'
+    assert rig.adapter.hold_failed
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+
+
+def test_failed_release_and_failed_restore_do_not_claim_stock_ownership(rig):
+    rig.transport.release_motion = Mock(return_value=3104)
+    rig.transport.restore_motion = Mock(return_value=3104)
+    assert rig.adapter.arm()
+    rig.adapter.submit(rig.command, rig.now + 0.1)
+    rig.adapter.step()
+    rig.transport.write_body.assert_not_called()
+    assert rig.adapter.balance_released
+    assert rig.adapter.hold_failed
+    assert rig.adapter.abort_reason == 'hardware_release_failed'
+
+
+def test_abort_during_post_release_reset_preserves_fault(rig):
+    assert rig.adapter.arm()
+    rig.adapter.balance_policy.reset.side_effect = lambda: rig.adapter.abort('test_stop')
+    rig.adapter.submit(rig.command, rig.now + 0.1)
+    rig.adapter.step()
+    rig.transport.write_body.assert_not_called()
+    assert rig.adapter.startup.phase == 'fault'
+    assert rig.adapter.hold_failed

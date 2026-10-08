@@ -65,7 +65,7 @@ def test_duplicate_samples_never_advance_window_and_stale_fails():
     advance(startup, 0.0)
     for now in [0.05, 0.1, 0.19]:
         startup.command(now, 0.0, state(), submitted())
-    assert startup.stable_since == 0
+    assert startup.stable_since is None
     assert not startup.ready
     with pytest.raises(ValueError, match='stale_telemetry'):
         startup.command(0.2, 0.0, state(), submitted())
@@ -154,3 +154,32 @@ def test_stable_wait_retains_telemetry_deadline():
     with pytest.raises(ValueError, match='stale_telemetry'):
         startup.command(2.4, 2.1, state(), submitted())
     assert not startup.ready
+
+
+def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
+    startup = gate()
+    sample = state()
+    sample['q'] = [0.2] * 29
+    first = startup.command(10, 10, sample, submitted())
+    np.testing.assert_allclose(first['q'], sample['q'])
+    assert startup.phase == 'entering_balance'
+    assert not startup.authorize(10)
+    startup.policy.update.return_value = np.full(15, 0.4)
+    middle = startup.command(10.25, 10.25, sample, submitted())
+    np.testing.assert_allclose(middle['q'][:15], 0.3)
+    np.testing.assert_allclose(middle['q'][15:], 0.2)
+    np.testing.assert_array_equal(middle['kp'], first['kp'])
+    finish = startup.command(10.5, 10.5, sample, submitted())
+    np.testing.assert_allclose(finish['q'][:15], 0.4)
+    assert not startup.ready
+    assert startup.phase == 'balancing'
+
+
+def test_entry_does_not_count_as_a_stable_window():
+    startup = gate()
+    startup.min_seconds = 0
+    advance(startup, 1.0)
+    assert not startup.ready
+    assert startup.stable_since == pytest.approx(0.5)
+    advance(startup, 1.5, begin=1.02)
+    assert startup.ready
