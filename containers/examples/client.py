@@ -75,7 +75,7 @@ class PolicyNode(Node):
 
         if self.mode != "sim":
             call("/safety/controller_stop/ready", Trigger, Trigger.Request())
-            print("Waiting for stationary hardware readiness before arming", flush=True)
+            print("Checking hardware readiness before arming", flush=True)
             call("/safety/motor_gate/ready", Trigger, Trigger.Request(), timeout=10)
         session = call("/safety/checker/arm", Trigger, Trigger.Request())
         if self.mode != "sim":

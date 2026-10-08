@@ -92,10 +92,14 @@ deadline. Invalid numeric data is rejected. Thermal and measured-torque checks
 run on fresh hardware feedback. Simulation reports battery/temperature checks
 as unavailable rather than inferring them from motion.
 
-Initial speed remains **0.05 rad/s**, and the
-hardware ownership ramp **3 s**. The simulator validates its initial hold before
-policy motion. Hardware startup still requires the verified ready FSM and
-machine type. No launcher enables hardware output automatically.
+Initial desired command speed remains **0.05 rad/s**. The legacy arm-only path
+also uses that measured startup-speed tolerance and a **3 s** ownership ramp.
+Whole-body arming uses physical per-joint speed ceilings, without the separate
+near-stationary gate. Real deployments default to enforcing the existing weighted
+RMS thrashing detector. Hardware startup still requires the verified ready FSM,
+machine type, fresh telemetry and health checks. Whole-body entry into Balance
+uses the separate 0.5 s target blend described in
+[HARDWARE_ADAPTER.md](../HARDWARE_ADAPTER.md).
 
 ## Hardware scope and diagnostics
 

@@ -239,52 +239,8 @@ class G1ArmAdapter:
             self.time_ready_mode_confirmed_secs = self.clock()
             return True
 
-    def wait_until_stationary(self, timeout=3.0, window=0.25):
-        """Wait for fresh settled telemetry without taking motor ownership."""
-        if not self.whole_body:
-            return True
-        self.time_ready_mode_confirmed_secs = None
-        deadline = self.clock() + timeout
-        settled_since = previous_stamp = None
-        detail = "stationary feedback window incomplete"
-        while True:
-            with self.lock:
-                now = self.clock()
-                if self.armed or self.abort_reason or self.stop_requested.is_set():
-                    return self.reject_arm("already armed or stopped")
-                if not self.feedback_fresh(now):
-                    return self.reject_arm("fresh feedback required while waiting for stationary start")
-                try:
-                    self.check_health()
-                    check_base_motion(self.gyro, self.quat)
-                except ValueError as error:
-                    return self.reject_arm(str(error))
-                if self.feedback.start_button_pressed or self.f3_pressed:
-                    return self.reject_arm("Start and F3 must be released")
-                stamp = self.feedback.received_at_secs
-                index = max(range(29), key=lambda i: abs(self.feedback.dq[i]))
-                speed = self.feedback.dq[index]
-                limit = self.profile.initial_velocity_tolerance_rad_secs
-                if abs(speed) > limit:
-                    settled_since = None
-                    detail = (f"{G1_29_JOINT_NAMES[index]} speed: measured={speed:.6f} rad/s, "
-                              f"maximum absolute={limit} rad/s")
-                elif previous_stamp is None or stamp > previous_stamp:
-                    if previous_stamp is None or stamp - previous_stamp >= HARDWARE_FEEDBACK_TIMEOUT_SECS:
-                        settled_since = None
-                    if settled_since is None:
-                        settled_since = stamp
-                    if stamp - settled_since >= window:
-                        self.arm_rejection_reason = None
-                        return True
-                    detail = "stationary feedback window incomplete"
-                previous_stamp = stamp
-                if now >= deadline:
-                    return self.reject_arm(f"stationary start timed out after {timeout:g}s: {detail}")
-            time.sleep(HARDWARE_WATCHDOG_POLL_SECS)
-
     def arm(self):
-        """Require a recent ready-mode check and fresh stationary joint feedback."""
+        """Require confirmed stock mode, fresh telemetry and physical limits."""
         with self.lock:
             now = self.clock()
             if self.abort_reason:
@@ -331,7 +287,12 @@ class G1ArmAdapter:
                         f"{joint_name} position: measured={position:.6f} rad, "
                         f"allowed=[{limits.position_min_rad}, {limits.position_max_rad}] rad"
                     )
-                if abs(velocity) > self.profile.initial_velocity_tolerance_rad_secs:
+                if self.whole_body:
+                    try:
+                        check_measured_velocity(joint_name, limits, velocity)
+                    except ValueError as error:
+                        return self.reject_arm(str(error))
+                elif abs(velocity) > self.profile.initial_velocity_tolerance_rad_secs:
                     return self.reject_arm(
                         f"{joint_name} speed: measured={velocity:.6f} rad/s, "
                         f"maximum absolute={self.profile.initial_velocity_tolerance_rad_secs} rad/s"

@@ -57,16 +57,23 @@ the policy client's normal exit cannot convert recovery into damping. Real
 faults still override recovery. The recovery helper retains its existing
 independence from submission command limits.
 
-### Initial takeover and stationary readiness
+### Initial takeover and readiness
 
-Before whole-body arming, readiness waits up to 3 seconds for a continuous
-250 ms window of fresh feedback with every joint inside the existing initial
-speed tolerance. The strict walker profile still uses 0.05 rad/s. Moving or
-repeated samples cannot establish this window. Failure returns the limiting
-joint and measured speed without releasing stock control. The stock-mode query
-then runs, and arming rechecks all original conditions against current feedback.
-The example client allows 10 seconds for this readiness service, covering both
-the bounded settling wait and the existing mode-query retries.
+Whole-body arming checks the accepted stock mode, fresh telemetry, health,
+released stop buttons, absolute joint positions and physical joint-speed ceilings.
+It does not reject a start because one measured velocity exceeds the old
+0.05 rad/s near-stationary tolerance. There is no separate stationary wait,
+position-drift gate or per-joint RMS gate. The initial desired command-speed
+bound and the legacy arm-only measured-speed check retain the profile tolerance.
+
+Real deployments default the existing weighted oscillatory RMS detector to
+`enforce`. It runs in the checker once armed and faults sustained thrashing
+through the existing abort path. `G1_THRASH_MODE` remains an explicit override,
+and the launcher prints the selected mode. Its weights, filtering, score limit
+and persistence are unchanged. This metric detects oscillation, not all motion
+or actual kinetic energy. Physical joint-speed and torque ceilings, tilt checks,
+telemetry and command deadlines, and controller stops remain independent.
+The measured Balance stability window still gates the later policy handoff.
 
 The initial stock-controller to Balance transition is distinct from the later
 left + B policy handoff. After a successful release, the output worker rechecks
@@ -234,7 +241,9 @@ Required fields:
   operating-state ID is distinct from `mode_machine=5`, the hardware model.
 - `handover_secs`: ownership ramp duration.
 - `max_publish_gap_secs`: maximum output-worker gap, no greater than 0.2 seconds.
-- `initial_velocity_tolerance_rad_secs`: required near-stationary start tolerance.
+- `initial_velocity_tolerance_rad_secs`: initial desired command-speed bound and
+  legacy arm-only measured-speed tolerance. Whole-body measured speed uses the
+  physical per-joint ceilings, not this near-stationary threshold.
 - `joints`: all 29 named joints, including legs. Each needs a positive `max_torque_nm`, position bounds, positive
   `kp` and `kd`, and maximum velocity.
 

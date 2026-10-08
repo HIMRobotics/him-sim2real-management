@@ -156,15 +156,11 @@ class HardwareMotorGateNode(MotorGateNode):
             return response
         query_started_secs = time.monotonic()
         self.get_logger().info(
-            "Waiting up to 3s for 0.25s of stationary feedback before the ready-mode query"
-        )
-        self.get_logger().info(
             f"Reading stock ready mode: up to {READINESS_QUERY_ATTEMPTS} attempts, "
             f"{READINESS_RPC_TIMEOUT_SECS:.1f}s SDK timeout each"
         )
         try:
-            response.success = (self.adapter.wait_until_stationary()
-                                and self.adapter.check_ready_mode())
+            response.success = self.adapter.check_ready_mode()
         except Exception as error:  # noqa: BLE001
             self.adapter.arm_rejection_reason = (
                 f"readiness query raised {type(error).__name__}: {error}"

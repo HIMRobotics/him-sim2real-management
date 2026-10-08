@@ -190,7 +190,10 @@ if [[ "$mode" == hardware && "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
     wait_for_safety_service
   fi
 fi
-thrash="${G1_THRASH_MODE:-monitor}"
+default_thrash=monitor
+[[ "$mode" != hardware ]] || default_thrash=enforce
+thrash="${G1_THRASH_MODE:-$default_thrash}"
+echo "Thrashing detection: $thrash (existing weighted RMS metric)."
 if [[ -n "${G1_TRIAL_CONFIG:-}" && "$thrash" != enforce ]]; then
   echo "Scored trials require G1_THRASH_MODE=enforce." >&2; exit 2
 fi
