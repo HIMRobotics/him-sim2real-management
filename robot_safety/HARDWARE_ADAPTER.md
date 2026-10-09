@@ -224,7 +224,7 @@ the stock motion service, changes calibration, or automatically rearms.
 While armed, all 29 proposals are validated, but only waist/arm commands are
 written. Fresh feedback checks model velocity ceilings, total estimated torque,
 available measured torque, 6 rad/s body spin per axis and 1 rad upright tilt.
-Temperature ceilings are 85 C casing and 120 C winding, with a 20% minimum battery
+Temperature ceilings are 85 C casing and 120 C winding, with a 10% minimum battery
 charge. BMS arrives separately on `rt/lf/bmsstate` with a local 5 s freshness
 limit. Missing health data prevents arming. Runtime motion and health faults
 request damping. The arm SDK path still cannot control the legs.

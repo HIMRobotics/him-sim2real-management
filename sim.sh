@@ -36,8 +36,8 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --safety-checks     Enable safety checks (default).
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
---example NAME     Policy package: stairs, walker, or balance, from
-                   examples/policies. Builds image g1-sim-example-<name>:local.
+--example NAME     Policy package: stairs, walker, balance, or holosoma.
+                   Builds image g1-sim-example-<name>:local.
                    The report policy field is that name. This is not a velocity file.
                    walker/thrash: belly-up walker, only thrash stops enabled.
                    walker/thrash-monitor: same experiment, readings without thrash stops.
@@ -237,8 +237,8 @@ fi
 if [[ -n "$command_file" && -z "$example" ]]; then
   circle=1
 fi
-if [[ -n "$command_file" && -n "$example_arg" && "$example_arg" != walker ]]; then
-  echo "--command is a walker velocity file. Use --example walker, or pass --command alone for the direct plant path." >&2
+if [[ -n "$command_file" && -n "$example_arg" && "$example_arg" != walker && "$example_arg" != holosoma ]]; then
+  echo "--command is a velocity file. Use --example walker or holosoma, or pass --command alone for the direct plant path." >&2
   exit 2
 fi
 if [[ -n "$example" && ( -n "$image" || "$self_test" -eq 1 || "$circle" -eq 1 ) ]]; then
@@ -266,7 +266,7 @@ if [[ "$battery" -eq 1 && "$circle" -eq 1 && "$pose" != "standing" ]]; then
   exit 2
 fi
 if [[ "$local_mode" -eq 1 && -z "$example" ]]; then
-  echo "--local requires --example stairs, walker, or balance." >&2
+  echo "--local requires --example stairs, walker, balance, or holosoma." >&2
   exit 2
 fi
 mkdir -p "$out_dir"

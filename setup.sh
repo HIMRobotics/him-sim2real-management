@@ -19,8 +19,9 @@ Usage: ./setup.sh [--mode preflight|dry-run|hardware] [--enable-hardware-output]
        ./setup.sh stop
 
 Canonical hardware supervisor. Prefer ./submit.sh --mode real for deployment.
-Hardware always uses g1-safety-stops.service. Startup runs GR00T Balance
-until measured stability, then waits for left + B before policy handoff.
+Hardware always uses g1-safety-stops.service. ./submit.sh --mode real starts
+Holosoma in developer mode until left + B launches the container policy.
+G1_STARTUP_POLICY=sonic or groot selects an older startup controller.
 Double Start still requests damping. Preflight never starts robot processes.
 HELP
 }
@@ -56,12 +57,30 @@ while [[ $# -gt 0 ]]; do
     --image) image="${2:?--image needs a name}"; shift 2 ;;
     --mode) mode="${2:?--mode needs preflight, dry-run or hardware}"; shift 2 ;;
     --profile) profile="${2:?--profile needs a JSON file}"; shift 2 ;;
+    --startup) export G1_STARTUP_POLICY="${2:?--startup needs sonic, groot, or holosoma}"; shift 2 ;;
     --enable-hardware-output) enabled=true; shift ;;
     --) shift; extra+=("$@"); break ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 case "$mode" in preflight|dry-run|hardware) ;; *) echo "Invalid mode: $mode" >&2; exit 2 ;; esac
+startup_policy="${G1_STARTUP_POLICY:-groot}"
+if [[ "$example" == holosoma ]]; then
+  startup_policy=holosoma
+fi
+case "$startup_policy" in
+  sonic|groot|holosoma) ;;
+  *) echo "G1_STARTUP_POLICY must be sonic, groot, or holosoma." >&2; exit 2 ;;
+esac
+export G1_STARTUP_POLICY="$startup_policy"
+export HIM_SONIC_DIR="${HIM_SONIC_DIR:-$repo_dir/.cache/sonic}"
+if [[ "$startup_policy" == sonic && "$stopping" -eq 0 && "$mode" == hardware ]]; then
+  if [[ ! -f "$HIM_SONIC_DIR/model_encoder.onnx" || ! -f "$HIM_SONIC_DIR/model_decoder.onnx" ]]; then
+    echo "SONIC startup weights are not in $HIM_SONIC_DIR." >&2
+    echo "Undo with G1_STARTUP_POLICY=groot or ./submit.sh --mode real --startup groot." >&2
+    exit 2
+  fi
+fi
 if [[ "$mode" == hardware && "$enabled" != true ]]; then
   echo "Hardware requires --enable-hardware-output." >&2; exit 2
 fi
@@ -80,7 +99,7 @@ if [[ -n "$command_file" && ! -f "$command_file" ]]; then
   exit 2
 fi
 if [[ -n "$example" ]]; then
-  case "$example" in walker|stairs|balance) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
+  case "$example" in walker|stairs|balance|holosoma) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
 fi
 if [[ -z "$runtime" ]]; then
   if command -v docker >/dev/null 2>&1; then runtime=docker
@@ -89,7 +108,7 @@ if [[ -z "$runtime" ]]; then
   fi
 fi
 if [[ "$runtime" == docker && "${EUID}" -ne 0 && ! -w /var/run/docker.sock ]]; then
-  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_SONIC_DIR,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
 fi
 if [[ "$stopping" -eq 1 ]]; then
   stop_container
@@ -311,7 +330,7 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
   # Restart a latched watchdog before any session node subscribes. A checker
   # that hears the old abort republishes it, and the fresh gate latches it too.
   wanted_profile="$(realpath "$profile")"
-  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}"
+  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}" "G1_STARTUP_POLICY=$startup_policy" "HIM_SONIC_DIR=$HIM_SONIC_DIR" "HIM_HOLOSOMA_DIR=${HIM_HOLOSOMA_DIR:-/home/unitree/holosoma}" ${HIM_HOLOSOMA_ONNX:+"HIM_HOLOSOMA_ONNX=$HIM_HOLOSOMA_ONNX"}
   current_gate="$(read_gate_status)"
   needs_reload=0
   latched_reason=""
@@ -328,22 +347,20 @@ same = (
     and gate.get("whole_body_output") is True
     and gate.get("launch_gate") is True
     and gate.get("hardware_profile_path") == sys.argv[2]
+    and gate.get("startup_policy") == sys.argv[3]
     and not gate.get("abort_reason")
 )
 print("0" if same else "1")
-' "$current_gate" "$wanted_profile")"
+' "$current_gate" "$wanted_profile" "$startup_policy")"
   else
     latched_reason="$(syslog_abort_reason || true)"
     needs_reload=1
   fi
   if [[ "$needs_reload" == 0 ]]; then
     service_pid="$(safety_systemctl show -p MainPID --value g1-safety-stops.service || true)"
-    if [[ -n "$service_pid" && "$service_pid" != 0 && (
-      "$repo_dir/robot_safety/startup_balance.py" -nt "/proc/$service_pid" ||
-      "$repo_dir/robot_safety/hardware_adapter.py" -nt "/proc/$service_pid" ||
-      "$repo_dir/robot_safety/hardware_node.py" -nt "/proc/$service_pid" ||
-      "$repo_dir/robot_safety/ros_nodes.py" -nt "/proc/$service_pid"
-    ) ]]; then
+    if [[ -n "$service_pid" && "$service_pid" != 0 && -n "$(
+      find "$repo_dir/robot_safety" -newer "/proc/$service_pid" \( -name '*.py' -o -name '*.json' \) -print -quit 2>/dev/null
+    )" ]]; then
       needs_reload=1
     fi
   fi

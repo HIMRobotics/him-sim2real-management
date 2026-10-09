@@ -233,6 +233,8 @@ class HardwareMotorGateNode(MotorGateNode):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
             return
+        if self.adapter.trace is not None:
+            self.adapter.trace.note_gate(time.monotonic())
         self.notify_startup_ready()
         if self.adapter.damp_settled:
             with self.adapter.stop_lock:
@@ -260,6 +262,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 **(self.adapter.startup.status() if self.adapter.whole_body else {}),
                 "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
+                "startup_policy": self.adapter.startup_policy_name,
                 "hardware_profile_path": self.hardware_profile_path,
                 "motion_released": self.adapter.balance_released,
                 "motion_released_at_secs": self.adapter.motion_released_at_secs,

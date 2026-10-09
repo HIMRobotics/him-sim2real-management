@@ -8,8 +8,9 @@ import yaml
 from policy_safety.adapter import ADAPTERS
 
 from robot_safety.balance_policy import LEG_KD, LEG_KP, BalancePolicy
+from robot_safety.holosoma_policy import HolosomaLocomotionPolicy
 
-NAMES = ("stairs", "walker", "balance")
+NAMES = ("stairs", "walker", "balance", "holosoma")
 
 
 def session(path):
@@ -40,6 +41,11 @@ class ExamplePolicy:
             self.policy.warmup()
             self.kp = np.concatenate((LEG_KP, np.full(14, 40.0)))
             self.kd = np.concatenate((LEG_KD, np.full(14, 1.0)))
+        elif name == "holosoma":
+            path = project / "holosoma.onnx"
+            self.policy = HolosomaLocomotionPolicy(str(path), session=session(path))
+            self.kp = self.policy.kp
+            self.kd = self.policy.kd
         else:
             cfg = yaml.safe_load((project / "policy.yaml").read_text())
             joints = cfg["joints"]
@@ -94,6 +100,16 @@ class ExamplePolicy:
         if self.name == "balance":
             lower = self.policy.update(q, state["dq"], state["quat"], state["gyro"])
             target = np.concatenate((lower, self.arm_pose))
+        elif self.name == "holosoma":
+            velocity = (
+                self.velocity_command(state) if "task_command" in state
+                else np.zeros(3)
+            )
+            if not state.get("control_ready", True):
+                velocity = np.zeros(3)
+            target = self.policy.update(
+                q, state["dq"], state["quat"], state["gyro"], velocity
+            )
         else:
             observation = self.policy.observation(
                 q,

@@ -15,5 +15,5 @@ COPY controllers.py client.py trial.py command.py entrypoint.sh /example/
 COPY robot_safety /example/robot_safety
 COPY policy_safety /example/policy_safety
 COPY project /example/project
-RUN python3 -c "from pathlib import Path; from controllers import ExamplePolicy; ExamplePolicy('walker' if Path('project/walker.onnx').is_file() else 'balance', 'project')"
+RUN python3 -c "from pathlib import Path; from controllers import ExamplePolicy; ExamplePolicy('holosoma' if Path('project/holosoma.onnx').is_file() else 'walker' if Path('project/walker.onnx').is_file() else 'balance', 'project')"
 ENTRYPOINT ["/bin/bash", "/example/entrypoint.sh"]

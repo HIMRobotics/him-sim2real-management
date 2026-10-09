@@ -9,7 +9,7 @@ from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_adapter import G1ArmAdapter, whole_body_repeat_wait
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES, UPPER_BODY_INDICES
 from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.unitree_transport import UnitreeArmTransport
@@ -83,6 +83,9 @@ class FakeTransport:
     def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
         self.lowcmds.append((list(lower_q), list(arm_q), machine))
         return True
+
+    def clear_body(self):
+        self.body_cleared = True
 
 
 class HardwareAdapterTests(unittest.TestCase):
@@ -269,6 +272,18 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertTrue(self.adapter.arm())
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
+
+    def test_holosoma_can_arm_from_damping(self):
+        self.transport.mode = 1
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.adapter.startup_policy_name = "holosoma"
+        self.assertTrue(self.adapter.check_ready_mode())
+
+    def test_holosoma_continues_when_the_mode_service_does_not_answer(self):
+        self.transport.read_ready_fsm = lambda: (3102, None)
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.adapter.startup_policy_name = "holosoma"
+        self.assertTrue(self.adapter.check_ready_mode())
 
     def test_only_confirmed_ready_mode_can_arm(self):
         self.transport.mode = 500
@@ -857,7 +872,7 @@ class HardwareAdapterTests(unittest.TestCase):
             with self.subTest(fault=fault):
                 self.setUp()
                 if fault == "battery":
-                    self.adapter.receive_battery(SimpleNamespace(soc=19))
+                    self.adapter.receive_battery(SimpleNamespace(soc=9))
                 else:
                     temps = [(85, 120)] * 29
                     if fault == "winding": temps[0] = (85, 121)
@@ -868,7 +883,7 @@ class HardwareAdapterTests(unittest.TestCase):
 
     def test_health_fault_during_execution_aborts(self):
         self.run_first()
-        self.adapter.receive_battery(SimpleNamespace(soc=19))
+        self.adapter.receive_battery(SimpleNamespace(soc=9))
         self.assertEqual(self.adapter.abort_reason, "low_battery")
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 1)
@@ -921,6 +936,15 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertFalse(self.transport.writes)
 
 
+class WholeBodyRepeatTests(unittest.TestCase):
+    def test_late_refresh_waits_instead_of_spinning(self):
+        delay, following = whole_body_repeat_wait(10.0, 9.999)
+        self.assertAlmostEqual(delay, 0.001)
+        self.assertEqual(following, 10.0)
+        delay, following = whole_body_repeat_wait(10.0, 10.004)
+        self.assertEqual((delay, following), (0.002, 10.006))
+
+
 class TransportEncodingTests(unittest.TestCase):
     def test_startup_initializes_clients_without_control_rpcs(self):
         for enabled in (True, False):
@@ -935,8 +959,15 @@ class TransportEncodingTests(unittest.TestCase):
                 }
                 with patch.dict("sys.modules", modules), patch(
                     "robot_safety.unitree_transport.MotorWriterLock"
-                ):
-                    transport = UnitreeArmTransport("fake", 0, Mock(), Mock(), output_enabled=enabled)
+                ), patch("robot_safety.unitree_transport.LatestSdkReader") as reader, patch(
+                    "robot_safety.unitree_transport.LatestSdkPoller"
+                ) as poller:
+                    on_state = Mock()
+                    transport = UnitreeArmTransport("fake", 0, on_state, Mock(), output_enabled=enabled)
+                    self.assertEqual(reader.call_args[0][0], "rt/lowstate")
+                    self.assertIs(poller.call_args[0][1], on_state)
+                    self.assertEqual(poller.call_args[0][2], 0.005)
+                    poller.return_value.start.assert_called_once()
                     self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
                     self.assertIs(transport._audio(), sdk.AudioClient.return_value)
                 if not enabled:
@@ -1018,6 +1049,14 @@ class TransportEncodingTests(unittest.TestCase):
         self.assertTrue(transport.write_body(targets, 5))
         msg = written[-1]
         self.assertEqual((msg.mode_machine, msg.mode_pr, msg.crc), (5, 0, 12345))
+        self.assertTrue(transport.repeat_body(7))
+        repeated = written[-1]
+        self.assertIs(repeated, msg)
+        self.assertEqual((repeated.mode_machine, repeated.mode_pr, repeated.crc), (7, 0, 12345))
+        self.assertEqual(repeated.motor_cmd[4].q, targets[4]["q"])
+        transport.clear_body()
+        self.assertIsNone(transport.repeat_body(7))
+        self.assertIs(written[-1], repeated)
         for i, fields in targets.items():
             self.assertEqual(msg.motor_cmd[i].mode, 1)
             for field, value in fields.items():

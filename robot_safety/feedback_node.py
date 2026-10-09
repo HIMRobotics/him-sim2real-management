@@ -63,9 +63,11 @@ class RobotFeedbackNode(SafetyNode):
         )
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
 
+        from .sdk_latest import LatestSdkReader
+
         ChannelFactoryInitialize(self.sdk_domain, self.sdk_interface)
-        self.sdk_subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
-        self.sdk_subscriber.Init(self.on_sdk_state, self.config.runtime_queue_capacity)
+        # Polled by the publish timer. A callback decodes all 1 kHz samples.
+        self.sdk_subscriber = LatestSdkReader(LOW_STATE_TOPIC, LowState_)
         if self.base_topic:
             from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
 
@@ -140,6 +142,10 @@ class RobotFeedbackNode(SafetyNode):
     def publish_feedback(self):
         if self.abort_reason is not None:
             return
+        if self.sdk_subscriber is not None:
+            message = self.sdk_subscriber.take_latest()
+            if message is not None:
+                self.on_sdk_state(message)
         for _ in range(self.config.runtime_queue_capacity):
             if self.inbox.input_fault.is_set():
                 self.latch_abort("invalid_or_overflowing_sdk_feedback")
@@ -177,7 +183,7 @@ class RobotFeedbackNode(SafetyNode):
 
     def destroy_node(self):
         if self.sdk_subscriber is not None:
-            self.sdk_subscriber.Close()
+            self.sdk_subscriber.close()
         if self.base_subscriber is not None:
             self.base_subscriber.Close()
         return super().destroy_node()

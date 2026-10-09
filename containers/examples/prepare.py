@@ -28,7 +28,7 @@ def run_settings(name):
     """Resolve an example into controller, pose, checks and detector mode."""
     if name in SCENARIOS:
         return SCENARIOS[name]
-    if name in ("stairs", "walker", "balance"):
+    if name in ("stairs", "walker", "balance", "holosoma"):
         return name, "standing", 1, "default"
     raise ValueError("unknown example: " + name)
 
@@ -43,11 +43,18 @@ def copy_file(source, target):
 
 def prepare(name, destination=None, *, container=True):
     """Copy only the files needed by this example, without running Docker."""
-    if name not in ("stairs", "walker", "balance"):
+    if name not in ("stairs", "walker", "balance", "holosoma"):
         raise ValueError("unknown example")
     root = Path(destination or ROOT / ".cache/sim_examples" / name).resolve()
     project = root / "container/project"
-    if name == "balance":
+    if name == "holosoma":
+        from robot_safety.holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
+
+        copy_file(holosoma_weights(), project / "holosoma.onnx")
+        policy = HolosomaLocomotionPolicy(project / "holosoma.onnx")
+        defaults = policy.default_angles.tolist()
+        gains = list(zip(policy.kp.tolist(), policy.kd.tolist()))
+    elif name == "balance":
         model = Path(
             os.environ.get(
                 "HIM_BALANCE_ONNX",
@@ -128,7 +135,7 @@ def prepare(name, destination=None, *, container=True):
     context = root / "container"
     for filename in ("controllers.py", "client.py", "trial.py", "command.py", "Dockerfile", "entrypoint.sh"):
         copy_file(ROOT / "containers/examples" / filename, context / filename)
-    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py"):
+    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py", "holosoma_policy.py"):
         copy_file(ROOT / "robot_safety" / filename, context / "robot_safety" / filename)
     for filename in ("__init__.py", "adapter.py", "config.py"):
         copy_file(
@@ -145,7 +152,7 @@ def prepare(name, destination=None, *, container=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("example", choices=("stairs", "walker", "balance", *SCENARIOS))
+    parser.add_argument("example", choices=("stairs", "walker", "balance", "holosoma", *SCENARIOS))
     parser.add_argument("--assets-only", action="store_true")
     parser.add_argument("--settings", action="store_true", help="Print simulation preset settings.")
     args = parser.parse_args()

@@ -12,7 +12,9 @@ from .hardware_constants import (
 )
 from .joint_checks import joint_profile_entries
 
-HARDWARE_PERIOD_SECS = 0.02  # Matches the tested Unitree arm7 example.
+HARDWARE_PERIOD_SECS = 0.02  # Policy inference and safety check for every whole-body controller.
+BODY_REPEAT_SECS = 0.002  # Shared rt/lowcmd refresh. Networks stay on the 20 ms tick.
+STATE_POLL_SECS = 0.005  # Newest rt/lowstate sample. The robot publishes at 1 kHz.
 HARDWARE_WATCHDOG_POLL_SECS = 0.005
 HARDWARE_FEEDBACK_TIMEOUT_SECS = 0.2
 HARDWARE_BATTERY_TIMEOUT_SECS = 5.0

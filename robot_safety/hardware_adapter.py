@@ -1,6 +1,8 @@
 """Send safety-approved commands to the robot through the Unitree SDK."""
 
 import math
+import os
+import sys
 import time
 from copy import deepcopy
 from dataclasses import replace
@@ -27,6 +29,7 @@ from .hardware_profile import (
     DAMPING_RETRY_SECS,
     HARDWARE_BATTERY_TIMEOUT_SECS,
     HARDWARE_FEEDBACK_TIMEOUT_SECS,
+    BODY_REPEAT_SECS,
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
@@ -45,7 +48,24 @@ from .joint_checks import (
     torque_demand,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
+from .holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
+from .sonic_policy import SonicStandingPolicy
+from .control_trace import ControlTrace, default_trace_path
+from .sdk_latest import poll_deadline
 from .startup_balance import StartupBalance
+
+# Python hands the interpreter to a waiting thread only this often. The
+# default 5 ms turns the 2 ms refresh into about 170 Hz.
+INTERPRETER_SWITCH_SECS = 0.001
+
+
+def whole_body_repeat_wait(next_tick, now, period=BODY_REPEAT_SECS):
+    """Return the sleep and the deadline after this 2 ms refresh.
+
+    A late cycle waits one full period. Spinning holds the interpreter and
+    the low-rate battery topic stops arriving.
+    """
+    return poll_deadline(next_tick, now, period)
 
 
 class G1ArmAdapter:
@@ -75,6 +95,11 @@ class G1ArmAdapter:
         self.transport = None
         self.lock = RLock()
         self.stop_lock = Lock()
+        self.battery_lock = Lock()
+        self.trace = None
+        self._trace_record = None
+        self._policy_q = None
+        self._last_step_secs = None
         self.feedback = None
         self.feedback_tick = None
         self.battery_percent = None
@@ -92,6 +117,15 @@ class G1ArmAdapter:
         self.walk_rpc_code = None
         self.walk_stop = False
         self.balance_policy = None
+        self.startup_policy = None
+        requested = os.environ.get("G1_STARTUP_POLICY", "groot").strip().lower()
+        if requested not in ("groot", "sonic", "holosoma"):
+            print(
+                "Unknown G1_STARTUP_POLICY {0!r}; startup stays on GR00T Balance.".format(requested),
+                flush=True,
+            )
+            requested = "groot"
+        self.startup_policy_name = requested
         self.balance_released = False
         self.quat = (1.0, 0.0, 0.0, 0.0)
         self.gyro = (0.0, 0.0, 0.0)
@@ -181,26 +215,38 @@ class G1ArmAdapter:
                 self.abort("invalid_hardware_feedback")
 
     def receive_battery(self, message):
-        """Copy the separate, lower-frequency BMS reading."""
-        with self.lock:
-            try:
-                charge = float(message.soc)
-                if not math.isfinite(charge) or not 0 <= charge <= 100:
-                    raise ValueError("invalid_battery_feedback")
-                self.battery_percent, self.battery_time = charge, self.clock()
-                if self.armed and charge < MIN_BATTERY_PERCENT:
-                    self.abort("low_battery", request_damping=True)
-            except (AttributeError, TypeError, ValueError):
-                self.abort("invalid_battery_feedback", request_damping=self.armed)
+        """Copy the separate, lower-frequency BMS reading.
+
+        This lock is not the feedback lock. The 500 Hz state callback must
+        not be able to delay a battery sample for the whole timeout.
+        """
+        try:
+            charge = float(message.soc)
+            if not math.isfinite(charge) or not 0 <= charge <= 100:
+                raise ValueError("invalid_battery_feedback")
+        except (AttributeError, TypeError, ValueError):
+            with self.stop_lock:
+                armed = self.armed
+            self.abort("invalid_battery_feedback", request_damping=armed)
+            return
+        with self.stop_lock:
+            armed = self.armed
+        with self.battery_lock:
+            self.battery_percent, self.battery_time = charge, self.clock()
+        if armed and charge < MIN_BATTERY_PERCENT:
+            self.abort("low_battery", request_damping=True)
 
     def check_health(self):
         """Require current health telemetry before enabling or continuing output."""
         if self.whole_body and (self.feedback is None or not self.feedback.quat or not self.feedback.gyro):
             raise ValueError("missing_hardware_imu")
-        if (self.battery_time is None
-                or not 0 <= self.clock() - self.battery_time < HARDWARE_BATTERY_TIMEOUT_SECS):
+        with self.battery_lock:
+            battery_time = self.battery_time
+            battery_percent = self.battery_percent
+        if (battery_time is None
+                or not 0 <= self.clock() - battery_time < HARDWARE_BATTERY_TIMEOUT_SECS):
             raise ValueError("battery_feedback_timeout")
-        if self.battery_percent < MIN_BATTERY_PERCENT:
+        if battery_percent < MIN_BATTERY_PERCENT:
             raise ValueError("low_battery")
         if self.feedback is None or len(self.feedback.temperature) != 29:
             raise ValueError("missing_motor_temperature")
@@ -233,13 +279,24 @@ class G1ArmAdapter:
             if self.abort_reason:
                 return self.reject_arm(f"already stopped: {self.abort_reason}")
             if code != 0:
+                if self.startup_policy_name == "holosoma":
+                    print(
+                        "Holosoma startup: mode query failed "
+                        "(rpc_code={0}). Damp and developer mode are accepted.".format(code),
+                        flush=True,
+                    )
+                    self.time_ready_mode_confirmed_secs = self.clock()
+                    return True
                 return self.reject_arm(
                     f"ready-mode query failed: rpc_code={code}, fsm_id={fsm_id}"
                 )
-            if fsm_id not in self.profile.allowed_start_fsm_ids:
+            allowed = self.profile.allowed_start_fsm_ids
+            if self.startup_policy_name == "holosoma":
+                allowed = allowed + (DAMPING_FSM_ID,)
+            if fsm_id not in allowed:
                 return self.reject_arm(
                     f"ready mode: measured={fsm_id}, "
-                    f"allowed={self.profile.allowed_start_fsm_ids}"
+                    f"allowed={allowed}"
                 )
             self.time_ready_mode_confirmed_secs = self.clock()
             return True
@@ -305,14 +362,16 @@ class G1ArmAdapter:
             if self.whole_body:
                 if not self._ensure_balance_policy():
                     return self.reject_arm("startup_balance_model_unavailable")
+                if not self._ensure_startup_policy():
+                    return self.reject_arm("startup_balance_model_unavailable")
             # Serialize granting control with an abort arriving from another thread.
             with self.stop_lock:
                 if self.abort_reason:
                     return self.reject_arm(f"already stopped: {self.abort_reason}")
                 self._reset_session()
                 if self.whole_body:
-                    self.balance_policy.reset()
-                    self.startup.policy = self.balance_policy
+                    self.startup_policy.reset()
+                    self.startup.policy = self.startup_policy
                 self.last_submission_secs = now
                 self.armed = True
             return True
@@ -355,10 +414,13 @@ class G1ArmAdapter:
                 self.q_applied = None
                 self.arm_hold_q = None
                 self.last_worker_cycle_secs = self.clock()
-            if self.abort_reason is None:
+            first_fault = self.abort_reason is None
+            if first_fault:
                 self.abort_reason = reason
                 self.startup.fail()
             self.command = None
+            if self.transport is not None:
+                self.transport.clear_body()
             if request_damping or (self.whole_body and self.armed
                                    and (self.ownership_taken or self.balance_released)
                                    and not soft_balance):
@@ -366,6 +428,12 @@ class G1ArmAdapter:
                 self.walk_stop = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
                 self.stop_requested.set()
+        if first_fault and self.trace is not None:
+            try:
+                self.trace.emit_abort(reason, self.clock())
+            except Exception as error:  # noqa: BLE001 - logging must not stop the motors
+                print("Control trace failed: {0}".format(error), flush=True)
+                self.trace = None
 
     def submit(self, command, expires_at_secs):
         """Copy gate-approved targets without renewing their original deadline."""
@@ -430,7 +498,12 @@ class G1ArmAdapter:
                 self.joint_diagnostics.record(
                     diagnostic_command, self.feedback
                 )
+                infer_started = self.clock()
                 targets = self.checked_targets(now)
+                if self.trace is not None:
+                    self._trace_record = self._control_snapshot(
+                        now, targets, self.clock() - infer_started
+                    )
                 elapsed = (
                     0
                     if self.first_output_secs is None
@@ -443,6 +516,7 @@ class G1ArmAdapter:
             except Exception as error:  # noqa: BLE001
                 self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
                 return
+        self._emit_trace()
         if self.whole_body and self.armed and self.command is not None and not self.balance_released:
             if self.abort_reason or self.stop_requested.is_set():
                 return
@@ -465,10 +539,10 @@ class G1ArmAdapter:
                     if self.abort_reason or self.stop_requested.is_set():
                         self.abort(self.abort_reason or "hardware_stop_during_release")
                         return
-                    self.balance_policy.reset()
+                    self.startup_policy.reset()
                     with self.stop_lock:
                         if not self.abort_reason and not self.stop_requested.is_set():
-                            self.startup = StartupBalance(self.balance_policy)
+                            self.startup = StartupBalance(self.startup_policy)
             except Exception:  # noqa: BLE001 - An uncertain release requires restoration.
                 self.balance_released = True
                 self.abort("hardware_release_failed")
@@ -509,6 +583,71 @@ class G1ArmAdapter:
                 self.last_output_secs = now
         except Exception as error:  # noqa: BLE001
             self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
+
+    def _emit_trace(self):
+        record = self._trace_record
+        self._trace_record = None
+        if record is None or self.trace is None:
+            return
+        try:
+            self.trace.note_step(record)
+        except Exception as error:  # noqa: BLE001 - logging must not stop the motors
+            print("Control trace failed: {0}".format(error), flush=True)
+            self.trace = None
+
+    def _control_snapshot(self, now, targets, infer_secs):
+        """Numbers from one checked command. Called with the feedback lock held."""
+        measured = self.feedback.q
+        proposed = self._policy_q if self._policy_q is not None else self.command["q"]
+        speeds = self.feedback.dq
+        step_period = None if self._last_step_secs is None else now - self._last_step_secs
+        self._last_step_secs = now
+        gap_joint, gap = None, 0.0
+        rewrite_joint, rewrite = None, 0.0
+        speed_joint, speed = None, 0.0
+        command_delta = 0.0
+        for index, _limits in self._monitored_joints():
+            if index not in targets:
+                continue
+            name = G1_29_JOINT_NAMES[index]
+            written = targets[index]["q"]
+            gap_value = written - measured[index]
+            rewrite_value = written - proposed[index]
+            speed_value = speeds[index]
+            if abs(gap_value) >= abs(gap):
+                gap_joint, gap = name, gap_value
+            if abs(rewrite_value) >= abs(rewrite):
+                rewrite_joint, rewrite = name, rewrite_value
+            if abs(speed_value) >= abs(speed):
+                speed_joint, speed = name, speed_value
+            if self.q_applied is not None and index in self.q_applied:
+                command_delta = max(command_delta, abs(written - self.q_applied[index]))
+        with self.battery_lock:
+            battery_time = self.battery_time
+        gyro = tuple(self.gyro)
+        return {
+            "now": now,
+            "policy": self.startup_policy_name,
+            "phase": self.startup.phase,
+            "since_output_s": (
+                None if self.first_output_secs is None else now - self.first_output_secs
+            ),
+            "sample_age_s": now - self.feedback.received_at_secs,
+            "step_period_s": step_period,
+            "policy_period_s": self.startup.infer_period,
+            "infer_s": infer_secs,
+            "gyro": [round(float(value), 5) for value in gyro],
+            "gyro_abs_max": round(max(abs(float(value)) for value in gyro), 5),
+            "dq_joint": speed_joint,
+            "dq": round(float(speed), 5),
+            "gap_joint": gap_joint,
+            "gap_rad": round(float(gap), 5),
+            "rewrite_joint": rewrite_joint,
+            "rewrite_rad": round(float(rewrite), 5),
+            "command_step_rad": round(float(command_delta), 5),
+            "battery_age_s": None if battery_time is None else now - battery_time,
+            "network": self.startup.entry_goal is None and self.startup.entry_started is not None,
+        }
 
     def joint_diagnostics_snapshot(self):
         """Skip a busy output lock so diagnostics cannot stall ROS stop handling."""
@@ -610,6 +749,7 @@ class G1ArmAdapter:
                 command,
             )
             self.policy_launched = self.startup.handoff is not None
+            self._policy_q = command["q"]
             entries = [(i, replace(v, kp=float(command["kp"][i]), kd=float(command["kd"][i])))
                        for i, v in entries]
         elif self.launch_gate and not self.policy_launched:
@@ -699,6 +839,44 @@ class G1ArmAdapter:
             print(
                 f"balance preparation failed at {MODEL_PATH}: {exc}. "
                 "F3 balancing unavailable until restart.",
+                flush=True,
+            )
+            return False
+        return True
+
+    def _ensure_startup_policy(self):
+        """Load the submit.sh startup controller. Soft reset stays on GR00T Balance."""
+        if self.startup_policy is not None:
+            return True
+        if self.startup_policy_name == "groot":
+            self.startup_policy = self.balance_policy
+            return self.startup_policy is not None
+        if self.startup_policy_name == "holosoma":
+            try:
+                policy = HolosomaLocomotionPolicy(str(holosoma_weights()))
+                policy.warmup()
+                self.startup_policy = policy
+                print(
+                    "Holosoma: easing to the standing crouch over {0:.0f}s, "
+                    "then the standing policy.".format(policy.entry_ramp_seconds),
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    "Holosoma startup preparation failed: {0}. "
+                    "Set HIM_HOLOSOMA_ONNX to fastsac_g1_29dof.onnx.".format(exc),
+                    flush=True,
+                )
+                return False
+            return True
+        try:
+            policy = SonicStandingPolicy()
+            policy.warmup()
+            self.startup_policy = policy
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "SONIC startup preparation failed: {0}. "
+                "Start again with --startup groot.".format(exc),
                 flush=True,
             )
             return False
@@ -796,10 +974,34 @@ class G1ArmAdapter:
     def start_workers(self):
         """Run output deadlines and stop RPC retries independently of ROS callbacks."""
         self._ensure_balance_policy()
+        self._ensure_startup_policy()
+        self.trace = ControlTrace(default_trace_path())
+        self.trace.open()
+        sys.setswitchinterval(INTERPRETER_SWITCH_SECS)
 
         def output_loop():
-            while not self.shutdown_requested.wait(HARDWARE_PERIOD_SECS):
+            # Fixed deadlines like Holosoma's rate limiter. Sleeping a full
+            # period after each step stretches 20 ms by the step time.
+            next_tick = time.monotonic()
+            while True:
+                delay, next_tick = poll_deadline(
+                    next_tick + HARDWARE_PERIOD_SECS, time.monotonic(), HARDWARE_PERIOD_SECS
+                )
+                if self.shutdown_requested.wait(delay):
+                    return
                 self.step()
+
+        def body_repeat_loop():
+            # Every whole-body policy uses this bus: GR00T, SONIC, Holosoma,
+            # and the container policy after left and B. Inference stays in
+            # output_loop at 20 ms. A late cycle waits; it does not spin.
+            next_tick = time.monotonic()
+            while not self.shutdown_requested.is_set():
+                self._repeat_body_once()
+                now = time.monotonic()
+                delay, next_tick = whole_body_repeat_wait(next_tick + BODY_REPEAT_SECS, now)
+                if self.shutdown_requested.wait(delay):
+                    return
 
         def stop_loop():
             last_request_secs = None
@@ -839,8 +1041,33 @@ class G1ArmAdapter:
             Thread(target=output_loop, daemon=True),
             Thread(target=stop_loop, daemon=True),
         ]
+        if self.whole_body:
+            self.workers.append(Thread(target=body_repeat_loop, daemon=True))
+            print(
+                "Whole-body rt/lowcmd refreshes every 2 ms. "
+                "Policy inference stays at 20 ms.",
+                flush=True,
+            )
         for worker in self.workers:
             worker.start()
+
+    def _repeat_body_once(self):
+        """Publish the latched whole-body command, or nothing once it is cleared."""
+        transport = self.transport
+        if transport is None or not self.whole_body:
+            return
+        machine = self.machine_type
+        if machine is None:
+            return
+        try:
+            written = transport.repeat_body(machine)
+        except Exception as error:  # noqa: BLE001
+            self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
+            return
+        if written and self.trace is not None:
+            self.trace.note_repeat(time.monotonic())
+        if written is False:
+            self.abort("hardware_write_failed")
 
     def close(self):
         """Damp on exit only after this process has taken arm ownership."""
@@ -865,6 +1092,8 @@ class G1ArmAdapter:
         self.shutdown_requested.set()
         for worker in self.workers:
             worker.join(timeout=SHUTDOWN_WAIT_SECS)
+        if self.trace is not None:
+            self.trace.close()
         # A timed-out worker may still be using DDS, so do not close beneath it.
         if not any(worker.is_alive() for worker in self.workers):
             self.transport.close()

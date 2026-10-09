@@ -84,7 +84,7 @@ helper defaults, not published universal operating recommendations.
 [Unitree helper source](https://github.com/unitreerobotics/unitree_sdk2/blob/main/include/unitree/robot/g1/common/terminations.hpp).
 
 Hardware also checks casing temperature **85 C**, winding temperature **120 C**,
-and battery charge **at least 20%**. Temperatures come from `LowState` and battery
+and battery charge **at least 10%**. Temperatures come from `LowState` and battery
 charge from `rt/lf/bmsstate`. Missing temperature or battery data prevents arming.
 The lower-frequency BMS stream has a local **5 s** freshness deadline. Motor
 feedback retains its **200 ms** deadline and command publication its **100 ms**

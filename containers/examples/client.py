@@ -154,7 +154,9 @@ def main():
             "example container requires the loopback-only simulator network"
         )
     name = os.environ.get("G1_SIM_EXAMPLE") or (
-        "walker" if os.path.isfile("/example/project/walker.onnx") else "balance"
+        "holosoma" if os.path.isfile("/example/project/holosoma.onnx")
+        else "walker" if os.path.isfile("/example/project/walker.onnx")
+        else "balance"
     )
     policy = ExamplePolicy(name, "/example/project")
     hashes = Path("/example/project/hashes.json")
