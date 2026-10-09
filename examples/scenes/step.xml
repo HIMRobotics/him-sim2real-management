@@ -1,0 +1,12 @@
+<mujoco model="g1_step">
+  <include file="../../packages/policy_safety/src/policy_safety/robots/g1/g1_robot.xml"/>
+  <!-- meshdir is resolved from this file, and must follow the include. -->
+  <compiler meshdir="../../packages/policy_safety/src/policy_safety/robots/g1/third_party/unitree_g1/assets"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <worldbody>
+    <geom name="safety_floor" type="plane" size="0 0 0.05" friction="1.15"/>
+    <!-- 10 cm step, top at z=0.10, centered 1.5 m in front of the spawn. -->
+    <geom name="step" type="box" pos="1.5 0 0.05" size="0.40 0.80 0.05"
+          rgba="0.60 0.32 0.12 1" friction="1.6"/>
+  </worldbody>
+</mujoco>

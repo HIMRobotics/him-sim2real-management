@@ -1,0 +1,9 @@
+<mujoco model="g1_flat">
+  <include file="../../packages/policy_safety/src/policy_safety/robots/g1/g1_robot.xml"/>
+  <!-- meshdir is resolved from this file, and must follow the include. -->
+  <compiler meshdir="../../packages/policy_safety/src/policy_safety/robots/g1/third_party/unitree_g1/assets"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <worldbody>
+    <geom name="safety_floor" type="plane" size="0 0 0.05" friction="1.15"/>
+  </worldbody>
+</mujoco>

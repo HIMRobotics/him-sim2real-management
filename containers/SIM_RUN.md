@@ -189,7 +189,7 @@ Create `containers/upload/environment/scene.xml`:
 </mujoco>
 ```
 
-Then run `./sim.sh --self-test --scene containers/upload/environment/scene.xml`, or drop `--self-test` to run the submitted image.
+Then run `./sim.sh --self-test --scene containers/upload/environment/scene.xml`, or drop `--self-test` to run the submitted image. Ready-made copies of this pattern live in `examples/scenes/` (`flat.xml`, `step.xml`, `obstacle.xml`) and can be passed directly, for example `./sim.sh --example walker --local --scene examples/scenes/step.xml`.
 
 The scene can change terrain, friction, gravity, obstacles, and passive objects. It must retain the G1's 29 named hinge joints and matching affine position actuators, `pelvis`, `floating_base_joint`, the two named pelvis IMU sensors, and a `stand` keyframe. Additional passive joints/free bodies are supported. If adding joints changes the model's position layout, update the `stand` keyframe accordingly. Additional actuators and different robots are not supported by the current command interface.
 

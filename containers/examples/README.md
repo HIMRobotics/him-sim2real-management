@@ -97,7 +97,7 @@ They do not establish that the walker passes submission validation.
 
 ## Use another scene and interpret results
 
-Add `--scene path/to/scene.xml` to any example command to override its prepared scene. It must follow the [G1 scene contract](../SIM_RUN.md#submit-a-mujoco-environment). The stair controller's phases use the original course coordinates, so changing that course may also require adapting the controller. `--counterfactuals` works with either backend and writes per-pose reports and a summary.
+Add `--scene path/to/scene.xml` to any example command to override its prepared scene. Ready-made files are in [examples/scenes](../../examples/scenes/). It must follow the [G1 scene contract](../SIM_RUN.md#submit-a-mujoco-environment). The stair controller's phases use the original course coordinates, so changing that course may also require adapting the controller. `--counterfactuals` works with either backend and writes per-pose reports and a summary.
 
 `report.json` records the safety outcome and independent `motion` measurements. A fall after a safety rejection reflects the subsequent hold or damping response. It is not evidence that the rejected policy continued controlling the robot. For the original stair course, `climbed_stairs` requires foot contact on at least two treads, standing on the top landing, and no fall. `course_success` additionally requires an airborne gap crossing and an upright finish on the finish pad. The stricter gap condition requires no foot contact with any course platform while over the gap.
 

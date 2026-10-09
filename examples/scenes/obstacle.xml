@@ -1,0 +1,12 @@
+<mujoco model="g1_obstacle">
+  <include file="../../packages/policy_safety/src/policy_safety/robots/g1/g1_robot.xml"/>
+  <!-- meshdir is resolved from this file, and must follow the include. -->
+  <compiler meshdir="../../packages/policy_safety/src/policy_safety/robots/g1/third_party/unitree_g1/assets"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <worldbody>
+    <geom name="safety_floor" type="plane" size="0 0 0.05" friction="1.15"/>
+    <!-- Fixed box in the forward path. Center 1.2 m ahead, 0.8 m tall. -->
+    <geom name="obstacle" type="box" pos="1.2 0 0.40" size="0.15 0.30 0.40"
+          rgba="0.75 0.22 0.15 1" friction="1.2"/>
+  </worldbody>
+</mujoco>
