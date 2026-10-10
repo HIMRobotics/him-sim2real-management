@@ -48,18 +48,16 @@ def _render_progress(message):
 
 
 def print_scenario_summary(summary):
-    """Show problems, tracking violations, and overlapping issue counts."""
+    """Show problems and overlapping issue counts."""
     if not summary:
         return
-    headers = [
-        "tracking violations" if key == "warnings" else key for key in SUMMARY_COLUMNS
-    ]
+    headers = SUMMARY_COLUMNS
 
     def line(label, values):
         cells = [
             f"{value:>{max(8, len(header))}}" for value, header in zip(values, headers)
         ]
-        print(f"{label:<18} " + " ".join(cells[:2]) + " | " + " ".join(cells[2:]))
+        print(f"{label:<18} " + cells[0] + " | " + " ".join(cells[1:]))
 
     line("scenario", headers)
     for row in summary:

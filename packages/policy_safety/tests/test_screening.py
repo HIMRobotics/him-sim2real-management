@@ -334,7 +334,7 @@ def test_scenario_summary_counts_overlapping_issues():
             violent_motion=True,
             violations=[
                 {"reason": "joint_torque_limit"},
-                {"reason": "joint_tracking_error_limit"},
+                {"reason": "fall"},
             ],
         ),
         scenario(status="error"),
@@ -345,11 +345,9 @@ def test_scenario_summary_counts_overlapping_issues():
         "scenario": "test",
         "total": 4,
         "problems": 2,
-        "warnings": 1,
         "limits": 1,
-        "misses": 1,
         "flailing": 1,
-        "falls": 0,
+        "falls": 1,
         "other": 0,
         "errors": 1,
         "skipped": 1,
@@ -487,11 +485,10 @@ def test_branch_restores_joint_command_history(setup, tmp_path):
     assert warning["velocity_reason"] == "joint_velocity_clipped"
     assert warning["dq_proposed"] == 38.0
     assert warning["dq_commanded"] == 37.0
-    assert (result["first_violation"] or {}).get("reason") != "joint_target_velocity_limit"
 
 
 @pytest.mark.parametrize("follows_target", [True, False])
-def test_tracking_allows_a_full_interval_to_follow_target(
+def test_response_diagnostics_sample_after_a_full_control_interval(
     setup, tmp_path, monkeypatch, follows_target,
 ):
     from policy_safety import evaluation
@@ -756,3 +753,70 @@ def test_sampling_preserves_coverage_and_baselines():
     suite["max_scenarios"] = 83
     with pytest.raises(ValueError, match="84 baseline scenarios"):
         plan_scenarios(suite)
+
+
+@pytest.mark.parametrize("oscillating", [False, True])
+def test_default_thrash_enforcement(setup, tmp_path, monkeypatch, oscillating):
+    from policy_safety import evaluation
+
+    sim, adapter, profile = setup
+    target = sim.data.qpos[sim.qadr].copy()
+    adapter.decode = lambda raw: target.copy()
+
+    def prescribed_motion(model, data):
+        data.time += sim.physics_dt
+        data.qvel[sim.vadr[:12]] = (
+            6 * np.sin(2 * np.pi * 10 * data.time) if oscillating else 6
+        )
+
+    monkeypatch.setattr(evaluation.mujoco, "mj_step", prescribed_motion)
+    trace_path = tmp_path / "thrash.npz"
+    result, _ = run_scenario(sim, adapter, profile, scenario(seconds=1.6), trace_path)
+    assert result["thrash"]["mode"] == "enforce"
+    if oscillating:
+        assert result["status"] == "violation"
+        assert result["first_violation"]["reason"] == "thrashing_energy"
+        assert result["first_violation"]["weighted_rms"] >= 1.5
+        assert result["first_violation"]["persistence_elapsed_secs"] == 0.5
+        assert result["simulated_seconds"] < 1.6
+        assert evaluation.verdict([result], False) == ("violations", 1)
+        assert evaluation.issue_flags(result) == {"flailing"}
+    else:
+        assert result["status"] == "completed"
+        assert result["thrash"]["event"] is None
+    with np.load(trace_path) as trace:
+        assert json.loads(str(trace["thrash_json"])) == result["thrash"]
+        assert json.loads(str(trace["initial_thrash_state_json"]))["last_time"] is None
+
+
+def test_thrash_history_survives_checkpoint_and_resets(setup, tmp_path, monkeypatch):
+    from policy_safety import evaluation
+
+    sim, adapter, profile = setup
+    target = sim.data.qpos[sim.qadr].copy()
+    adapter.decode = lambda raw: target.copy()
+
+    def prescribed_motion(model, data):
+        data.time += sim.physics_dt
+        data.qvel[sim.vadr[:12]] = 6 * np.sin(2 * np.pi * 10 * data.time)
+
+    monkeypatch.setattr(evaluation.mujoco, "mj_step", prescribed_motion)
+    nominal, snapshots = run_scenario(
+        sim, adapter, profile, scenario(seconds=1.2), tmp_path / "nominal.npz", [20]
+    )
+    checkpoint = snapshots[20]
+    assert checkpoint["thrash_state"]["evidence"] > 0
+    assert checkpoint["thrash_state"]["event"] is None
+    for index in range(2):
+        sim.restore(checkpoint, adapter)
+        branch, _ = run_scenario(
+            sim, adapter, profile, scenario(seconds=0.8), tmp_path / f"branch{index}.npz"
+        )
+        assert branch["first_violation"]["reason"] == "thrashing_energy"
+        assert branch["thrash"]["event"] == nominal["thrash"]["event"]
+        assert branch["simulated_seconds"] < 0.5
+        assert checkpoint["thrash_state"]["event"] is None
+    sim.reset(0)
+    assert sim.thrash_detector.last_time is None
+    assert sim.thrash_detector.evidence == 0
+    assert sim.thrash_detector.event is None

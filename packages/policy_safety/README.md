@@ -5,7 +5,6 @@ preflight evidence for operator review. A result is specific to the model,
 adapter, robot model, controller settings, limits, and scenarios tested. It does
 not certify hardware safety or authorize a robot launch. This guide covers the
 simulation setup, shared movement checks, scenario battery, and report workflow.
-Recorded test results and sample observations are in [VALIDATION.md](VALIDATION.md).
 
 ## Install and run
 
@@ -198,7 +197,7 @@ at runtime.
 
 The joint rules clip out-of-range position proposals and desired joint speeds
 with warnings, and reject feedforward torque or total PD torque demand.
-No initial pose-gap threshold remains. Initial desired speed stays limited to 0.05 rad/s.
+Initial desired speed is limited to 0.05 rad/s.
 
 ### Shared speed checks
 
@@ -213,23 +212,21 @@ maximum tilt. Non-upright counterfactuals omit the upright fall check.
 
 `q_proposed` is the pending absolute position command. `q_measured` is current
 feedback. The bounded proposal is `q_commanded`. Its difference from the measured
-position is diagnostic only, including at startup. There is no command-gap or
-consecutive-command delta rejection. Position clipping, torque and speed bounds
+position is diagnostic only, including at startup. Position clipping, torque and speed bounds
 still apply independently. A large position error can still exceed the PD torque ceiling.
 Simulation retains the submitted policy's gains.
 
 `q_applied` is the accepted position command. After a complete 20 ms interval,
 `response_error = q_measured - q_applied` is recorded as a diagnostic peak, not a
-hard-stop criterion. This replaces the old fixed tracking-error tolerances.
-Legacy report readers still recognize old tracking violations in saved reports.
+hard-stop criterion.
 
 The global shared profile covers all 29 joints. The standalone package links the
-same profile and dependency-free `joint_checks.py`. Remove obsolete custom-profile
-fields, including `max_command_gap_rad`, as explained in the
-[profile guide](../../robot_safety/profiles/README.md).
+same profile and dependency-free `joint_checks.py`. See the
+[profile guide](../../robot_safety/profiles/README.md) for supported limits.
 
-Hardware remains restricted to arm/waist submissions and uses its configured
-controller gains. F3 recovery is a separate stop path. The hardware adapter
+Hardware submissions control all 29 joints using configured profile gains.
+The arm SDK helper controls only waist/arm joints. F3 Holosoma recovery is a
+separate stop path. The hardware adapter
 checks available measured torque, temperatures and the BMS stream. The simulator
 has no battery or thermal model and does not claim to validate those protections.
 
@@ -243,14 +240,14 @@ All required model weights and the robot asset manifest are fingerprinted.
 `joint_movement_checks` records the selected joint-profile values, rules and joint
 coverage. `hashes.joint_profile` identifies its exact contents. Joint-rule
 violations include the joint, observed value, threshold, units and simulation time.
-The table counts problems and tracking violations out of the scenarios in each
-gait, each gait's pushes, and each starting pose. One run counts in every class
-it hits, so the fractions can overlap. A tracking miss counts under both
-`tracking violations` and `misses`. A limit, a flail, a fall, any other violation,
-or an error is a `problem`. `flailing` means a measured joint speed exceeds its
-model limit or any body angular-velocity axis exceeds 6 rad/s, on any sample. Position, speed, torque, and range breaches are `limits`.
-A skipped branch is counted separately. New runs record response errors without creating tracking violations. Historical tracking violations retain their old classification.
-The JSON `scenario_summary` retains the `warnings` key for compatibility.
+The table counts problems out of the scenarios in each gait, each gait's pushes,
+and each starting pose. One run counts in every class it hits, so the fractions
+can overlap. A limit, a flail, a fall, any other violation, or an error is a
+`problem`. `flailing` means a measured joint speed exceeds its model limit or
+any body angular-velocity axis exceeds 6 rad/s, on any sample. Position, speed,
+torque, and range breaches are `limits`. A skipped branch is counted separately.
+Clipping warnings remain in each scenario's `warnings` map. Response errors
+remain diagnostic peaks and do not contribute to the problem counts.
 
 Videos are separate from the screening report. `render` replays the same
 checker for the names you list and writes one H.264 `.mp4` plus a
@@ -320,7 +317,7 @@ before and after each scenario. Set `--timeout 7200` for a two-hour wall-time li
 if needed. The full suite may exceed the default 30-minute limit on slower devices.
 
 A **violation** means the policy produced an invalid output or a tested trajectory
-crossed an enforced limit, including decoded target range, measured joint range,
+crossed an enforced limit, including torque demand, measured joint range,
 or upright fall criteria. A configured metric maximum is also enforced. An
 **error** means evaluation could not run reliably, such as an inference exception,
 invalid starting pose, or simulator numerical warning/nonfinite state. Worker
@@ -342,8 +339,7 @@ tests for each seed, so they may not yet be represented in intermediate counts.
 The repository wrapper makes the report and exit code available to deployment
 tooling and operator review. Existing watchdogs continue checking live feedback
 and commands. This utility does not publish ROS/SDK messages, arm or stop a robot,
-or change watchdog services. Preflight results do not expand the hardware adapter's
-arm/waist command scope.
+or change watchdog services.
 
 The worker boundary and timeout contain ordinary evaluation failures. They are
 not an operating-system security sandbox or memory limit for hostile models.
@@ -356,6 +352,6 @@ python -m pip install pytest
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest packages/policy_safety/tests -q
 ```
 
-Integration tests use the sample submission when available. They exercise the
+Integration tests use the committed policy bundles. They exercise the
 neural contract, checkpoint replay, impulse duration, initialization, failures,
 metrics, and CLI reporting. The real sample is not assumed to pass screening.

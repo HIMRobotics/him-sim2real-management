@@ -6,6 +6,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from thrash import ThrashConfig, ThrashDetector
 
 from .config import positive, read_json, vector
 
@@ -147,6 +148,9 @@ class Simulation:
         self.state_spec = mujoco.mjtState.mjSTATE_INTEGRATION
         self.rng = np.random.default_rng(0)
         self.command_history = None
+        self.thrash_detector = ThrashDetector(
+            ThrashConfig(mode="enforce"), len(self.vadr), max_gap_secs=0.2
+        )
 
     def set_torque_scale(self, scale):
         """Deliver this fraction of the intended position-controller torque."""
@@ -159,6 +163,7 @@ class Simulation:
         self.model.actuator_biasprm[self.actuators, 2] = -kd
 
     def reset(self, seed, pose="standing"):
+        self.thrash_detector.reset()
         self.command_history = None
         mujoco.mj_resetData(self.model, self.data)
         self.rng = np.random.default_rng(seed)
@@ -209,6 +214,7 @@ class Simulation:
             "command": np.array(command),
             "rng": copy.deepcopy(self.rng.bit_generator.state),
             "command_history": copy.deepcopy(self.command_history),
+            "thrash_state": self.thrash_detector.save_state(),
         }
 
     def restore(self, snapshot, adapter):
@@ -216,6 +222,7 @@ class Simulation:
         adapter.restore(snapshot["policy"])
         self.rng.bit_generator.state = copy.deepcopy(snapshot["rng"])
         self.command_history = copy.deepcopy(snapshot["command_history"])
+        self.thrash_detector.restore_state(snapshot["thrash_state"])
         mujoco.mj_forward(self.model, self.data)
         return snapshot["command"].copy()
 

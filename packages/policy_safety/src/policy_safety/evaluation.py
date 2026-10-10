@@ -2,12 +2,14 @@
 
 import json
 import platform
+from dataclasses import asdict
 from pathlib import Path
 
 import joint_checks
 import mujoco
 import numpy as np
 import onnxruntime
+import thrash
 from joint_checks import (
     BASE_ANGULAR_SPEED_LIMIT_RAD_S,
     JointViolation,
@@ -45,13 +47,6 @@ def verdict(scenarios, calibrated):
     return ("within_limits", 0) if calibrated else ("uncalibrated", 3)
 
 
-# Other limit reasons already end with _limit.
-LIMIT_REASONS = {
-    "nonzero_feedforward_torque",
-    "decoded_target_out_of_range",
-}
-
-
 def scenario_label(scenario):
     """Group a run with its gait, shove strength, torque scale, or pose."""
     name = scenario["name"]
@@ -67,7 +62,7 @@ def scenario_label(scenario):
 
 
 def issue_flags(scenario):
-    """Every class this run hit. A limit and a miss can both be present."""
+    """Every issue class this run hit."""
     status = scenario["status"]
     if status == "incomplete":
         return {"skipped"}
@@ -79,11 +74,11 @@ def issue_flags(scenario):
     recorded = scenario.get("violations") or [scenario.get("first_violation") or {}]
     for entry in recorded:
         reason = entry.get("reason", "")
-        if reason == "joint_tracking_error_limit":
-            flags.add("misses")
+        if reason == "thrashing_energy":
+            flags.add("flailing")
         elif reason == "fall":
             flags.add("falls")
-        elif reason in LIMIT_REASONS or reason.endswith("_limit"):
+        elif reason.endswith("_limit"):
             flags.add("limits")
         elif reason:
             flags.add("other")
@@ -108,8 +103,7 @@ def summarize_scenarios(scenarios):
         flags = issue_flags(scenario)
         for kind in flags:
             bucket[kind] += 1
-        bucket["problems"] += bool(flags - {"misses", "skipped"})
-        bucket["warnings"] += "misses" in flags
+        bucket["problems"] += bool(flags - {"skipped"})
     return [{"scenario": label, **counts} for label, counts in buckets.items()]
 
 
@@ -315,9 +309,12 @@ def run_scenario(
                 )
                 if reason in ("nonfinite_simulation", "simulator_warning"):
                     raise RuntimeError(reason)
+                measured_dq = sim.data.qvel[sim.vadr]
+                thrash_reason = sim.thrash_detector.observe(measured_dq, float(sim.data.time))
+                if thrash_reason:
+                    screen(raise_violation, thrash_reason, sim.thrash_detector.event)
                 if reason:
                     screen(raise_violation, reason)
-                measured_dq = sim.data.qvel[sim.vadr]
                 if np.any(np.abs(measured_dq) > speed_caps) or np.any(
                     np.abs(sim.data.qvel[3:6]) > BASE_ANGULAR_SPEED_LIMIT_RAD_S
                 ):
@@ -337,7 +334,8 @@ def run_scenario(
     finally:
         sim.data.xfrc_applied[:] = 0
         sim.set_torque_scale(1.0)
-    result["violent_motion"] = sustained_flail
+    result["thrash"] = sim.thrash_detector.snapshot()
+    result["violent_motion"] = sustained_flail or sim.thrash_detector.event is not None
     result["peaks"] = monitor.peaks
     result["simulated_seconds"] = max(0.0, float(sim.data.time - start))
     displacement = sim.data.qpos[:3] - start_position
@@ -384,6 +382,8 @@ def run_scenario(
         last_raw_output=getattr(adapter, "last_raw", np.empty(0)),
         command=initial["command"],
         initial_rng_json=json.dumps(initial["rng"]),
+        initial_thrash_state_json=json.dumps(initial["thrash_state"]),
+        thrash_json=json.dumps(result["thrash"]),
         state_spec=int(sim.state_spec),
         metric_names=np.array(list(monitor.peaks) if not rows else list(metrics)),
     )
@@ -438,7 +438,7 @@ def evaluate(request):
                 }
             )
     package_files = sorted(Path(__file__).parent.glob("*.py"))
-    package_files.append(Path(joint_checks.__file__))
+    package_files.extend([Path(joint_checks.__file__), Path(thrash.__file__)])
     provenance = {
         "model": {
             str(p.relative_to(Path(request["model"]).resolve().parent)): digest(p)
@@ -462,6 +462,7 @@ def evaluate(request):
         "clip_to_stops": True,
         "profile": profile,
         "joint_movement_checks": joint_rules.coverage(),
+        "thrash_checks": asdict(sim.thrash_detector.config),
         "acceptance_checks": {
             "calibrated": profile["calibrated"],
             "metric_threshold_scope": "Global scalar limits. Per-joint physical limits and startup checks are listed in joint_movement_checks.",
@@ -471,6 +472,7 @@ def evaluate(request):
             ),
             "always_checked": [
                 "finite_policy_output",
+                "thrashing_energy",
                 "position_clipping_with_warning",
                 "joint_position_range",
                 "model_torque_range",

@@ -670,7 +670,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(ranges["command_gap_rad"]["max_abs"], 0.6)
         self.assertEqual(ranges["response_error_rad"]["samples"], 0)
 
-    def test_tracking_waits_for_feedback_after_a_successful_full_weight_write(self):
+    def test_response_diagnostics_wait_for_feedback_after_a_successful_full_weight_write(self):
         self.adapter.profile = replace(self.adapter.profile, handover_secs=0.005)
         self.run_first()
         self.assertIsNone(self.adapter.q_applied)
@@ -699,7 +699,7 @@ class HardwareAdapterTests(unittest.TestCase):
             ["response_error_rad"]["max_abs"], 0.0005,
         )
 
-    def test_failed_writes_and_uncontrolled_legs_do_not_create_tracking_targets(self):
+    def test_failed_writes_and_uncontrolled_legs_do_not_create_response_targets(self):
         self.adapter.profile = replace(self.adapter.profile, handover_secs=0.005)
         self.run_first()
         self.now += 0.01

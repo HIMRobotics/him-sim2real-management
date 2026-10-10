@@ -129,20 +129,18 @@ separate `checks.thrash_monitoring` / `checks.thrash_enforcement` flags. The
 finished-run viewer shows the mode and any detection. Other checks passing
 does not mean a monitored thrash warning was absent.
 
-New traces and live views show whole-body weighted oscillation RMS, its limit,
+Traces and live views show whole-body weighted oscillation RMS, its limit,
 and the continuous time above that limit. Per-joint rows show oscillatory RMS,
 motion RMS, weight, and percentage of the total weighted energy. Hips, knees
 and waist weigh 4, shoulders 3, ankles 2, elbows 1, and wrists 0.25. The shared
 score is `sqrt(sum(weight * oscillatory_RMS²) / sum(weight))`, with a provisional
-limit of 1.5 for 500 ms. CV and the former local/distributed/severe rules no
-longer stop motion. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
+limit of 1.5 for 500 ms. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
 for details. These are motion-risk weights, not measured joint inertias.
 
 Space pauses and arrow keys step both motion and readings. **Go to start / Home**
 jumps to the first frame and pauses. **Restart replay / R** plays from the
-beginning, preserving the camera and without rerunning the simulation. Old traces preserve
-their original detections and are labeled as legacy recordings. Start a new run
-to see the new score. Detection defaults remain provisional, without automatic
+beginning, preserving the camera and without rerunning the simulation.
+Detection defaults remain provisional, without automatic
 threshold adaptation or task exemptions.
 
 ## Stop reasons in the viewer
@@ -186,7 +184,7 @@ With safety checks enabled, `containers/sim/runner.py` checks:
 
 `hardware_authorization` in the report is always false. A passing sim run is not permission to run on the robot.
 
-With `--no-safety-checks`, the sim bypasses observation age, action timeout, numeric sanity bounds, joint position/tracking/rate/torque limits, feedforward-torque restrictions, overspeed, and falls. It keeps applying the last command until another arrives. MuJoCo's own physical joint and actuator limits remain part of the model. The ROS protocol still requires a matching session, increasing sequence, and an observation ID issued by the sim. Every command array must contain 29 finite numbers. Malformed commands and non-finite simulation state still terminate acceptance and report `error`.
+With `--no-safety-checks`, the sim bypasses freshness deadlines, numeric range checks, desired-speed clipping, torque-budget projection, measured joint-limit warnings, body-spin checks, and falls. Output positions are still clipped to joint bounds, and MuJoCo's physical joint and actuator limits remain part of the model. Thrash detection is configured separately. The last command remains active until another arrives. The ROS protocol still requires a matching session, increasing sequence, and an observation ID issued by the sim. Every command array must contain 29 finite numbers. Malformed commands and non-finite simulation state still terminate acceptance and report `error`.
 
 Unchecked runs and direct circle runs report `completed`, never `within_limits`. Reports and counterfactual summaries include `safety_checks` and the selected `scene` path (`null` means the bundled scene). `--safety-checks` explicitly re-enables checking. If both flags are supplied, the last one wins.
 
@@ -254,7 +252,7 @@ Other flags:
 | `--battery` | Flat floor, all six poses, then a 10 N, 50 N, and 150 N pelvis push on each. Writes `containers/sim/output/battery/report.json`. |
 | `--push none\|small\|medium\|heavy` | Run that one battery case. Add `--pose` to pick the start. Add `--view`, press Start, and watch it. |
 | `--battery --circle` | Same pushes while the cached walker circles. Standing only. A gait step is applied directly, and the fall check stays on. |
-| `--circle` | Cached walker, velocity file `circle.yaml`. No container. Report `policy` is `circle`. The fall check stays on. The submission tracking window is not applied, because a gait step does not fit it. |
+| `--circle` | Cached walker, velocity file `circle.yaml`. No container. Report `policy` is `circle`. Uses direct policy commands, with the fall check on and active checks listed in the report. |
 | `--command FILE` | Same runner, with that velocity file. No container. Report `policy` is the file name without `.yaml`. `forward_stop.yaml` walks at 0.5 m/s for 2 s, then steps down 0.1 m/s each second to zero. Yaw is zero, and the final zero velocity selects NVIDIA Balance. Use `--seconds 7` to see the stop. |
 | `--view` | Open the page first. Press Start to run, then the recording plays from the first frame. |
 | `replay` | Serve the last recording. Does not start a new run. |

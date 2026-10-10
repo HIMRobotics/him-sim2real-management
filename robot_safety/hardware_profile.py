@@ -43,8 +43,6 @@ class HardwareProfile:
     def load(cls, path):
         """Require all 29 entries using the SDK joint names."""
         data = json.loads(Path(path).read_text())
-        # Accept old profiles without reintroducing their removed pose-gap check.
-        data.pop("initial_position_tolerance_rad", None)
         modes = data["allowed_start_fsm_ids"]
         if not modes or any(
             type(mode) is not int or mode <= DAMPING_FSM_ID for mode in modes

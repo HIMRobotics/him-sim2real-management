@@ -119,7 +119,7 @@ function showThrash(index) {
   const thresholds = document.getElementById("thrash-thresholds");
   const event = document.getElementById("thrash-event");
   const metrics = sample?.metrics || {};
-  const available = sample?.mode !== "off" && metrics.oscillatory_rms?.length;
+  const available = sample?.mode !== "off" && metrics.weighted_rms != null;
   thrashRows.forEach(row => { row.hidden = !available; });
   peak.textContent = "";
   thresholds.textContent = "";
@@ -132,25 +132,19 @@ function showThrash(index) {
     if (!sample) event.textContent = "";
     return;
   }
-  const contribution = metrics.energy_share || metrics.oscillatory_rms;
+  const contribution = metrics.energy_share;
   const order = contribution.map((_, i) => i).sort((a, b) => contribution[b] - contribution[a]);
-  const top = metrics.oscillatory_rms.indexOf(Math.max(...metrics.oscillatory_rms));
-  peak.textContent = metrics.weighted_rms == null
-    ? `Legacy recording · peak oscillation ${metrics.oscillatory_rms[top].toFixed(3)}`
-    : `Whole-body oscillation: ${metrics.weighted_rms.toFixed(3)} / ${metrics.weighted_rms_limit.toFixed(2)} · ${(1000 * metrics.persistence_elapsed_secs).toFixed(0)} ms`;
+  peak.textContent = `Whole-body oscillation: ${metrics.weighted_rms.toFixed(3)} / ${metrics.weighted_rms_limit.toFixed(2)} · ${(1000 * metrics.persistence_elapsed_secs).toFixed(0)} ms`;
   order.forEach((joint, slot) => {
     const row = thrashRows[slot];
     const values = [motion.joint_names[joint].replaceAll("_", " "),
       metrics.oscillatory_rms[joint].toFixed(3), metrics.activity_rms[joint].toFixed(3),
-      metrics.joint_weights?.[joint]?.toFixed(2) ?? "—",
-      metrics.energy_share ? `${(100 * metrics.energy_share[joint]).toFixed(1)}%` : "—"];
+      metrics.joint_weights[joint].toFixed(2), `${(100 * metrics.energy_share[joint]).toFixed(1)}%`];
     values.forEach((value, column) => { row.cells[column].textContent = value; });
     row.classList.toggle("flagged", metrics.joint_indices.includes(joint));
   });
   const t = sample.thresholds;
-  if (t) thresholds.textContent = t.weighted_rms_limit == null
-    ? "Legacy detector thresholds. Replay preserves its original detections."
-    : `Stop threshold: whole-body RMS ≥ ${t.weighted_rms_limit.toFixed(2)} for ${1000 * t.persistence_secs} ms continuously. Timer resets below threshold. No CV or separate joint stop rules.`;
+  if (t) thresholds.textContent = `Stop threshold: whole-body RMS ≥ ${t.weighted_rms_limit.toFixed(2)} for ${1000 * t.persistence_secs} ms continuously. Timer resets below threshold.`;
   if (sample.control_path === "direct") thresholds.textContent += " Direct command: submission-command checks bypassed.";
 }
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -541,7 +535,6 @@ def describe_stop(stop):
     reason = stop["reason"]
     labels = {
         "joint_velocity_limit": "Measured joint velocity (q dot) exceeded limit",
-        "joint_target_velocity_limit": "Target joint velocity exceeded limit",
         "initial_joint_target_velocity_limit": "Initial target velocity exceeded limit",
         "joint_torque_limit": "Torque demand or measured torque exceeded limit",
         "joint_feedforward_torque_limit": "Feedforward torque exceeded limit",
@@ -550,10 +543,6 @@ def describe_stop(stop):
         "nonfinite_simulation": "Simulation produced non-finite state",
         "invalid_command": "Malformed command or command sanity bound exceeded",
         "thrashing_energy": "Sustained whole-body oscillation detected",
-        # Historical recordings retain their original reason labels.
-        "thrashing_local": "Thrashing detected within one body region",
-        "thrashing_distributed": "Thrashing detected across body regions",
-        "thrashing_severe": "Severe joint thrashing detected",
     }
     when = stop.get("time_secs")
     lines = ["Policy stopped" + (f" at {when:.3f} s" if when is not None else ""),
@@ -582,7 +571,7 @@ def describe_stop(stop):
         for key in ("field", "detail", "torque_kind", "rejection", "bounds"):
             if key in detail:
                 lines.append(f"{key.replace('_', ' ').capitalize()}: {detail[key]}")
-        if reason.startswith("thrashing_"):
+        if reason == "thrashing_energy":
             if "weighted_rms" in detail:
                 lines.append(f"Whole-body RMS: {detail['weighted_rms']:.3f} / "
                              f"{detail['weighted_rms_limit']:.3f}, sustained "
@@ -590,9 +579,7 @@ def describe_stop(stop):
             for index in indices:
                 values = []
                 for key, label in (("oscillatory_rms", "osc RMS"), ("activity_rms", "motion RMS"),
-                                   ("joint_weights", "weight"), ("energy_share", "energy fraction"),
-                                   ("irregularity_cv", "CV"), ("evidence_secs", "normal evidence s"),
-                                   ("severe_evidence_secs", "severe evidence s")):
+                                   ("joint_weights", "weight"), ("energy_share", "energy fraction")):
                     samples = detail.get(key, [])
                     if type(index) is int and 0 <= index < len(samples):
                         values.append(f"{label}={samples[index]:.3f}")

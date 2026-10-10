@@ -110,8 +110,11 @@ class RunnerTest(unittest.TestCase):
              ("left_wrist_pitch", "6", "5", "Nm", "PD demand")),
             ("base_angular_speed_limit", {"joint": "0", "value": 6.16, "limit": 6, "units": "rad/s"},
              ("Base axis: x", "6.16", "6")),
-            ("thrashing_local", {"joint_indices": [9, 10], "oscillatory_rms": [2.0] * 29},
-             ("right_knee", "right_ankle_pitch", "osc RMS=2.000")),
+            ("thrashing_energy", {"joint_indices": [9, 10], "oscillatory_rms": [2.0] * 29,
+                                  "weighted_rms": 1.6, "weighted_rms_limit": 1.5,
+                                  "persistence_elapsed_secs": 0.5},
+             ("right_knee", "right_ankle_pitch", "osc RMS=2.000",
+              "Whole-body RMS: 1.600 / 1.500", "500 ms")),
             ("action_timeout", None, ("action_timeout",)),
             ("invalid_action", {"field": "q", "joint_index": 20, "value": 11,
                                 "bounds": [-10, 10], "rejection": "invalid_command"},
@@ -381,7 +384,7 @@ class RunnerTest(unittest.TestCase):
             runner.step(0.04)
         np.testing.assert_array_equal(runner.plant.model.actuator_gainprm[runner.plant.actuators, 0], 0)
 
-    def test_tracking_uses_response_after_a_complete_control_interval(self):
+    def test_response_diagnostics_sample_after_a_complete_control_interval(self):
         for follows_target in (True, False):
             with self.subTest(follows_target=follows_target):
                 runner = Runner()

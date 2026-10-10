@@ -232,10 +232,6 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q tes
   --ignore=tests/ros2 --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
 ```
 
-## Next review checkpoint
-
-The feedback adapter, manual policies, per-joint profile and opt-in hardware gate are implemented. A systemd-managed hardware watchdog is available below. Coordinated reset, publisher access isolation and frontend integration remain pending. Physical stop acceptance is unresolved after the reported joint shutdown. See [ESTOP_PLAN.md](../ESTOP_PLAN.md) for next-session work.
-
 ---
 
 # Controller stop detection (dry-run)
@@ -373,4 +369,3 @@ See [HARDWARE_ADAPTER.md](HARDWARE_ADAPTER.md) for the implemented arm SDK adapt
 required profile and whole-body damping request path. Dry-run launch behavior is
 unchanged. The operator has exercised the small elbow test and reported a joint
 shutdown during a T-pose stop. Stop behavior is not accepted for deployment.
-See [the next-session plan](../ESTOP_PLAN.md#next-session--september-25-custom-e-stop-damping).

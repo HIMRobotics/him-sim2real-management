@@ -44,12 +44,6 @@ All positions are absolute joint angles in radians. At 50 Hz, an interval lasts
 - `command_gap = q_commanded - q_measured`: diagnostic only, including at startup.
 - `response_error = q_measured - q_applied`: measured after execution, diagnostic only.
 
-There is no startup or runtime command-gap, consecutive-command delta or desired-velocity-
-change rejection. Custom profiles must remove the obsolete `max_command_gap_rad`,
-`max_position_target_rate_rad_secs`, `max_acceleration_rad_secs2` and
-`max_tracking_error_rad` fields. The removed `initial_position_tolerance_rad` field
-is accepted and ignored when loading legacy hardware profiles.
-
 `max_velocity_rad_secs` caps the desired velocity field. A proposal past that
 cap is clipped and recorded as a warning, on the same path as position clipping.
 Measured velocity still rejects immediately, with no 50 ms persistence delay.
@@ -115,6 +109,3 @@ not an exact 20 ms actuator response interval.
 and `measured_velocity_rad_secs` extrema. Rejected proposals contribute command
 gaps but never become applied commands. The existing F3 balance/stop controller
 is a separate recovery path, not a screened submission.
-
-No robot service was restarted when updating these profiles. Applying them to a
-physical robot still requires the existing explicit hardware launch procedure.

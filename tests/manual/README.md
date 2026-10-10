@@ -157,10 +157,11 @@ ros2 topic echo /safety/hardware_status std_msgs/msg/String
 ros2 topic echo /safety/joint_diagnostics std_msgs/msg/String
 ```
 
-Joint diagnostics report tracking error, target step and measured velocity for
-the 17 controlled joints, including rejected proposals. They reset on process
-rearm and are not proof of executed motion. The gate logs final extrema on
-abort, which places them in the service journal for the procedure above.
+Joint diagnostics report command gaps and measured velocities for all 29 joints,
+including rejected proposals. Response errors use newer feedback after successful
+full-weight writes for the controlled joints. These are diagnostics, not stop
+conditions. They reset on process rearm and are not proof of executed motion.
+The gate logs final extrema on abort in the service journal.
 
 Use `./tests/manual/run_unitree_arm_test.sh --small-step --hardware` for the
 elbow test through the same service, followed by `--start` in another terminal.

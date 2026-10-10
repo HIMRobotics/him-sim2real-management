@@ -289,8 +289,9 @@ exclusivity is an operational prerequisite, not enforced by ROS topic names.
 `/safety/hardware_status` reports output enablement, arm authorization, abort reason,
 damping RPC result, observed FSM and arm-release write result. A reported damping
 FSM or successful write is not physical confirmation. `armed` records the granted
-session, and does not clear the abort latch. After abort, restart is required and
-fresh commands cannot clear it.
+session, and does not clear the abort latch. Fresh commands cannot clear it.
+Follow the [manual recovery procedure](../tests/manual/README.md#recovery-between-trials)
+before starting another arm test.
 
 Orderly shutdown attempts damping for up to one second before worker shutdown.
 It is best effort. SIGKILL, power loss, a frozen interpreter, hung SDK calls or a
@@ -300,9 +301,8 @@ validation before relying on this path. DDS delivery does not prove fresh radio
 input or actual motor execution. No end-to-end 200 ms actuator guarantee exists.
 
 The operator reported a successful small elbow test and a jerky T-pose stop
-that shut down a joint. Physical stop acceptance remains unresolved. Stronger
-custom damping and its transition are next-session design work in
-[ESTOP_PLAN.md](../ESTOP_PLAN.md). Current stops still use stock FSM 1.
+that shut down a joint. Physical stop acceptance remains unresolved. Damping
+requests use stock FSM 1.
 
 References:
 

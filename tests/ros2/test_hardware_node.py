@@ -28,7 +28,7 @@ from tests.test_robot_safety_hardware import FakeTransport, load_profile, profil
 
 
 class HardwareNodeTests(unittest.TestCase):
-    def test_diagnostics_distinguish_proposed_offsets_from_tracking(self):
+    def test_diagnostics_distinguish_proposed_offsets_from_measured_response(self):
         import json
 
         from robot_safety.joint_diagnostics import JointDeltaDiagnostics
