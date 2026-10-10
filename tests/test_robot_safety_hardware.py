@@ -47,7 +47,6 @@ def load_profile(data):
 class FakeTransport:
     def __init__(self):
         self.writes = []
-        self.lowcmds = []
         self.body_commands = []
         self.stop_calls = 0
         self.release_calls = 0
@@ -80,10 +79,6 @@ class FakeTransport:
     def restore_motion(self):
         self.restore_calls += 1
         return 0
-
-    def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
-        self.lowcmds.append((list(lower_q), list(arm_q), machine))
-        return True
 
     def write_body(self, targets, machine):
         self.body_commands.append((targets, machine))
@@ -236,19 +231,6 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.step()
         self.assertEqual(self.transport.release_calls, 0)
         self.assertIsNotNone(self.adapter.abort_reason)
-
-    def test_startup_and_runtime_pose_gaps_do_not_reject_any_joint(self):
-        legacy = profile_data()
-        legacy["initial_position_tolerance_rad"] = 0.0001
-        self.adapter.profile = load_profile(legacy)
-        self.assertFalse(hasattr(self.adapter.profile, "initial_position_tolerance_rad"))
-        self.command["q"] = [0.8] * 29
-        self.adapter.command = self.command
-        for last_output in (None, 10.0):
-            self.adapter.last_output_secs = last_output
-            targets = self.adapter.checked_targets(10.0)
-            self.assertEqual(set(targets), set(UPPER_BODY_INDICES))
-            self.assertTrue(all(target["q"] == 0.8 for target in targets.values()))
 
     def setUp(self):
         self.now = 10.0
@@ -637,22 +619,6 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_start")
         self.assertTrue(self.adapter.stop_requested.is_set())
 
-    def test_first_target_jump_is_not_a_stop(self):
-        self.command["q"][16] = 0.05
-        self.run_first()
-        self.assertIsNone(self.adapter.abort_reason)
-        self.assertTrue(self.transport.writes)
-
-    def test_leg_command_gap_does_not_reject(self):
-        self.run_first()
-        self.now += 0.005
-        self.command["q"][3] = 0.6
-        self.adapter.submit(self.command, self.now + 0.1)
-        self.adapter.step()
-        self.assertIsNone(self.adapter.abort_reason)
-        self.assertEqual(len(self.transport.writes), 2)
-        self.assertNotIn(3, self.transport.writes[-1][0])
-
     def test_leg_velocity_above_the_cap_is_clipped_and_warned(self):
         self.run_first()
         self.now += 0.005
@@ -686,10 +652,15 @@ class HardwareAdapterTests(unittest.TestCase):
             self.adapter.position_warnings["left_shoulder_roll"]["dq_commanded"], 0.1
         )
 
-    def test_command_gap_remains_diagnostic_without_rejection(self):
+    def test_initial_and_runtime_pose_gaps_remain_diagnostic(self):
+        self.command["q"][16] = 0.05
+        self.command["q"][3] = 0.6
         self.run_first()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(set(self.transport.writes[-1][0]), set(UPPER_BODY_INDICES))
         self.now += 0.005
         self.command["q"][16] = 0.6
+        self.command["q"][3] = -0.6
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         self.assertIsNone(self.adapter.abort_reason)
@@ -1037,7 +1008,7 @@ class TransportEncodingTests(unittest.TestCase):
                 )
                 self.assertEqual(len(transport.readiness_query_results), expected_calls)
 
-    def test_arm_body_and_balance_commands_use_sdk_slots_and_crc(self):
+    def test_arm_and_body_commands_use_sdk_slots_and_crc(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
         transport.output_enabled = True
         transport.write_lock = Lock()
@@ -1087,11 +1058,6 @@ class TransportEncodingTests(unittest.TestCase):
                 self.assertEqual(getattr(msg.motor_cmd[i], field), value)
         with self.assertRaises(ValueError):
             transport.write_body({0: targets[0]}, 5)
-        transport.write_lower_body([0.1] * 15, [0.2] * 14, [3.] * 15, [2.] * 15, 5)
-        for i, motor in enumerate(written[-1].motor_cmd[:29]):
-            self.assertEqual((motor.q, motor.kp, motor.kd),
-                             (0.1, 3., 2.) if i < 15 else (0.2, 40., 1.))
-            self.assertEqual((motor.dq, motor.tau), (0., 0.))
 
     def test_writer_lock_excludes_and_releases(self):
         from robot_safety.unitree_transport import MotorWriterLock

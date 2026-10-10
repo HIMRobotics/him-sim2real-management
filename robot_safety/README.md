@@ -109,7 +109,7 @@ module or simulation-specific set of thresholds is introduced.
 - `MotorGateNode`: separate process with an independent 5 ms target timer. It watches postcheck freshness and immutable expiry, rejects replayed sequences and wrong sessions, and selects fake damping on abort or timeout. A frozen checker cannot refresh its deadlines.
 - `ControllerStopNode`: observes physical Start, detects a double press and publishes abort directly to both nodes. It also aborts on stale feedback. Fresh DDS data does not prove a live radio link.
 
-The core remains the ROS-independent checker logic. `motor_gate.py` contains the independently testable final-gate logic. The earlier `runtime.py` is retained as an in-process test/reference implementation, not the scheduler used by these ROS nodes. ROS executors run callbacks and timers. Run roles as separate OS processes in deployment to avoid a checker freeze freezing the gate too.
+The core remains the ROS-independent checker logic. `motor_gate.py` contains the independently testable final-gate logic. ROS executors run callbacks and timers. Run roles as separate OS processes in deployment to avoid a checker freeze freezing the gate too.
 
 ## Thrash detection in the existing checker
 
@@ -228,7 +228,8 @@ is reserved for the manual test launcher, including physical output.
 The tests verify typed postcheck delivery, invalid-command abort delivery and independent gate damping when the checker stops executing. Ordinary safety tests do not require ROS:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q tests \
+  --ignore=tests/ros2 --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
 ```
 
 ## Next review checkpoint
@@ -272,7 +273,8 @@ No fresh state produces a warning and resets the gesture. Backlogged or invalid 
 ## Offline validation
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q tests \
+  --ignore=tests/ros2 --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
 ```
 
 ## Troubleshooting missing double presses
@@ -284,12 +286,6 @@ If transitions appear but no stop event, check that two rising edges occur withi
 ## Recorded operator validation
 
 On September 22, 2026, the operator confirmed successful detection using the actual G1 controller. The supplied debug trace showed Start as `0400`, two double-press events with approximately 160 ms between presses, and rejection of an interval of approximately 1.06 seconds. Displayed telemetry gaps were around 1 ms. Firmware version, interface and selected topic were not recorded in the supplied trace. This validates controller-input decoding and gesture detection only, not motor damping or stop priority over a policy.
-
-## Offline runtime reference
-
-`runtime.py` is the earlier in-process implementation, retained for deterministic
-queue and scheduling tests. ROS nodes do not run it. Use the ROS build/run
-instructions above for the current architecture.
 
 ## Identifying the physical setup
 

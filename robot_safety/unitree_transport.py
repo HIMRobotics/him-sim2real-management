@@ -5,14 +5,12 @@ import time
 from threading import Lock, Thread
 
 from .hardware_constants import (
-    ARM_INDICES,
     ARM_SDK_TOPIC,
     ARM_WEIGHT_INDEX,
     DAMPING_FSM_ID,
     ENGLISH_SPEAKER_ID,
     LOW_COMMAND_TOPIC,
     LOW_STATE_TOPIC,
-    LOWER_BODY_INDICES,
     MOTION_SWITCHER_SET_SILENT,
     NUM_JOINTS,
     SDK_RPC_TIMEOUT_CODE,
@@ -160,19 +158,6 @@ class UnitreeArmTransport:
         if code == 0:
             self.motion_restored = True
         return code
-
-    def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
-        """Command 15 lower-body targets and hold the captured arm pose."""
-        targets = {}
-        for index in range(NUM_JOINTS):
-            lower = index in LOWER_BODY_INDICES
-            targets[index] = {
-                "q": float(lower_q[index] if lower else arm_q[index - ARM_INDICES[0]]),
-                "dq": 0.0, "tau": 0.0,
-                "kp": float(leg_kp[index]) if lower else 40.0,
-                "kd": float(leg_kd[index]) if lower else 1.0,
-            }
-        return self.write_body(targets, machine)
 
     def write_body(self, targets, machine):
         """Encode a complete, already checked 29-joint command."""

@@ -76,11 +76,23 @@ uv run python app.py --demo
 
 uv creates `.venv` and uses Python 3.12 by default, downloading it if needed. The project supports Python 3.9+. The app and offline tools have no third-party runtime dependencies. The default development environment includes pytest, Ruff, and mypy.
 
-Run the included tests:
+Run the recorder tests:
 
 ```bash
-uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m pytest -q tests/test_app.py tests/test_kit.py tests/test_remote.py
 ```
+
+Run the safety and simulation tests with their model dependencies installed:
+
+```bash
+uv venv --python 3.12 .venv-policy-safety
+uv pip install --python .venv-policy-safety/bin/python './packages/policy_safety[test]'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q \
+  tests containers/sim packages/policy_safety/tests --ignore=tests/ros2 \
+  --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
+```
+
+ROS integration tests use the separate [ROS test environment](robot_safety/README.md).
 
 Add dependencies with `uv add PACKAGE`, or development tools with `uv add --dev PACKAGE`. Commit both `pyproject.toml` and `uv.lock` after dependency changes. Use `uv sync --locked` to reproduce the committed environment. See the [uv project guide](https://docs.astral.sh/uv/guides/projects/) for details.
 

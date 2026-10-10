@@ -309,8 +309,9 @@ def test_bad_inference_is_reported(setup, tmp_path, value, status, reason):
         assert result["first_violation"]["reason"] == reason
 
 
-def test_consecutive_proposals_do_not_trigger_a_rate_limit(setup, tmp_path):
+def test_initial_and_changing_pose_targets_complete_screening(setup, tmp_path):
     sim, adapter, profile = setup
+    sim.data.ctrl[sim.actuators[15]] += 0.031
 
     class OscillatingSession(Session):
         def run(self, names, inputs):
@@ -321,6 +322,8 @@ def test_consecutive_proposals_do_not_trigger_a_rate_limit(setup, tmp_path):
     adapter.session = OscillatingSession(0.05)
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "rate.npz")
     assert result["status"] == "completed"
+    assert result["first_violation"] is None
+    assert result["simulated_seconds"] > 0
 
 
 def test_scenario_summary_counts_overlapping_issues():
@@ -467,17 +470,6 @@ def test_clipping_is_a_warning_and_trace_records_executed_command(setup, tmp_pat
     assert result["warnings"]["right_wrist_yaw"]["q_commanded"] == bound
     with np.load(tmp_path / "warning.npz") as trace:
         assert np.all(trace["applied_target"][:, index] == bound)
-
-
-def test_initial_pose_gap_does_not_stop_simulation(setup, tmp_path):
-    sim, adapter, profile = setup
-    sim.data.ctrl[sim.actuators[15]] += 0.031
-    result, _ = run_scenario(
-        sim, adapter, profile, scenario(), tmp_path / "mismatch.npz"
-    )
-    assert result["status"] == "completed"
-    assert result["first_violation"] is None
-    assert result["simulated_seconds"] > 0
 
 
 @pytest.mark.parametrize("joint", [0, 15])

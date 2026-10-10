@@ -39,7 +39,6 @@ Completed:
 - [x] Motor gate independently expires commands when the checker is silent.
 - [x] Core, controller, configuration, gate and isolated ROS message-delivery tests.
 
-The earlier `runtime.py` remains an offline reference with synthetic queue tests.
 It is not used by the ROS nodes, whose callbacks and timers run in ROS executors.
 
 Next review checkpoints, in order:
