@@ -41,25 +41,25 @@ All positions are absolute joint angles in radians. At 50 Hz, an interval lasts
 - `q_measured`: latest measured joint angle.
 - `q_applied`: accepted command retained after simulation application or a
   successful full-weight hardware write. SDK write success does not prove motion.
-- `command_gap = q_commanded - q_measured`: diagnostic only during runtime.
+- `command_gap = q_commanded - q_measured`: diagnostic only, including at startup.
 - `response_error = q_measured - q_applied`: measured after execution, diagnostic only.
 
-There is no runtime command-gap, consecutive-command delta or desired-velocity-
+There is no startup or runtime command-gap, consecutive-command delta or desired-velocity-
 change rejection. Custom profiles must remove the obsolete `max_command_gap_rad`,
 `max_position_target_rate_rad_secs`, `max_acceleration_rad_secs2` and
-`max_tracking_error_rad` fields. Initial alignment remains a separate startup check.
+`max_tracking_error_rad` fields. The removed `initial_position_tolerance_rad` field
+is accepted and ignored when loading legacy hardware profiles.
 
 `max_velocity_rad_secs` checks both the desired velocity field and measured
 velocity using the model values above, immediately on each sample. No 50 ms
 persistence delay remains. `max_torque_nm` bounds feedforward torque, total
 estimated PD plus feedforward demand, and available measured torque. Simulator
-checks use its actual gains. The hardware arm adapter uses profile gains, which
+checks use its actual gains. Checked submissions and the hardware arm adapter use profile gains, which
 are the gains it actually sends, and forwards validated feedforward torque.
 
 Position clipping records a warning with the original and clipped angles, bounds,
 count and largest correction per joint. Clipping alone does not latch a stop.
-Initial alignment and torque checks use the clipped command and can still
-reject it. A small response error does not establish safety. Response diagnostics
+Torque checks use the clipped command and can still reject it. A small response error does not establish safety. Response diagnostics
 never latch a stop or silently increase any limit.
 
 ## Next priority: thrashing and flailing detection
@@ -87,7 +87,7 @@ deadline. Invalid numeric data is rejected. Thermal and measured-torque checks
 run on fresh hardware feedback. Simulation reports battery/temperature checks
 as unavailable rather than inferring them from motion.
 
-Initial alignment remains **0.03 rad**, initial speed **0.05 rad/s**, and the
+Initial speed remains **0.05 rad/s**, and the
 hardware ownership ramp **3 s**. The simulator validates its initial hold before
 policy motion. Hardware startup still requires the verified ready FSM and
 machine type. No launcher enables hardware output automatically.

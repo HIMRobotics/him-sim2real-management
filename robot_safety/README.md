@@ -78,6 +78,28 @@ damping, so finish hardware tests with the robot supported before removal.
 See the [manual arm-raise guide](../tests/manual/README.md) to verify this
 background gate through a policy run without starting a second motor gate.
 
+## Shared simulation decisions
+
+`core.action_error` and `core.watchdog_reason` are used by both the ROS
+supervisor and the local simulation runner. `Config` supplies their joint
+sanity bounds, observation history size and watchdog defaults. Protocol fault
+labels remain compatible with each interface (`invalid_action` in ROS and a
+specific rejection in local reports).
+
+`joint_checks.checked_targets` is the common command processor for the hardware
+adapter and checked MuJoCo submissions. It clips positions, selects profile
+gains, and bounds target velocity, feedforward effort
+and PD torque demand. The output is the processed command used for actuation.
+The hardware adapter selects its upper-body subset after checking all joints.
+Shared profile parsing and torque arithmetic also serve the portable policy
+checker, whose offline experiments retain their explicitly configured model
+gains and perturbations.
+
+Both gateways revoke policy output on a latched fault. Simulation damping and
+the hardware hold/damp/balance procedures remain adapter responsibilities, as
+do physics, SDK transport, battery and temperature checks. No second safety
+module or simulation-specific set of thresholds is introduced.
+
 ## Node responsibilities
 
 - `SafetyCheckerNode`: callback-driven validation of whole precheck frames using the existing core. One invalid joint latches the fuse, prevents all later relaying, and publishes abort immediately then every 100 ms. Each valid frame is relayed once, never replayed as a heartbeat.
@@ -85,6 +107,79 @@ background gate through a policy run without starting a second motor gate.
 - `ControllerStopNode`: observes physical Start, detects a double press and publishes abort directly to both nodes. It also aborts on stale feedback. Fresh DDS data does not prove a live radio link.
 
 The core remains the ROS-independent checker logic. `motor_gate.py` contains the independently testable final-gate logic. The earlier `runtime.py` is retained as an in-process test/reference implementation, not the scheduler used by these ROS nodes. ROS executors run callbacks and timers. Run roles as separate OS processes in deployment to avoid a checker freeze freezing the gate too.
+
+## Thrash detection in the existing checker
+
+`SafetyCheckerNode` uses measured `/safety/robot_feedback` velocities to update
+the supervisor's thrash detector while armed or running. Commands still follow
+`/safety/precheck` → checker → `/safety/postcheck` → motor gate. There is no new
+node, command publisher or message type. This does not add detection to the
+standalone hardware watchdog when the checker is absent.
+
+The default `thrash.mode=monitor` records the first detection per session in the
+checker log and supervisor status without blocking commands. With
+`thrash.mode=enforce`, detection latches the supervisor stop, prevents subsequent
+postcheck relays, and publishes the existing `/safety/abort` message. The motor
+gate then uses its existing stop/output handling. Previously delivered commands
+remain subject to abort delivery and their existing expiry deadlines. `off`
+disables this detector only. Existing watchdogs and checks remain active.
+
+The detector subtracts a slow velocity filter from a fast filter, then averages
+squared oscillation for each joint. Its single whole-body score is:
+
+```text
+joint_energy[j] = EMA(((fast_velocity[j] - slow_velocity[j]) / velocity_scale[j])²)
+whole_body_RMS = sqrt(sum(weight[j] * joint_energy[j]) / sum(weight))
+```
+
+Squaring before summing prevents opposite joint movements from cancelling.
+The score must remain at or above `weighted_rms_limit` (1.5) continuously for
+`persistence_secs` (0.5). Dropping below the limit resets the timer. There are
+no CV, cycle-count, region-count, or separate severe-joint stop rules.
+The first event is recorded as `thrashing_energy`, with the score, limit,
+duration, and the three largest joint contributors. This is a normalized
+motion-energy proxy, not physical energy in joules or a probability of danger.
+
+| Joint group | Relative weight per joint |
+| --- | ---: |
+| Hips, knees, waist | 4 |
+| Shoulders | 3 |
+| Ankles | 2 |
+| Elbows | 1 |
+| Wrists | 0.25 |
+
+Weights express motion risk, not measured inertias. They are symmetric between
+left and right. One very energetic joint can still dominate the weighted sum.
+Other joint counts default to equal weights. Root/base motion is not included
+in this joint score and retains its separate physical checks.
+
+All `ThrashConfig` fields are startup ROS parameters prefixed with `thrash.`.
+`thrash.joint_weights` and `thrash.velocity_scales` accept positive arrays in SDK
+joint order. Scales default to 1 rad/s. The fast/slow filters remain 25/4 Hz with
+150 ms squared-motion averaging. Duplicate timestamps are ignored, and gaps or
+new sessions reset filter history and persistence. Freshness checks remain
+independent. The old activity/severe/CV/region/cycle parameters were removed.
+
+The provisional limit was checked against recorded upright and tilted walking
+and supine motion. It is not validated for running, table tennis, or hardware.
+Keep monitoring as the default while calibrating for the intended tasks.
+
+For an isolated dry-run graph, select enforcement on the existing checker with:
+
+```bash
+ros2 run him_safety_nodes safety_node checker --ros-args -p thrash.mode:=enforce
+```
+
+This command does not launch or arm a motor gate. Use monitoring and replay
+evaluation to choose task settings before hardware enforcement. Tests cover
+weighted oscillation, transient rejection and gateway abort
+propagation, not physical detection rates or stopping performance.
+
+The simulator reuses this detector too. Safety-enabled ROS simulation runs this
+same checker and routes postcheck commands through `MotorCommandGate` to MuJoCo.
+The ROS-free local runner calls the same detector with physics timestamps and
+uses its existing latch/output path. Use `./sim.sh --example walker/thrash --local --view` for a belly-up
+thrash-only stop test, or `walker/thrash-monitor` to observe without thrash stops. See [simulation wiring and calibration notes](../containers/SIM_RUN.md#shared-thrash-detection).
 
 ## Topics and services
 

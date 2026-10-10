@@ -1,4 +1,4 @@
-"""Dry-run settings and sanity bounds, not validated G1 hardware limits."""
+"""Shared gateway settings and sanity bounds, separate from physical limits."""
 
 import math
 from dataclasses import dataclass, field
@@ -53,6 +53,38 @@ class JointCommandLimits:
 
 
 @dataclass(frozen=True)
+class ThrashConfig:
+    """Provisional oscillation settings, calibrated independently of policy commands."""
+
+    mode: str = "monitor"
+    slow_cutoff_hz: float = 4.0
+    fast_cutoff_hz: float = 25.0
+    averaging_secs: float = 0.15
+    persistence_secs: float = 0.5
+    weighted_rms_limit: float = 1.5
+    velocity_scales: tuple = ()
+    joint_weights: tuple = ()
+
+    def __post_init__(self):
+        if self.mode not in ("off", "monitor", "enforce"):
+            raise ValueError("thrash mode must be off, monitor or enforce")
+        for name, value in self.__dict__.items():
+            if name in ("mode", "velocity_scales", "joint_weights"):
+                continue
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"invalid thrash setting: {name}")
+        if self.fast_cutoff_hz <= self.slow_cutoff_hz:
+            raise ValueError("thrash filter cutoffs must be ordered")
+        for name in ("velocity_scales", "joint_weights"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(
+                type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                for v in values
+            ):
+                raise ValueError(f"thrash {name} must be finite and positive")
+
+
+@dataclass(frozen=True)
 class Config:
     """Supervisor settings with time values in seconds and test-only gains."""
 
@@ -68,6 +100,7 @@ class Config:
     observation_history_size: int = 512
     runtime_queue_capacity: int = 64  # Maximum observations or controls per cycle.
     command_limits: JointCommandLimits = field(default_factory=JointCommandLimits)
+    thrash: ThrashConfig = field(default_factory=ThrashConfig)
     robot_position_bounds_rad: tuple = (-1e6, 1e6)
     robot_velocity_bounds_rad_per_sec: tuple = (-1e6, 1e6)
 
@@ -99,5 +132,10 @@ class Config:
             raise ValueError("runtime queue capacity must be a positive integer")
         if not isinstance(self.command_limits, JointCommandLimits):
             raise TypeError("command_limits must be JointCommandLimits")
+        if not isinstance(self.thrash, ThrashConfig):
+            raise TypeError("thrash must be ThrashConfig")
+        for values in (self.thrash.velocity_scales, self.thrash.joint_weights):
+            if values and len(values) != self.joints:
+                raise ValueError("thrash scales and weights must match the joint count")
         validate_bounds(self.robot_position_bounds_rad)
         validate_bounds(self.robot_velocity_bounds_rad_per_sec)

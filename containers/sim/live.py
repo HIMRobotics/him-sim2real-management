@@ -14,7 +14,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
-
 import view
 from plant import Plant
 
@@ -95,11 +94,10 @@ class LiveSession:
             qpos = np.asarray(item["qpos"], dtype=float)
             if qpos.shape != (self.model.nq,):
                 continue
-            self.frames.append(
-                view.pose_frame(
-                    self.model, self.data, self.base, self.geoms, qpos, item["t"]
-                )
-            )
+            frame = view.pose_frame(self.model, self.data, self.base, self.geoms, qpos, item["t"])
+            frame["thrash"] = item.get("thrash")
+            frame["stop"] = view.describe_stop(item.get("stop"))
+            self.frames.append(frame)
         return reset
 
     def snapshot(self, after):
@@ -108,11 +106,12 @@ class LiveSession:
             start = 0 if reset else max(0, after)
             done = self.report_path.is_file() and not self.pending
             summary = None
+            stop = None
             if done:
                 try:
-                    summary = view.report_summary(
-                        json.loads(self.report_path.read_text())
-                    )
+                    report = json.loads(self.report_path.read_text())
+                    summary = view.report_summary(report)
+                    stop = view.describe_stop(view.stop_from_report(report))
                 except (OSError, json.JSONDecodeError):
                     done = False
             return {
@@ -120,6 +119,7 @@ class LiveSession:
                 "reset": reset,
                 "done": done,
                 "summary": summary,
+                "stop": stop,
             }
 
 

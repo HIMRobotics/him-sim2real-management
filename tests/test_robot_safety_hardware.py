@@ -21,7 +21,6 @@ def profile_data():
         "allowed_start_fsm_ids": [4],
         "handover_secs": 2.0,
         "max_publish_gap_secs": 0.02,
-        "initial_position_tolerance_rad": 0.005,
         "initial_velocity_tolerance_rad_secs": 0.01,
         "joints": {
             G1_29_JOINT_NAMES[i]: {
@@ -86,6 +85,19 @@ class FakeTransport:
 
 
 class HardwareAdapterTests(unittest.TestCase):
+    def test_startup_and_runtime_pose_gaps_do_not_reject_any_joint(self):
+        legacy = profile_data()
+        legacy["initial_position_tolerance_rad"] = 0.0001
+        self.adapter.profile = load_profile(legacy)
+        self.assertFalse(hasattr(self.adapter.profile, "initial_position_tolerance_rad"))
+        self.command["q"] = [0.8] * 29
+        self.adapter.command = self.command
+        for last_output in (None, 10.0):
+            self.adapter.last_output_secs = last_output
+            targets = self.adapter.checked_targets(10.0)
+            self.assertEqual(set(targets), set(UPPER_BODY_INDICES))
+            self.assertTrue(all(target["q"] == 0.8 for target in targets.values()))
+
     def setUp(self):
         self.now = 10.0
         self.adapter = G1ArmAdapter(load_profile(profile_data()), lambda: self.now)
@@ -235,7 +247,7 @@ class HardwareAdapterTests(unittest.TestCase):
         policy.update.return_value = [0.0] * 15
         self.adapter.balance_policy = policy
         self.press_f3_twice()
-        with patch("robot_safety.hardware_adapter.check_command") as command_check, patch(
+        with patch("robot_safety.hardware_adapter.checked_targets") as command_check, patch(
             "robot_safety.hardware_adapter.check_torque"
         ) as torque_check:
             self.adapter.stop_once()
@@ -441,11 +453,11 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_start")
         self.assertTrue(self.adapter.stop_requested.is_set())
 
-    def test_first_target_jump_is_rejected(self):
+    def test_first_target_jump_is_not_a_stop(self):
         self.command["q"][16] = 0.05
         self.run_first()
-        self.assertIsNotNone(self.adapter.abort_reason)
-        self.assertEqual(self.transport.writes, [])
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertTrue(self.transport.writes)
 
     def test_leg_command_gap_does_not_reject(self):
         self.run_first()

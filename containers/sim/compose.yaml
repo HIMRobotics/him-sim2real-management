@@ -28,6 +28,7 @@ services:
       G1_SIM_POSE: ${G1_SIM_POSE:-standing}
       G1_SIM_SCENE: ${G1_SIM_SCENE:-}
       G1_SIM_SAFETY_CHECKS: ${G1_SIM_SAFETY_CHECKS:-1}
+      G1_SIM_THRASH_MODE: ${G1_SIM_THRASH_MODE:-}
       G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
       G1_SIM_SECONDS: ${G1_SIM_SECONDS:-10}
       G1_SIM_REPORT: /output/report.json

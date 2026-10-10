@@ -1,9 +1,12 @@
 """Safety checks for container commands against the MuJoCo G1."""
 
+import math
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import mujoco
@@ -18,6 +21,13 @@ sys.path[:0] = [
 
 from plant import POSES, Plant
 from runner import Runner
+
+from robot_safety.config import Config, ThrashConfig
+from robot_safety.core import Supervisor
+from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_constants import UPPER_BODY_INDICES
+from robot_safety.hardware_profile import HardwareProfile
+from robot_safety.thrash import ThrashDetector
 
 
 def hold(runner, state, sequence, **overrides):
@@ -37,6 +47,131 @@ def hold(runner, state, sequence, **overrides):
 
 
 class RunnerTest(unittest.TestCase):
+    def test_thrashing_telemetry_tracks_frames_in_live_and_replay(self):
+        import json
+        import os
+
+        from live import LiveSession
+        from view import export_replay
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "live.jsonl"
+            trace = root / "trace.npz"
+            with patch.dict(os.environ, {"G1_SIM_LIVE": str(live), "G1_SIM_TRACE": str(trace)}):
+                runner = Runner(record_trace=True)
+                state = runner.feedback(0.0)
+                runner.command(hold(runner, state, 0), 0.0)
+                runner.step(0.0)
+                bad = hold(runner, state, 1)
+                bad["tau"][0] = 89.0
+                runner.command(bad, 0.01)
+                runner.handle({"op": "abort", "reason": "later_fault"})
+                runner.report()
+            samples = [json.loads(line) for line in live.read_text().splitlines()]
+            telemetry = samples[-1]["thrash"]
+            self.assertEqual(telemetry["mode"], "monitor")
+            self.assertEqual(len(telemetry["metrics"]["oscillatory_rms"]), 29)
+            self.assertEqual(telemetry["thresholds"]["persistence_secs"], runner.config.thrash.persistence_secs)
+            self.assertIsNone(samples[0]["stop"])
+            self.assertEqual(samples[-1]["stop"]["reason"], "joint_feedforward_torque_limit")
+            self.assertEqual(samples[-1]["stop"]["detail"]["joint"], "left_hip_pitch")
+            runner.thrash_detector.reset()
+            self.assertEqual(runner.trace_thrash[-1], telemetry)
+            session = LiveSession(root, live, root / "start", root / "report.json", "standing", None)
+            frames = session.snapshot(0)["frames"]
+            self.assertEqual([frame["thrash"] for frame in frames], [s["thrash"] for s in samples])
+            dest = export_replay(trace, root / "view")
+            motion = json.loads((dest / "motion.json").read_text())
+            self.assertEqual(motion["thrash"], [s["thrash"] for s in samples])
+            self.assertEqual(len(motion["thrash"]), motion["frames"])
+            self.assertEqual(len(motion["joint_names"]), 29)
+            self.assertEqual(motion["stop"][-1], frames[-1]["stop"])
+            self.assertIn("left_hip_pitch", motion["stop"][-1]["description"])
+            self.assertIn("89", motion["stop"][-1]["description"])
+            self.assertIn("88", motion["stop"][-1]["description"])
+            runner._reset_trace()
+            self.assertEqual(len(runner.trace_thrash), 1)
+            self.assertEqual(runner.trace_thrash[0]["metrics"], {})
+            runner.report()
+
+    def test_viewer_describes_velocity_torque_thrash_and_timeout_stops(self):
+        from view import describe_stop, report_summary
+
+        cases = (
+            ("joint_velocity_limit", {"joint": "left_elbow", "value": 38, "limit": 37, "units": "rad/s"},
+             ("q dot", "left_elbow", "38", "37", "rad/s")),
+            ("joint_torque_limit", {"joint": "left_wrist_pitch", "value": 6, "limit": 5,
+                                    "units": "Nm", "torque_kind": "PD demand"},
+             ("left_wrist_pitch", "6", "5", "Nm", "PD demand")),
+            ("base_angular_speed_limit", {"joint": "0", "value": 6.16, "limit": 6, "units": "rad/s"},
+             ("Base axis: x", "6.16", "6")),
+            ("thrashing_local", {"joint_indices": [9, 10], "oscillatory_rms": [2.0] * 29},
+             ("right_knee", "right_ankle_pitch", "osc RMS=2.000")),
+            ("action_timeout", None, ("action_timeout",)),
+            ("invalid_action", {"field": "q", "joint_index": 20, "value": 11,
+                                "bounds": [-10, 10], "rejection": "invalid_command"},
+             ("left_wrist_pitch", "11", "Bounds", "invalid_command")),
+        )
+        for reason, detail, expected in cases:
+            with self.subTest(reason=reason):
+                record = {"reason": reason, "detail": detail, "stop_time_seconds": 0.25}
+                # Legacy reports still include the complete stop details.
+                text = report_summary(record)
+                self.assertIn("0.250 s", text)
+                for value in expected:
+                    self.assertIn(value, text)
+                self.assertEqual(describe_stop({"reason": reason, "detail": detail})["detail"], detail)
+
+    def test_shared_thrashing_modes_gate_simulated_output(self):
+        for mode, safety in (("monitor", True), ("enforce", True), ("off", True),
+                             ("monitor", False), ("enforce", False), ("off", False)):
+            with self.subTest(mode=mode, safety=safety):
+                runner = Runner(safety_checks=safety, thrash_config=ThrashConfig(mode=mode))
+                self.assertIsInstance(runner.thrash_detector, ThrashDetector)
+                initial_q = runner.plant.q().copy()
+
+                def oscillate(runner=runner, initial_q=initial_q):
+                    phase = 2 * math.pi * 8 * (runner.sim_time + 0.002)
+                    joints = [0, 1, 2, 3, 6, 7, 8, 9]
+                    runner.plant.data.qpos[runner.plant.qadr[joints]] = initial_q[joints] + 0.12 * math.sin(phase)
+                    runner.plant.data.qvel[runner.plant.vadr[joints]] = 0.12 * 2 * math.pi * 8 * math.cos(phase)
+                    return runner.plant.dq()
+
+                with patch.object(runner.plant, "step_physics", side_effect=oscillate):
+                    for step in range(100):
+                        now = step * 0.02
+                        state = runner.feedback(now)
+                        self.assertIsNone(runner.command(hold(runner, state, step), now))
+                        runner.step(now)
+                        if runner.reason:
+                            break
+                report = runner.report()
+                if mode == "enforce":
+                    self.assertEqual(runner.reason, "thrashing_energy")
+                    self.assertIsNone(runner.active)
+                    self.assertEqual(runner.command(hold(runner, state, step + 1), now), runner.reason)
+                    self.assertEqual(report["thrash"]["event"]["reason"], runner.reason)
+                else:
+                    self.assertIsNone(runner.reason)
+                    self.assertIsNotNone(runner.active)
+                    self.assertEqual(report["thrash"]["event"] is not None, mode == "monitor")
+                self.assertEqual(report["checks"]["thrash_enforcement"], mode == "enforce")
+                self.assertEqual(report["thrash"]["mode"], mode)
+
+    def test_external_checker_abort_and_report(self):
+        runner = Runner(thrash_config=ThrashConfig(mode="off"))
+        state = runner.feedback(0.0)
+        runner.command(hold(runner, state, 0), 0.0)
+        runner.handle({"op": "abort", "reason": "thrashing_energy"})
+        runner.handle({"op": "abort", "reason": "later_fault"})
+        self.assertEqual(runner.reason, "thrashing_energy")
+        self.assertIsNone(runner.active)
+        event = {"reason": "thrashing_energy", "joint_indices": [15, 16]}
+        report = runner.handle({"op": "report", "thrash": {"mode": "enforce", "event": event}})
+        self.assertEqual(report["thrash"]["event"], event)
+        self.assertTrue(report["checks"]["thrash_enforcement"])
+
     def test_safety_checks_default_to_enabled(self):
         self.assertTrue(Runner().report()["safety_checks"])
 
@@ -175,6 +310,7 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(end["height"], 0.5)
         self.assertGreater(end["upright"], 0.8)
         self.assertGreater(moved, 0.3)
+        self.assertIsNone(runner.thrash_detector.event)
 
     def test_circle_reports_partial_checks_in_report_and_standalone_replay(self):
         import json
@@ -219,19 +355,21 @@ class RunnerTest(unittest.TestCase):
                 if safety_checks:
                     self.assertEqual(report["reason"], "fall")
 
-    def test_rejected_command_keeps_the_hold(self):
+    def test_rejected_command_revokes_output_and_preserves_first_fault(self):
         runner = Runner()
         state = runner.feedback(0.0)
         self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
-        held = runner.active["q"].copy()
         q = list(state["q"])
         q[0] = q[0] + 2.3
         reason = runner.command(hold(runner, state, 1, q=q), 0.02)
         self.assertEqual(reason, "joint_torque_limit")
-        np.testing.assert_allclose(runner.active["q"], held)
-        for step in range(25):
-            runner.step(0.03 + step * 0.02)
-        self.assertGreater(runner.plant.state()["height"], 0.5)
+        self.assertIsNone(runner.active)
+        self.assertEqual(runner.command(hold(runner, state, 2), 0.03), reason)
+        runner.handle({"op": "abort", "reason": "later_fault"})
+        self.assertEqual(runner.reason, reason)
+        with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
+            runner.step(0.04)
+        np.testing.assert_array_equal(runner.plant.model.actuator_gainprm[runner.plant.actuators, 0], 0)
 
     def test_tracking_uses_response_after_a_complete_control_interval(self):
         for follows_target in (True, False):
@@ -274,24 +412,129 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(runner.report()["status"], "violation")
         self.assertEqual(runner.command(hold(runner, state, 1), 0.02), reason)
 
-    def test_initial_pose_mismatch_rejected(self):
+    def test_initial_pose_gap_does_not_reject_a_command(self):
         runner = Runner()
         state = runner.feedback(0.0)
         q = list(state["q"])
         q[0] = q[0] + 0.05
         reason = runner.command(hold(runner, state, 0, q=q), 0.0)
-        self.assertEqual(reason, "initial_joint_position_mismatch")
+        self.assertIsNone(reason)
+        self.assertAlmostEqual(runner.active["q"][0], q[0])
 
     def test_wrist_torque_rejected(self):
         runner = Runner()
         state = runner.feedback(0.0)
+        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
         q = list(state["q"])
-        q[20] = q[20] + 0.02
-        kp = [40.0] * 29
-        kp[20] = 300.0
-        reason = runner.command(hold(runner, state, 0, q=q, kp=kp), 0.0)
+        q[20] = q[20] + 0.5
+        reason = runner.command(hold(runner, state, 1, q=q, kp=[0.0] * 29), 0.02)
         self.assertEqual(reason, "joint_torque_limit")
         self.assertEqual(runner.report()["detail"]["joint"], "left_wrist_pitch")
+
+    def test_checked_targets_match_hardware_for_every_joint(self):
+        for index in range(29):
+            for case in ("gains", "clip", "velocity", "feedforward", "demand", "initial"):
+                with self.subTest(index=index, case=case):
+                    runner = Runner()
+                    hardware = G1ArmAdapter(HardwareProfile.load(runner.rules.path))
+                    limits = runner.rules.entries[index][2]
+                    if case == "clip":
+                        runner.plant.data.qpos[runner.plant.qadr[index]] = limits.position_max_rad
+                    state = runner.feedback(0.0)
+                    initial = case == "initial"
+                    if not initial:
+                        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+                    frame = hold(runner, state, 1, kp=[500.0] * 29, kd=[50.0] * 29)
+                    if case == "clip":
+                        frame["q"][index] = limits.position_max_rad + 0.01
+                    elif case == "velocity":
+                        frame["dq"][index] = limits.max_velocity_rad_secs + 0.01
+                    elif case == "feedforward":
+                        frame["tau"][index] = limits.max_torque_nm + 0.01
+                    elif case == "demand":
+                        # Feedforward alone passes, but PD error crosses the torque bound.
+                        frame["q"][index] += 0.01
+                        frame["tau"][index] = limits.max_torque_nm
+                    elif case == "initial":
+                        frame["q"][index] += 0.04
+                    hardware.command = frame
+                    hardware.feedback = SimpleNamespace(q=runner.plant.q(), dq=runner.plant.dq())
+                    hardware.last_output_secs = None if initial else 0.0
+                    try:
+                        expected = hardware.checked_targets(0.02)
+                    except ValueError as exc:
+                        reason = runner.command(frame, 0.02)
+                        self.assertEqual(reason, exc.reason)
+                        self.assertEqual(runner.detail, exc.details)
+                        self.assertIsNone(runner.active)
+                    else:
+                        self.assertIsNone(runner.command(frame, 0.02))
+                        for joint in UPPER_BODY_INDICES:
+                            for field, value in expected[joint].items():
+                                self.assertEqual(runner.active[field][joint], value)
+                        self.assertEqual(runner.active["kp"][index], limits.kp)
+                        self.assertEqual(runner.active["kd"][index], limits.kd)
+
+    def test_protocol_rejections_match_supervisor(self):
+        cases = (
+            {"session_id": "wrong"}, {"sequence": True}, {"sequence": 0},
+            {"observation_id": True}, {"observation_id": 900},
+            {"q": [True] * 29}, {"q": ["0"] * 29}, {"q": [0.0] * 28},
+            {"q": [float("nan")] * 29}, {"kp": [-1.0] * 29},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                runner = Runner()
+                state = runner.feedback(0.0)
+                supervisor = Supervisor(runner.config)
+                supervisor.state(state, False, 0.0)
+                supervisor.control("arm", 0.0)
+                for sequence, changes in ((0, {}), (1, overrides)):
+                    frame = hold(runner, state, sequence)
+                    frame.update(changes)
+                    message = dict(frame, session=(supervisor.policy_session_id
+                                   if frame["session_id"] == runner.session_id else "wrong"),
+                                   seq=frame["sequence"], state_id=frame["observation_id"])
+                    accepted = supervisor.accept(message, 0.02)
+                    self.assertEqual(runner.command(frame, 0.02) is None, accepted)
+                self.assertIsNone(runner.active)
+                self.assertIsNone(supervisor.accepted_policy_command)
+
+    def test_deadlines_match_supervisor(self):
+        for field, reason in (("action_timeout", "action_timeout"),
+                              ("robot_timeout", "robot_state_timeout"),
+                              ("observation_timeout", "observation_timeout"),
+                              ("loop_timeout", "loop_progress")):
+            with self.subTest(field=field):
+                config = replace(Config(action_timeout=1, robot_timeout=1,
+                                        observation_timeout=1, loop_timeout=1), **{field: 0.2})
+                runner = Runner(config=config)
+                state = runner.feedback(0.0)
+                supervisor = Supervisor(config)
+                supervisor.state(state, False, 0.0)
+                supervisor.control("arm", 0.0)
+                frame = hold(runner, state, 0)
+                self.assertIsNone(runner.command(frame, 0.0))
+                self.assertTrue(supervisor.accept(dict(frame, session=supervisor.policy_session_id,
+                                                       seq=0, state_id=1), 0.0))
+                supervisor.cycle(0.0)
+                with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
+                    runner.step(0.0)
+                    runner.step(0.2)
+                supervisor.cycle(0.2)
+                self.assertEqual(runner.reason, reason)
+                self.assertEqual(supervisor.stop_reason, reason)
+                self.assertIsNone(runner.active)
+                self.assertIsNone(supervisor.accepted_policy_command)
+
+    def test_late_replacement_cannot_refresh_expired_action(self):
+        runner = Runner()
+        state = runner.feedback(0.0)
+        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+        state = runner.feedback(0.15)
+        self.assertEqual(runner.command(hold(runner, state, 1), 0.2), "action_timeout")
+        self.assertEqual(runner.last_command_time, 0.0)
+        self.assertIsNone(runner.active)
 
     def test_bad_shape_session_and_sequence(self):
         runner = Runner()

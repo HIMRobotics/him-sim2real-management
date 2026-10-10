@@ -7,7 +7,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from hardware_constants import G1_29_JOINT_NAMES
-from joint_checks import BASE_TILT_LIMIT_RAD
+from joint_checks import BASE_TILT_LIMIT_RAD, torque_demand
 
 
 def load_model(scene=None):
@@ -194,8 +194,7 @@ class Plant:
         zeros = np.zeros(29)
         return q.copy(), zeros, zeros, np.full(29, DAMPING_KD), zeros
 
-    def demand(self, q_des, dq_des, kp, kd, tau, q, dq):
-        return kp * (q_des - q) + kd * (dq_des - dq) + tau
+    demand = staticmethod(torque_demand)
 
     def _apply_arrays(self, q_des, dq_des, kp, kd, tau):
         self.model.actuator_gainprm[self.actuators, 0] = kp

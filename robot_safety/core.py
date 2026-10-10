@@ -1,4 +1,4 @@
-"""Dry-run supervisor state machine using monotonic timestamps in seconds."""
+"""Shared command validation, watchdogs and supervisor state."""
 
 import math
 import uuid
@@ -8,6 +8,7 @@ from enum import Enum
 
 from .config import COMMAND_FIELDS, Config
 from .controller import StartDoublePressDetector
+from .thrash import ThrashDetector
 
 
 def vector(value, size, low, high):
@@ -19,6 +20,53 @@ def vector(value, size, low, high):
             for v in value
         )
     )
+
+
+def action_error(message, config, session, last_sequence, observations, latest_id, now,
+                 *, safety_checks=True):
+    """Return a protocol rejection and details, or two Nones."""
+    if not isinstance(message, dict) or message.get("session") != session:
+        return "session_mismatch", None
+    if type(message.get("seq")) is not int or message["seq"] <= last_sequence:
+        return "sequence", None
+    source = message.get("state_id")
+    if type(source) is not int or not 1 <= source <= latest_id:
+        return "stale_observation", None
+    if safety_checks:
+        issued = observations.get(source)
+        if issued is None or not 0 <= now - issued < config.observation_timeout:
+            return "stale_observation", None
+    for field, bounds in config.command_limits.items():
+        if not safety_checks:
+            bounds = (-math.inf, math.inf)
+        if not vector(message.get(field), config.joints, *bounds):
+            detail = {"field": field}
+            values = message.get(field)
+            if isinstance(values, list) and len(values) == config.joints:
+                for index, value in enumerate(values):
+                    if not vector([value], 1, *bounds):
+                        detail.update(joint_index=index, value=(value if type(value) in (int, float)
+                                      and math.isfinite(value) else repr(value)))
+                        if safety_checks:
+                            detail["bounds"] = list(bounds)
+                        break
+            return "invalid_command", detail
+    return None, None
+
+
+def watchdog_reason(config, now, *, last_cycle=None, action_time=None,
+                    robot_time=None, observation_time=None):
+    """Select the first expired deadline in supervisor priority order."""
+    if last_cycle is not None and now - last_cycle >= config.loop_timeout:
+        return "loop_progress"
+    if action_time is not None:
+        if now - action_time >= config.action_timeout:
+            return "action_timeout"
+        if robot_time is None or now - robot_time >= config.robot_timeout:
+            return "robot_state_timeout"
+        if observation_time is not None and now - observation_time >= config.observation_timeout:
+            return "observation_timeout"
+    return None
 
 
 class SupervisorPhase(str, Enum):
@@ -46,6 +94,8 @@ class Supervisor:
             config.double_press_window_secs, config.robot_timeout
         )
         self.config = config  # Immutable joint and watchdog settings.
+        self.thrash_detector = ThrashDetector(config.thrash, config.joints, config.robot_timeout)
+        self.thrash_event = None
         self.supervisor_instance_id = (
             uuid.uuid4().hex
         )  # Distinguishes supervisor instances.
@@ -53,6 +103,7 @@ class Supervisor:
         # Operating mode and stop diagnostics.
         self.supervisor_phase = SupervisorPhase.INHIBITED
         self.stop_reason = None  # First fault or stop cause for the current latch.
+        self.stop_detail = None
         self.start_button_pressed = (
             False  # Physical Start state, blocks reset while pressed.
         )
@@ -95,9 +146,10 @@ class Supervisor:
             None  # Last cycle's selection, retained for status reporting.
         )
 
-    def stop(self, stop_reason, cur_time_secs):
+    def stop(self, stop_reason, cur_time_secs, detail=None):
         """Latch a stop at ``cur_time_secs`` with a diagnostic ``stop_reason``."""
         if self.supervisor_phase != SupervisorPhase.STOP_LATCHED:
+            self.stop_detail = deepcopy(detail)
             (
                 self.stop_reason,
                 self.time_stop_latched_secs,
@@ -183,6 +235,11 @@ class Supervisor:
         )
         if stop_requested or double_press_detected:
             self.stop("controller_stop", cur_time_secs)
+        if self.supervisor_phase in (SupervisorPhase.ARMED, SupervisorPhase.RUNNING):
+            reason = self.thrash_detector.observe(observation["dq"], received_time_secs)
+            self.thrash_event = self.thrash_detector.event
+            if reason:
+                self.stop(reason, cur_time_secs, self.thrash_event)
         return stop_requested or double_press_detected
 
     def input_fault(self, stop_reason, cur_time_secs):
@@ -220,6 +277,9 @@ class Supervisor:
                     None,
                 )
                 self.start_double_press_detector.reset()
+                self.stop_detail = None
+                self.thrash_detector.reset()
+                self.thrash_event = None
                 self.policy_session_id, self.accepted_policy_command = None, None
             elif self.supervisor_phase == SupervisorPhase.INHIBITED:
                 self.supervisor_phase, self.policy_session_id = (
@@ -227,6 +287,8 @@ class Supervisor:
                     uuid.uuid4().hex,
                 )
                 self.last_action_sequence, self.accepted_policy_command = -1, None
+                self.thrash_detector.reset()
+                self.thrash_event = None
                 self.time_action_watchdog_refreshed_secs = cur_time_secs
             else:
                 return {"error": "arm requires INHIBITED"}
@@ -248,41 +310,13 @@ class Supervisor:
             SupervisorPhase.RUNNING,
         ):
             return False
-        config = self.config
-        # Require a message from the currently authorized policy session.
-        valid = (
-            isinstance(message, dict)
-            and message.get("session") == self.policy_session_id
+        reason, detail = action_error(
+            message, self.config, self.policy_session_id, self.last_action_sequence,
+            self.observation_received_times_secs, self.latest_observation_id, cur_time_secs,
         )
-        # Reject duplicate, out-of-order, and non-integer sequence numbers.
-        valid = (
-            valid
-            and type(message.get("seq")) is int
-            and message["seq"] > self.last_action_sequence
-        )
-        # Resolve the source observation using supervisor-owned timestamps.
-        source_observation_id = (
-            message.get("state_id") if isinstance(message, dict) else None
-        )
-        observation_received_time_secs = (
-            self.observation_received_times_secs.get(source_observation_id)
-            if type(source_observation_id) is int
-            else None
-        )
-        # Reject unknown observations and timestamps outside the freshness window.
-        valid = (
-            valid
-            and observation_received_time_secs is not None
-            and 0
-            <= cur_time_secs - observation_received_time_secs
-            < config.observation_timeout
-        )
-        # Check joint counts, finite numeric values, and configured bounds.
-        for field_name, bounds in config.command_limits.items():
-            valid = valid and vector(message.get(field_name), config.joints, *bounds)
         # Invalid input latches a stop without refreshing the action watchdog.
-        if not valid:
-            self.stop("invalid_action", cur_time_secs)
+        if reason:
+            self.stop("invalid_action", cur_time_secs, dict(detail or {}, rejection=reason))
             return False
         # Deadline checks also apply before accepting a late replacement.
         self.watchdogs(cur_time_secs)
@@ -293,7 +327,7 @@ class Supervisor:
             cur_time_secs,
         )
         self.accepted_policy_command = {k: list(message[k]) for k in COMMAND_FIELDS}
-        self.accepted_policy_command["state_id"] = source_observation_id
+        self.accepted_policy_command["state_id"] = message["state_id"]
         self.supervisor_phase = SupervisorPhase.RUNNING
         return True
 
@@ -302,32 +336,17 @@ class Supervisor:
 
         Checks run only when called, not in an independent background task.
         """
-        if (
-            self.time_last_cycle_secs is not None
-            and cur_time_secs - self.time_last_cycle_secs >= self.config.loop_timeout
-        ):
-            self.stop("loop_progress", cur_time_secs)
-        if self.supervisor_phase in (SupervisorPhase.ARMED, SupervisorPhase.RUNNING):
-            if (
-                cur_time_secs - self.time_action_watchdog_refreshed_secs
-                >= self.config.action_timeout
-            ):
-                self.stop("action_timeout", cur_time_secs)
-            elif (
-                self.time_last_robot_state_received_secs is None
-                or cur_time_secs - self.time_last_robot_state_received_secs
-                >= self.config.robot_timeout
-            ):
-                self.stop("robot_state_timeout", cur_time_secs)
-            elif (
-                self.accepted_policy_command
-                and cur_time_secs
-                - self.observation_received_times_secs.get(
-                    self.accepted_policy_command["state_id"], float("-inf")
-                )
-                >= self.config.observation_timeout
-            ):
-                self.stop("observation_timeout", cur_time_secs)
+        active = self.supervisor_phase in (SupervisorPhase.ARMED, SupervisorPhase.RUNNING)
+        source = (self.accepted_policy_command or {}).get("state_id")
+        reason = watchdog_reason(
+            self.config, cur_time_secs, last_cycle=self.time_last_cycle_secs,
+            action_time=self.time_action_watchdog_refreshed_secs if active else None,
+            robot_time=self.time_last_robot_state_received_secs,
+            observation_time=(self.observation_received_times_secs.get(source, -math.inf)
+                              if source is not None else None),
+        )
+        if reason:
+            self.stop(reason, cur_time_secs)
 
     def cycle(self, cur_time_secs):
         """Select and return one dry-run output at ``cur_time_secs``.
@@ -367,6 +386,10 @@ class Supervisor:
             "boot_id": self.supervisor_instance_id,
             "phase": self.supervisor_phase.value,
             "fault_reason": self.stop_reason,
+            "fault_detail": deepcopy(self.stop_detail),
+            "thrash_mode": self.config.thrash.mode,
+            "thrash_event": deepcopy(self.thrash_event),
+            "thrash_metrics": deepcopy(self.thrash_detector.metrics),
             "session": self.policy_session_id,
             "dry_run": True,
             "motor_publisher": False,

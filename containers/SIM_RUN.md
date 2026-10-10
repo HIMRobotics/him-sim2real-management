@@ -21,10 +21,19 @@ Two processes share that network:
 
 | Piece | Role |
 | --- | --- |
-| `containers/sim/bridge.py` | ROS 2 Foxy side. Publishes state, reads `/safety/precheck`, publishes `/safety/abort`. |
+| `containers/sim/bridge.py` | ROS 2 side. Runs the shared safety checker, feeds measured state, and passes accepted postcheck frames through the shared motor gate to the plant. |
 | `containers/sim/plant_server.py` | MuJoCo side, in `.venv-policy-safety`. Steps the G1 and applies the checks. |
 
 The bridge and the plant talk over stdin. The plant is the only thing that advances physics.
+
+With safety enabled, the ROS route is `/safety/precheck` →
+`robot_safety.ros_nodes.SafetyCheckerNode` → `/safety/postcheck` →
+`robot_safety.motor_gate.MotorCommandGate` → the MuJoCo plant. The checker and
+bridge share an executor for simulation. They use the same command expiry,
+session validation, thrash detector and abort latch as the robot gateway.
+The plant retains its additional joint-profile and physics checks. Simulation
+does not reproduce the hardware deployment's process isolation or stop dynamics.
+Unchecked and direct-circle runs retain their bypass of the ROS checker.
 
 The bridge publishes `RobotFeedback` on a 0.02 s timer and receives asynchronous `JointCommand` messages for all 29 joints. After the first accepted command, each timer callback advances MuJoCo by ten 0.002 s steps using the latest accepted command. The run duration is wall-clock time from that first acceptance. If none arrives within 30 seconds, the report is `no_command`, unless a rejected command has already latched a failure.
 
@@ -33,8 +42,8 @@ What the container gets:
 | Source | What it is |
 | --- | --- |
 | `/safety/checker/arm` | Returns `session_id`. The command must use that id. |
-| `/safety/robot_feedback` | 29 joint `q` and `dq`, plus `observation_id`. |
-| `/safety/policy_observation` | The same feedback, for a node written against the host checker. |
+| `/safety/robot_feedback` | Raw 29-joint `q` and `dq`. With the shared checker, this has no authorized observation ID. |
+| `/safety/policy_observation` | Checker-issued observation IDs for commands, as on the robot. |
 | `rt/lowstate` on `lo` | IMU and the same 29 motors. `ROBOT_INTERFACE` is `lo`. |
 
 What the container sends:
@@ -44,14 +53,136 @@ What the container sends:
 | `/safety/precheck` | One 29-slot `JointCommand` per step. |
 | `/safety/abort` | Subscribe and stop. The sim publishes this when a check fails. |
 
-A failed command is not applied. Later commands stay rejected. A rejected joint command keeps the last accepted hold. A fall, overspeed, or action timeout drops that hold and damps. The host safety service is left running.
+A failed command revokes policy output and latches the first fault. Later
+commands stay rejected. Both local simulation and ROS aborts clear the plant's
+active command and select simulated damping. Hardware executes its own stop
+procedure. The host safety service is left running.
+
+## Shared safety decisions
+
+Local simulation and the ROS supervisor use the same command protocol validator
+and watchdog decision function in `robot_safety/core.py`, with defaults from
+`Config`. Action, observation, feedback and loop deadlines default to 0.2 s.
+Expired commands cannot be rescued by a late replacement or fresh feedback.
+ROS retains its `invalid_action` fault label for protocol errors, while local
+reports include the specific protocol rejection.
+
+Checked simulation and the hardware adapter use `joint_checks.checked_targets`
+for clipping, target velocity, feedforward and PD torque
+checks. Both select gains from the same joint profile. Submitted gains are
+validated for sanity but do not override the profile. The processed targets
+and gains are the ones applied to the plant. Profile parsing and torque-demand
+arithmetic are shared with the portable policy evaluator as well.
+
+MuJoCo physics, Unitree I/O, hardware health and stop execution stay in their
+respective adapters. Hardware currently publishes upper-body targets and
+monitors all 29 joints, while simulation actuates all 29. The offline policy
+experiment evaluator still uses its explicit bundle gains and torque-scale
+scenarios. Those configurations and unchecked/direct experiments do not claim
+hardware-equivalent actuation.
+
+With the unified profile gains, a checked walker run accepted six commands
+before rejecting `right_hip_pitch` PD torque demand of 104.9 Nm against an
+88 Nm limit. Reports record the first latch time as `stop_time_seconds`,
+separately from simulation that continues under damping after the rejection.
+The earlier run using policy gains is not a parity baseline for this
+configuration. The checked stairs example also reaches this torque limit
+during startup. No limits were relaxed to make these examples pass.
+
+## Shared thrash detection
+
+Local and ROS simulations both use `robot_safety/thrash.py` and `ThrashConfig`,
+the same implementation and defaults as the real checker. Local mode samples
+measured velocities at each 2 ms physics step using simulation time. Safety-enabled
+ROS mode uses checker feedback receipt times at the bridge's 20 ms cadence.
+With other checks disabled, ROS runs sample in the plant as local runs do.
+There is only one active detector per path, with different sampling latency.
+The walker scenarios reuse the existing walker model and submission command
+path, not the direct `--circle` shortcut:
+
+```bash
+# Belly-up, only thrash enforcement enabled.
+./sim.sh --example walker/thrash --local --seconds 20 --view
+
+# Same experiment, readings without thrash stops.
+./sim.sh --example walker/thrash-monitor --local --seconds 20 --view
+
+# Upright comparison to check false positives.
+./sim.sh --example walker/thrash-monitor --pose standing --local --seconds 20 --view
+```
+
+Use `./desktop_sim.sh` with the same arguments on desktop. Omit `--local` to
+exercise the ROS submission path. Both scenarios default to `supine` with
+other safety checks disabled. Explicit `--pose` and `--safety-checks` override
+those defaults. Protocol validation and non-finite simulation failures remain
+active. Settings live in `containers/examples/prepare.py`, without a separate
+policy or detector implementation.
+
+Ordinary submissions monitor thrashing when safety checks are enabled and
+turn detection off with `--no-safety-checks`. For custom simulation setups,
+`G1_SIM_THRASH_MODE=monitor|enforce|off` configures the shared detector. Walker
+scenarios select their own mode. Hardware uses the `thrash.mode` checker ROS
+parameter. There is no detector-specific launcher flag.
+
+Reports include `thrash.mode`, the first `thrash.event`, current metrics, and
+separate `checks.thrash_monitoring` / `checks.thrash_enforcement` flags. The
+finished-run viewer shows the mode and any detection. Other checks passing
+does not mean a monitored thrash warning was absent.
+
+New traces and live views show whole-body weighted oscillation RMS, its limit,
+and the continuous time above that limit. Per-joint rows show oscillatory RMS,
+motion RMS, weight, and percentage of the total weighted energy. Hips, knees
+and waist weigh 4, shoulders 3, ankles 2, elbows 1, and wrists 0.25. The shared
+score is `sqrt(sum(weight * oscillatory_RMS²) / sum(weight))`, with a provisional
+limit of 1.5 for 500 ms. CV and the former local/distributed/severe rules no
+longer stop motion. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
+for details. These are motion-risk weights, not measured joint inertias.
+
+Space pauses and arrow keys step both motion and readings. **Go to start / Home**
+jumps to the first frame and pauses. **Restart replay / R** plays from the
+beginning, preserving the camera and without rerunning the simulation. Old traces preserve
+their original detections and are labeled as legacy recordings. Start a new run
+to see the new score. Detection defaults remain provisional, without automatic
+threshold adaptation or task exemptions.
+
+## Stop reasons in the viewer
+
+The viewer records the first policy-stop reason, time, affected joint or base
+axis, measured value and limit where available. Thrash enforcement includes the
+whole-body score, limit, duration and largest joint contributors. The card distinguishes
+PD torque demand from applied torque. Live frames and new traces retain this
+metadata, and older replays can recover it from the adjacent report. Later
+faults do not replace the original cause. A stopped policy may be followed by
+simulated damping, so total replay duration is not the time of the fault.
+
+No current-to-target position-gap or response-error threshold stops motion,
+including the first command. Position clipping is a warning. A very large or
+malformed command can still fail protocol sanity bounds, and position error
+still contributes to the separate PD torque calculation.
+
+| Stop source | When active |
+| --- | --- |
+| Joint target/measured velocity, feedforward torque, PD/applied torque | Checked submissions, with measured velocity also checked in direct circle mode |
+| Base angular speed and standing fall | Safety checks on, with upright fall disabled for floor poses |
+| Command/observation/feedback/loop deadlines | Safety checks on, according to the control path |
+| Thrashing | Enforcement mode, including `walker/thrash`, independently of other safety checks |
+| Malformed commands, wrong session/sequence, unknown observation IDs | Submission protocol, including unchecked runs |
+| Non-finite simulation, policy/plant exceptions, process shutdown | All modes |
+| External abort, expired postcheck envelope or silent checker | ROS gateway paths |
+
+A requested duration ending is normal completion. Waiting for a policy until
+the ROS startup deadline expires produces `no_command`, rather than a safety
+pass. With `walker/thrash-monitor`, motion limits and thrash
+stops are disabled, while diagnostics continue.
+
+## Other simulation checks
 
 With safety checks enabled, `containers/sim/runner.py` checks:
 
 - `session_id` matches the armed session, `sequence` increases, and `observation_id` is still fresh.
 - Targets, gains, and feedforward torque are finite and inside the sanity bounds.
-- The command matches the joint profile: position, tracking, target rate, zero feedforward torque, and torque demand.
-- After the step, a held overspeed latches. A fall latches only from the standing start.
+- The shared processor clips positions and checks target velocity, feedforward torque, and torque demand using profile gains.
+- During each physics step, overspeed latches. A fall latches only from the standing start.
 
 `hardware_authorization` in the report is always false. A passing sim run is not permission to run on the robot.
 

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 import rclpy
-from him_safety_interfaces.msg import Abort, JointCommand, RobotFeedback
+from him_safety_interfaces.msg import Abort, CheckedCommand, JointCommand, RobotFeedback
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
@@ -23,18 +23,24 @@ from std_srvs.srv import Trigger
 SIM_DIR = Path(__file__).resolve().parent
 REPO = SIM_DIR.parents[1]
 sys.path.insert(0, str(REPO / "robot_safety"))
+sys.path.insert(0, str(REPO))
+from robot_safety.motor_gate import MotorCommandGate
+
 FEEDBACK = "/safety/robot_feedback"
 POLICY_OBSERVATION = "/safety/policy_observation"
 PRECHECK = "/safety/precheck"
+POSTCHECK = "/safety/postcheck"
 ABORT = "/safety/abort"
 ARM = "/safety/checker/arm"
 
 
 class PlantClient:
-    def __init__(self, python, timeout=10.0):
+    def __init__(self, python, timeout=10.0, *, external_checker=False):
         self.timeout = timeout
         self.failed = False
         env = os.environ.copy()
+        if external_checker:
+            env["G1_SIM_THRASH_MODE"] = "off"
         env["PYTHONPATH"] = os.pathsep.join(
             [
                 str(REPO / "packages/policy_safety/src"),
@@ -99,12 +105,17 @@ class PlantClient:
 
 
 class SimBridge(Node):
-    def __init__(self, plant, seconds, report_path, lowstate):
+    def __init__(self, plant, seconds, report_path, lowstate, checker=None):
         super().__init__("mujoco_sim")
         self.plant = plant
         self.seconds = seconds
         self.report_path = report_path
         self.lowstate = lowstate
+        self.checker = checker
+        self.motor_gate = MotorCommandGate(checker.host_boot_id, checker.config) if checker else None
+        self.pending_states = {}
+        self.observation_map = {}
+        self.auto_arm = bool(os.environ.get("G1_SIM_EXAMPLE"))
         self.created = time.monotonic()
         self.run_started = None
         self.startup = float(os.environ.get("G1_SIM_STARTUP", "10"))
@@ -118,13 +129,22 @@ class SimBridge(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.feedback_pub = self.create_publisher(RobotFeedback, FEEDBACK, feedback_qos)
-        self.observation_pub = self.create_publisher(
-            RobotFeedback, POLICY_OBSERVATION, feedback_qos
-        )
+        if checker is None:
+            self.observation_pub = self.create_publisher(
+                RobotFeedback, POLICY_OBSERVATION, feedback_qos
+            )
+        else:
+            self.create_subscription(
+                RobotFeedback, POLICY_OBSERVATION, self.on_observation, feedback_qos
+            )
         self.sim_state_pub = self.create_publisher(String, "/sim/state", feedback_qos)
         self.abort_pub = self.create_publisher(Abort, ABORT, abort_qos)
-        self.create_subscription(JointCommand, PRECHECK, self.on_precheck, command_qos)
-        self.create_service(Trigger, ARM, self.on_arm)
+        if checker is None:
+            self.create_subscription(JointCommand, PRECHECK, self.on_precheck, command_qos)
+            self.create_service(Trigger, ARM, self.on_arm)
+        else:
+            self.create_subscription(CheckedCommand, POSTCHECK, self.on_postcheck, command_qos)
+        self.create_subscription(Abort, ABORT, self.on_abort, abort_qos)
         self.create_timer(0.02, self.on_control)
         self.create_timer(0.1, self.repeat_abort)
         self.abort_reason = None
@@ -166,9 +186,84 @@ class SimBridge(Node):
         else:
             self.latch(result.get("reason") or "invalid_command")
 
+    def on_observation(self, message):
+        """Attach checker-issued command provenance to the extended sim state."""
+        state = self.pending_states.pop(message.received_at_secs, None)
+        if state is None or self.finished or self.abort_reason:
+            return
+        supervisor = self.checker.supervisor
+        if supervisor.stop_reason:
+            self.latch(supervisor.stop_reason)
+            return
+        if self.auto_arm and supervisor.policy_session_id is None:
+            if self.sim_state_pub.get_subscription_count() == 0:
+                return
+            response = self.checker.on_arm(Trigger.Request(), Trigger.Response())
+            if not response.success:
+                self.latch(response.message)
+                return
+        self.observation_map[message.observation_id] = (
+            state["session_id"], state["observation_id"]
+        )
+        while len(self.observation_map) > 512:
+            del self.observation_map[next(iter(self.observation_map))]
+        state = dict(state, observation_id=message.observation_id,
+                     session_id=supervisor.policy_session_id or "")
+        sim_message = String()
+        sim_message.data = json.dumps(state)
+        self.sim_state_pub.publish(sim_message)
+
+    def on_postcheck(self, message):
+        """Apply only a fresh checked command accepted by the shared motor gate."""
+        from robot_safety.ros_nodes import command_from_ros
+
+        if self.finished or self.abort_reason:
+            return
+        now = time.monotonic()
+        gate = self.motor_gate
+        if gate.policy_session_id is None:
+            session = self.checker.supervisor.policy_session_id
+            if not session or message.command.session_id != session:
+                self.latch("invalid_postcheck_session")
+                return
+            gate.arm(session, now)
+        if not gate.receive(command_from_ros(message.command), message.host_boot_id,
+                            message.checked_at_secs, message.expires_at_secs, now):
+            self.latch(gate.abort_reason or "invalid_postcheck")
+            return
+        source = self.observation_map.get(message.command.observation_id)
+        if source is None:
+            received = self.checker.supervisor.observation_received_times_secs.get(
+                message.command.observation_id
+            )
+            state = self.pending_states.get(received)
+            if state is not None:
+                source = (state["session_id"], state["observation_id"])
+        if source is None:
+            self.latch("unknown_sim_observation")
+            return
+        command = message.command
+        frame = {key: list(getattr(command, key)) for key in ("q", "dq", "kp", "kd", "tau")}
+        frame.update(session_id=source[0], sequence=int(command.sequence), observation_id=source[1])
+        result = self.plant.call({"op": "command", "time": self.clock(), "frame": frame})
+        if result.get("ok"):
+            self.accepted = True
+            if self.run_started is None:
+                self.run_started = now
+        else:
+            self.latch(result.get("reason") or "invalid_command")
+
+    def on_abort(self, message):
+        if message.source != "mujoco_sim" and not self.finished:
+            self.latch(message.reason or "external_abort")
+
     def on_control(self):
         if self.finished:
             return
+        if self.motor_gate is not None:
+            self.motor_gate.cycle(time.monotonic())
+            if self.motor_gate.abort_reason:
+                self.latch(self.motor_gate.abort_reason)
         if self.run_started is None:
             if time.monotonic() - self.created >= self.startup:
                 self.finish()
@@ -183,9 +278,11 @@ class SimBridge(Node):
                 feedback=True,
                 clock_origin=self.created,
             )
+            if self.checker:
+                request["thrash"] = self.checker.supervisor.thrash_detector.snapshot()
         state = self.plant.call(request)
         if state.get("reason"):
-            self.latch(state["reason"])
+            self.latch(state["reason"], state.get("detail"))
         if not state.get("ok"):
             self.latch(state.get("reason") or "plant_error")
             self.finish()
@@ -196,21 +293,33 @@ class SimBridge(Node):
 
     def publish_state(self, state):
         message = RobotFeedback()
-        message.host_boot_id = "mujoco-sim"
-        message.received_at_secs = self.clock()
-        message.observation_id = int(state["observation_id"])
+        message.host_boot_id = self.checker.host_boot_id if self.checker else "mujoco-sim"
+        message.received_at_secs = time.monotonic() if self.checker else self.clock()
+        message.observation_id = 0 if self.checker else int(state["observation_id"])
         message.q = list(state["q"])
         message.dq = list(state["dq"])
         message.start_button_pressed = False
+        if self.checker:
+            self.pending_states[message.received_at_secs] = state
+            while len(self.pending_states) > 64:
+                del self.pending_states[next(iter(self.pending_states))]
+            self.feedback_pub.publish(message)
+            return
         self.feedback_pub.publish(message)
         self.observation_pub.publish(message)
         sim_message = String()
         sim_message.data = json.dumps(state)
         self.sim_state_pub.publish(sim_message)
 
-    def latch(self, reason):
+    def latch(self, reason, detail=None):
         if self.abort_reason is None:
             self.abort_reason = reason
+            if self.motor_gate is not None:
+                self.motor_gate.abort(reason)
+            if not self.plant.failed:
+                if detail is None and self.checker and self.checker.supervisor.stop_reason == reason:
+                    detail = self.checker.supervisor.stop_detail
+                self.plant.call({"op": "abort", "reason": reason, "detail": detail})
             self.repeat_abort()
 
     def repeat_abort(self):
@@ -225,8 +334,12 @@ class SimBridge(Node):
         if self.finished:
             return
         if error is None:
+            thrash = None
+            if self.checker:
+                thrash = self.checker.supervisor.thrash_detector.snapshot()
             report = self.plant.call(
-                {"op": "report", "lowstate": bool(getattr(self.lowstate, "ok", False))}
+                {"op": "report", "lowstate": bool(getattr(self.lowstate, "ok", False)),
+                 "thrash": thrash}
             )
         else:
             self.latch("plant_error")
@@ -283,19 +396,37 @@ def main():
     lowstate = SimLowState(
         os.environ.get("ROBOT_DOMAIN", "0"), os.environ.get("ROBOT_INTERFACE", "lo")
     )
-    plant = PlantClient(python)
+    shared_checker = os.environ.get("G1_SIM_SAFETY_CHECKS", "1") == "1" and (
+        os.environ.get("G1_SIM_CIRCLE") != "1"
+    )
+    plant = PlantClient(python, external_checker=shared_checker)
     node = None
+    checker = None
+    executor = None
     try:
         armed = plant.call({"op": "arm"})
         if not armed.get("ok"):
             print(armed, file=sys.stderr)
             return 2
-        rclpy.init()
-        node = SimBridge(plant, seconds, report, lowstate)
+        rclpy.init(args=["--ros-args", "-p", "thrash.mode:=" + (os.environ.get("G1_SIM_THRASH_MODE") or "monitor")])
+        from rclpy.executors import SingleThreadedExecutor
+
+        from robot_safety.ros_nodes import SafetyCheckerNode
+
+        checker = SafetyCheckerNode() if shared_checker else None
+        node = SimBridge(plant, seconds, report, lowstate, checker)
+        executor = SingleThreadedExecutor()
+        if checker:
+            executor.add_node(checker)
+        executor.add_node(node)
+        while checker and checker.supervisor.latest_robot_observation is None:
+            executor.spin_once(timeout_sec=0.005)
+            if time.monotonic() - node.created >= node.startup or checker.abort_reason:
+                raise RuntimeError("simulation checker did not receive fresh feedback")
         ready.parent.mkdir(parents=True, exist_ok=True)
         ready.write_text("ready\n")
         while rclpy.ok() and not node.finished:
-            rclpy.spin_once(node, timeout_sec=0.05)
+            executor.spin_once(timeout_sec=0.005)
         code = node.exit_code
     except (OSError, ValueError, RuntimeError) as exc:
         if node is not None:
@@ -304,6 +435,10 @@ def main():
             print(str(exc), file=sys.stderr)
         code = 2
     finally:
+        if executor is not None:
+            executor.shutdown()
+        if checker is not None:
+            checker.destroy_node()
         if node is not None:
             node.destroy_node()
             rclpy.shutdown()

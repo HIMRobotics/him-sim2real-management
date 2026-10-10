@@ -5,7 +5,6 @@
   ],
   "handover_secs": 3.0,
   "max_publish_gap_secs": 0.1,
-  "initial_position_tolerance_rad": 0.3,
   "initial_velocity_tolerance_rad_secs": 0.5,
   "joints": {
     "left_hip_pitch": {

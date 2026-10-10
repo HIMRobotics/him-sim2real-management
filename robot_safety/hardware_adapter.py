@@ -30,10 +30,11 @@ from .joint_checks import (
     MOTOR_WINDING_LIMIT_C,
     check_base_motion,
     check_bound,
-    check_command,
     check_measured_velocity,
     check_torque,
+    checked_targets,
     clip_position,
+    torque_demand,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
 
@@ -404,9 +405,11 @@ class G1ArmAdapter:
             check_base_motion(self.gyro, self.quat)
             if self.q_applied is not None:
                 for index, limits in zip(UPPER_BODY_INDICES, self.profile.joints):
-                    tau_demand = (limits.kp * (self.q_applied[index] - self.feedback.q[index])
-                                  + limits.kd * (self.dq_applied[index] - self.feedback.dq[index])
-                                  + self.tau_applied[index])
+                    tau_demand = torque_demand(
+                        self.q_applied[index], self.dq_applied[index], limits.kp,
+                        limits.kd, self.tau_applied[index], self.feedback.q[index],
+                        self.feedback.dq[index],
+                    )
                     check_torque(G1_29_JOINT_NAMES[index], limits, tau_demand)
         except ValueError as error:
             self.abort(str(error), request_damping=True)
@@ -420,25 +423,14 @@ class G1ArmAdapter:
 
     def checked_targets(self, now):
         """Check proposals with the profile gains used by the arm controller."""
-        targets = {}
-        initial = self.last_output_secs is None
-        for index, limits in self._monitored_joints():
-            q_proposed = self.command["q"][index]
-            dq_proposed = self.command["dq"][index]
-            tau = self.command["tau"][index]
-            joint = G1_29_JOINT_NAMES[index]
-            q_measured = self.feedback.q[index]
-            q_commanded = check_command(joint, limits, q_proposed, dq_proposed, tau, q_measured, initial,
-                          self.profile.initial_position_tolerance_rad,
-                          self.profile.initial_velocity_tolerance_rad_secs,
-                          warnings=self.position_warnings)
-            tau_demand = (limits.kp * (q_commanded - q_measured)
-                          + limits.kd * (dq_proposed - self.feedback.dq[index]) + tau)
-            check_torque(joint, limits, tau_demand)
-            if index in UPPER_BODY_INDICES:
-                targets[index] = {"q": q_commanded, "dq": dq_proposed, "kp": limits.kp,
-                                  "kd": limits.kd, "tau": tau}
-        return targets
+        targets = checked_targets(
+            self.command,
+            ((index, G1_29_JOINT_NAMES[index], limits) for index, limits in self._monitored_joints()),
+            self.feedback.q, self.feedback.dq, initial=self.last_output_secs is None,
+            initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
+            warnings=self.position_warnings,
+        )
+        return {index: targets[index] for index in UPPER_BODY_INDICES}
 
     def stop_once(self):
         """Damp on double Start, balance on double F3, otherwise hold the arms."""
