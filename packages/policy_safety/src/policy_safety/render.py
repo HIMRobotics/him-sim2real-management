@@ -141,14 +141,13 @@ def render_selection(request, names, fps=20):
     output = Path(request["output"])
     output.mkdir(parents=True, exist_ok=True)
     (output / "traces").mkdir(exist_ok=True)
-    sim, adapter, profile, joint_rules, clip, _files = load_session(request)
+    sim, adapter, profile, joint_rules, _files = load_session(request)
     run = partial(
         run_scenario,
         sim,
         adapter,
         profile,
         joint_rules=joint_rules,
-        clip_to_stops=clip,
         continue_after_violation=True,
     )
     midpoint = round(0.5 * suite["nominal_seconds"] / sim.dt)

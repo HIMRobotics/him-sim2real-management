@@ -67,13 +67,14 @@ and measured or last-written-command effort above the hard ceiling still fault.
 Arm-only helpers retain rejection without this projection. A small response error does not establish safety. Response diagnostics
 never latch a stop or silently increase any limit.
 
-## Next priority: thrashing and flailing detection
+## Thrashing and flailing detection
 
-Develop a detector based on measured motion over time, with joint speed, torque
-and body motion as inputs. Validate it against normal gait and deliberately
-unstable simulation cases before enabling a new stop condition. A position
-command gap alone is not evidence of thrashing. Existing physical limits remain
-active but are not a complete detector of unstable motion.
+The shared thrash detector evaluates measured joint velocities over time using
+filtered, weighted oscillation energy and a persistence window. Hardware
+submission defaults to enforcement. Simulation supports monitor, enforce and
+off modes. See [thrash detection](../README.md#thrash-detection-in-the-existing-checker)
+for configuration and telemetry. Command gaps and response errors remain
+diagnostic only, while physical speed and torque limits remain active.
 
 ## Runtime and startup checks
 

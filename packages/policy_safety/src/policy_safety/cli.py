@@ -188,11 +188,6 @@ def main(argv=None):
             type=Path,
             default=Path(__file__).parent / "profiles/provisional.json",
         )
-        command.add_argument(
-            "--clip-to-stops",
-            action="store_true",
-            help="compatibility flag, position clipping with warnings is always enabled",
-        )
     evaluate.add_argument("--suite", type=Path)
     evaluate.add_argument("--output", required=True, type=Path)
     evaluate.add_argument(
@@ -230,9 +225,7 @@ def main(argv=None):
             name: str(getattr(args, name).resolve())
             for name in ("model", "robot_config", "profile", "joint_profile")
         }
-        request.update(
-            adapter=args.adapter, output=str(output), clip_to_stops=args.clip_to_stops
-        )
+        request.update(adapter=args.adapter, output=str(output))
         if rendering:
             os.environ.setdefault("MUJOCO_GL", "egl")
             from .evaluation import summarize_scenarios
@@ -253,10 +246,9 @@ def main(argv=None):
             print(
                 f"Joint rules: {movement['profile_file']} | covered={len(movement['covered_joints'])} | uncovered={len(movement['uncovered_joints'])}"
             )
-        clipping = "on" if report.get("clip_to_stops") else "off"
         print(
             f"{report['status']}: exit {report['exit_code']}, "
-            f"clip_to_stops={clipping}, coverage {coverage}"
+            f"coverage {coverage}"
         )
         print_scenario_summary(report.get("scenario_summary", []))
         failures = [

@@ -103,7 +103,7 @@ machine, hop modifications, and arm overrides. Consequently, its results do not
 describe the complete stairs submission. Decoded positions are clipped to the
 intersection of model and joint-profile bounds. Reports retain the raw proposal,
 clipped command and per-joint warnings. Torque checks use the clipped
-command. `--clip-to-stops` remains a compatibility flag, as clipping is now default.
+command. Position clipping is always enabled and has no command-line toggle.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
 tensor dimensions is insufficient. Follow the `G1Walker` adapter contract, register it

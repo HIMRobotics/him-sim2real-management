@@ -1,5 +1,4 @@
 import unittest
-from pathlib import Path
 
 import numpy as np
 
@@ -9,6 +8,7 @@ from robot_safety.balance_policy import (
     SINGLE_OBS_DIM,
     gravity_orientation,
     single_observation,
+    resolve_model_path,
 )
 
 
@@ -29,14 +29,8 @@ class BalancePolicyTests(unittest.TestCase):
         self.assertAlmostEqual(float(obs[16]), -0.3)
 
     def test_network_output_width(self):
-        model = (
-            Path(__file__).resolve().parents[1]
-            / ".cache"
-            / "groot_balance"
-            / "GR00T-WholeBodyControl-Balance.onnx"
-        )
-        if not model.is_file():
-            self.skipTest("balance network is not downloaded")
+        model = resolve_model_path()
+        self.assertTrue(model.is_file(), f"balance weights missing at {model}")
         from robot_safety.balance_policy import BalancePolicy
 
         policy = BalancePolicy(str(model))

@@ -438,21 +438,6 @@ def test_raw_clipping_is_recorded(setup, tmp_path):
     assert result["first_violation"]["reason"] == "joint_torque_limit"
 
 
-def test_clip_to_stops_checks_the_clipped_command(setup, tmp_path):
-    sim, adapter, profile = setup
-    adapter.session.value = 1000
-    result, _ = run_scenario(
-        sim,
-        adapter,
-        profile,
-        scenario(),
-        tmp_path / "clipped-command.npz",
-        clip_to_stops=True,
-    )
-    assert result["first_violation"]["reason"] == "joint_torque_limit"
-    assert result["status"] == "violation"
-
-
 def test_clipping_is_a_warning_and_trace_records_executed_command(setup, tmp_path, monkeypatch):
     sim, adapter, profile = setup
     rules = JointRules(sim.robot["joint_names"])

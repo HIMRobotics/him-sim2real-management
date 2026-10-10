@@ -183,7 +183,6 @@ def run_scenario(
     trace_path,
     checkpoint_steps=(),
     joint_rules=None,
-    clip_to_stops=False,
     *,
     continue_after_violation=False,
 ):
@@ -394,9 +393,6 @@ def run_scenario(
 
 def load_session(request):
     """Validate inputs for both screening and rendering before inference."""
-    clip = request.get("clip_to_stops", False)
-    if type(clip) is not bool:
-        raise ValueError("clip_to_stops must be a boolean")
     sim = Simulation(request["robot_config"])
     profile = profile_config(request["profile"])
     rules = JointRules(
@@ -406,7 +402,7 @@ def load_session(request):
     if request["adapter"] == "nvidia-decoupled-wbc-516-v1":
         files += model_files(Path(request["model"]).with_name("balance.onnx"))
     adapter = ADAPTERS[request["adapter"]](request["model"], sim.robot)
-    return sim, adapter, profile, rules, clip, files
+    return sim, adapter, profile, rules, files
 
 
 def evaluate(request):
@@ -415,7 +411,7 @@ def evaluate(request):
     suite = suite_config(request.get("suite"))
     plan = plan_scenarios(suite)
     planned = plan["baseline_count"] + len(plan["pushes"])
-    sim, adapter, profile, joint_rules, clip_to_stops, files = load_session(request)
+    sim, adapter, profile, joint_rules, files = load_session(request)
     for name in ("nominal_seconds", "branch_seconds", "counterfactual_seconds"):
         steps = round(suite[name] / sim.dt)
         if steps < 1 or not np.isclose(steps * sim.dt, suite[name], atol=1e-10, rtol=0):
@@ -559,7 +555,6 @@ def evaluate(request):
                 trace,
                 checkpoints,
                 joint_rules,
-                clip_to_stops,
             )
         except Exception as exc:  # noqa: BLE001 - Report each failed scenario independently.
             result, snapshots = (
