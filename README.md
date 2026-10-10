@@ -52,7 +52,7 @@ The app is a small local web page served by Python’s standard library: no Node
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | SDK, networking, empty commands, interruptions |
 | [ARENA_RECEIVING.md](ARENA_RECEIVING.md) | Receiving, verifying, interpreting, and comparing runs |
 | [VALIDATION.md](VALIDATION.md) | Tests actually run and hardware checks remaining |
-| `examples/` | Organized model bundles, command files, and a walker test submission. Its build writes `.cache/walker_submission/submission.tar`. |
+| `examples/` | Model bundles and command files for the shared policy client in `containers/examples/`. |
 | `setup.sh`, `sim.sh`, `desktop_sim.sh`, [containers/SIM_RUN.md](containers/SIM_RUN.md), [containers/INSTRUCTIONS.md](containers/INSTRUCTIONS.md) | Run an uploaded container on the robot, or against MuJoCo first. `desktop_sim.sh` is the Mac/Windows entry: local modes need no Docker, and the ROS path uses `containers/sim/compose.yaml`. |
 
 From a Mac or Linux laptop, choose **Set up the G1 over SSH** to check existing SSH access, copy the recorder, transfer a policy file with checksum verification, and open the robot recorder through a managed tunnel. An existing trusted SSH host and unlocked key/agent are required. The remote Linux Python needs the Unitree SDK. The app transfers policies but never executes them.
@@ -114,9 +114,9 @@ for installation checks and arm-raise verification.
 
 ## Policy submission
 
-`submit.sh` selects simulation or real hardware. `sim.sh` and `real.sh` remain
-compatible entry points. Hardware launch behavior stays in the existing
-`setup.sh` supervisor and standing safety gate.
+`submit.sh --mode sim` selects simulation, and `submit.sh --mode real` selects
+hardware. Simulation delegates to `sim.sh`. Hardware launch behavior stays in
+the existing `setup.sh` supervisor and standing safety gate.
 
 ```bash
 ./submit.sh --mode sim --example walker --local --seconds 10 \

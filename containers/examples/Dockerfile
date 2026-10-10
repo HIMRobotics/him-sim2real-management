@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake python3-pip python3-colcon-common-extensions \
     ros-foxy-rosidl-default-generators ros-foxy-rmw-fastrtps-cpp ros-foxy-std-srvs \
     && rm -rf /var/lib/apt/lists/*
-# Match the Python 3.8 ARM64 runtime used by the walker submission image.
+# ONNX Runtime 1.16.3 supports ROS Foxy's Python 3.8 on ARM64.
 RUN python3 -m pip install --no-cache-dir numpy==1.24.4 onnxruntime==1.16.3 PyYAML==6.0.2
 WORKDIR /example
 COPY interfaces /example/interfaces

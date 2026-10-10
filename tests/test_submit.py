@@ -13,8 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def launchers(tmp_path):
-    for name in ("submit.sh", "real.sh"):
-        shutil.copy2(ROOT / name, tmp_path / name)
+    shutil.copy2(ROOT / "submit.sh", tmp_path / "submit.sh")
     for name in ("sim.sh", "setup.sh"):
         path = tmp_path / name
         path.write_text(
@@ -81,17 +80,15 @@ def test_holosoma_example_preserves_explicit_groot_startup(launchers):
     assert json.loads(result.stdout)["startup"] == 'groot'
 
 
-@pytest.mark.parametrize(
-    "script,args", [("submit.sh", ["--mode", "real"]), ("real.sh", [])]
-)
-def test_real_alias_preserves_gate_and_container_arguments(launchers, script, args):
+def test_real_mode_preserves_gate_and_container_arguments(launchers):
     command = launchers / "command with spaces.yaml"
     command.write_text("command: [0,0,0]\n")
     result = call(
         launchers,
-        script,
-        args
-        + [
+        "submit.sh",
+        [
+            "--mode",
+            "real",
             "--image",
             "test-policy",
             "--command",
@@ -131,6 +128,6 @@ def test_invalid_submission_is_rejected(launchers, args):
 
 
 def test_stop_routes_to_existing_supervisor(launchers):
-    result = call(launchers, "real.sh", ["stop"])
+    result = call(launchers, "submit.sh", ["--mode", "real", "stop"])
     assert result.returncode == 0
     assert json.loads(result.stdout)["args"] == ["stop"]

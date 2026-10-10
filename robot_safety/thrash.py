@@ -37,7 +37,6 @@ class ThrashConfig:
                 raise ValueError(f"thrash {name} must be finite and positive")
 
 
-
 def default_weights(joints):
     """Relative motion-risk weights in G1 SDK order, not measured inertias."""
     if joints == 29:

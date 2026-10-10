@@ -59,7 +59,7 @@ Some Unitree ONNX exports also include a separate weights file, `policy.onnx.dat
 
 ### C. Custom runner or unknown origin
 
-Use the author's documented launch command in the environment and working directory they specify. The container example is a walker simulation test in [examples/submissions/walker/](examples/submissions/walker/). GR00T balance is a separate model in [examples/policies/balance/](examples/policies/balance/). The walker ONNX contract the checker still understands is described in [ONNX_BUNDLE.md](ONNX_BUNDLE.md). Neither file is a robot launcher. If the author's launch command is missing, the handoff is incomplete. A simulator upload to Arena does not, by itself, establish physical-G1 deployability. This manager records standard G1 telemetry independently of the policy format; it does not automatically adapt an Arena submission.
+Use the author's documented launch command in the environment and working directory they specify. The walker example uses the [shared policy container](containers/examples/README.md) through `submit.sh` for simulation and hardware. GR00T balance is a separate model in [examples/policies/balance/](examples/policies/balance/). The walker ONNX contract is described in [ONNX_BUNDLE.md](ONNX_BUNDLE.md). Model files are not robot launchers. If the author's launch command is missing, the handoff is incomplete. A simulator upload to Arena does not, by itself, establish physical-G1 deployability. This manager records standard G1 telemetry independently of the policy format; it does not automatically adapt an Arena submission.
 
 ## Session order in this app
 

@@ -9,7 +9,7 @@ still starts only the diagnostic gate. Never run both gates together.
 
 ## Consolidated policy deployment
 
-The supported policy route is `real.sh` → `submit.sh --mode real` → `setup.sh`
+The supported policy route is `submit.sh --mode real` → `setup.sh`
 → Docker policy container → checker → `g1-safety-stops.service` → the existing
 single motor writer. The container publishes `/safety/precheck`. The host runs
 startup Balance and applies joint commands. Uploaded images use this same gate.

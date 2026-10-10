@@ -2,7 +2,7 @@
 
 This repository does not load a YAML file to run a policy on the robot. Unitree RL Gym and Unitree RL Lab each have their own deploy YAML, and those files belong to those runners. They are not accepted here.
 
-The walker test container is in [examples/submissions/walker/](examples/submissions/walker/), and its model bundle is in [examples/policies/walker/](examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `nvidia-decoupled-wbc-516-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
+The walker uses the [shared policy container](containers/examples/README.md), and its model bundle is in [examples/policies/walker/](examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `nvidia-decoupled-wbc-516-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
 
 - Adapter: `packages/policy_safety/src/policy_safety/adapter.py` (`NvidiaWalker`)
 

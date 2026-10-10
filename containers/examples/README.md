@@ -1,6 +1,9 @@
-# Runnable simulation policies
+# Shared example policies
 
-`sim.sh` can run real ONNX policies with safety checks on or off, record their motion, and replay their environment. `--example` supplies a policy producer and a matching scene. Safety checks remain enabled by default.
+`submit.sh --mode sim` runs ONNX policies through `sim.sh`, records their motion,
+and supports replay. `submit.sh --mode real` uses the same example client through
+the managed hardware gate. `--example` selects a policy producer and its matching
+simulation scene. Simulation safety checks remain enabled by default.
 
 | Example | Controller | Environment |
 | --- | --- | --- |
@@ -62,7 +65,7 @@ Drop `--local`. The script prompts for sudo, prepares the example files, builds 
 ./sim.sh replay containers/sim/output/docker-stairs-off/trace.npz
 ```
 
-The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. Both example Dockerfiles pin ONNX Runtime 1.16.3 for ROS 2 Foxy's Python 3.8 on ARM64. The previous 1.18.1 pin failed because pip could not find a matching distribution for that environment. Rerunning `sim.sh --example` refreshes the build context and rebuilds with the corrected pin. The walker graph uses IR 9 for that runtime. Builds initialize the packaged model and run a test inference before producing the image. Manual Linux Docker results and remaining checks are recorded in [VALIDATION.md](VALIDATION.md). The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The shared Dockerfile pins ONNX Runtime 1.16.3 for ROS 2 Foxy's Python 3.8 on ARM64. Rerunning `sim.sh --example` refreshes the build context and rebuilds the image. The walker graph uses IR 9 for that runtime. Builds initialize the packaged model and run a test inference before producing the image. Validation commands and detector calibration observations are in [VALIDATION.md](VALIDATION.md). The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
 
 On a Mac or Windows laptop, `./desktop_sim.sh --example walker --view` uses
 Docker Compose and waits for Start before streaming the container run. The same
@@ -80,6 +83,38 @@ use the same image through `setup.sh`, as described in the
 `G1_TASK_COMMAND='[vx,vy,yaw_rate]'` overrides the task command in both the
 container and `--local` example runs. Use `G1_JOINT_PROFILE` to select the same
 effective gains in simulation and hardware.
+
+## Build and export the shared image
+
+From the repository root, prepare and build the walker image without launching
+any robot processes:
+
+```bash
+.venv-policy-safety/bin/python containers/examples/prepare.py walker
+docker build --platform linux/arm64 -t g1-example-walker:local \
+  .cache/sim_examples/walker/container
+docker save g1-example-walker:local -o .cache/sim_examples/walker/submission.tar
+```
+
+The archive contains the shared client, both official Walk/Balance checkpoints,
+model license, and provenance. The build uses the host's ARM64 Docker support or
+configured cross-platform emulation. It does not copy the host Unitree SDK or
+CycloneDDS installation into the image.
+
+Use `--image g1-example-walker:local` with `submit.sh` to run the built image.
+To exercise archive loading, copy the archive into `containers/upload/` as the
+only `.tar` file and run:
+
+```bash
+G1_TASK_COMMAND='[0,0,0]' ./submit.sh --mode sim --seconds 10
+```
+
+With `--example walker`, `--command` supplies a schedule through `G1_COMMAND_FILE`.
+In simulation, `--command` without `--example` selects the direct walker instead
+of loading an archive. Hardware startup and
+handoff follow the [operator guide](../../robot_safety/HARDWARE_ADAPTER.md#operator-commands).
+When using `--image` on hardware, select the matching generated profile with
+`--profile .cache/sim_examples/walker/container/project/joint_profile.json`.
 
 ## Shared policy observations
 

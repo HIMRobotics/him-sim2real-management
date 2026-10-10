@@ -228,7 +228,7 @@ The policy package, the container, and the velocity file are three different cho
 | Choice | How to specify it | What runs | `policy` in the report |
 | --- | --- | --- | --- |
 | Policy package | `--example stairs`, `walker`, or `balance` | `examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
-| Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. The walker test image is built by `examples/submissions/walker/build.sh`. Inside it, `WALKER_COMMAND` selects `stand.yaml` or `circle.yaml`. | The image's `G1_SIM_EXAMPLE`, when that variable is set |
+| Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. See [build and export](examples/README.md#build-and-export-the-shared-image) for the shared walker image. `G1_TASK_COMMAND` sets the shared client's task velocity. | The selected example, when available |
 | Velocity file on the plant | `--command examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
 | Same file in the walker container | `--example walker --command examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
 | Circle shortcut | `--circle` | Same cached walker. The velocity file is `examples/commands/walker/circle.yaml`. | `circle` |
@@ -278,7 +278,7 @@ The run writes:
 | `containers/sim/output/bridge.log` | ROS bridge log, if the run fails early. |
 | `containers/sim/output/policy.log` | Submitted container stdout/stderr, captured before removal. |
 
-When `--output` is supplied, these files go in that directory. Docker runs can be stopped with `./sim.sh stop --output DIR`. Reports include `execution`, the selected example `policy` when applicable, and independent `motion` measurements. The simulation-only `/sim/state` topic supplies base pose and velocity to example controllers. Its schema is in [the examples guide](examples/README.md#simulation-only-policy-observations).
+When `--output` is supplied, these files go in that directory. Docker runs can be stopped with `./sim.sh stop --output DIR`. Reports include `execution`, the selected example `policy` when applicable, and independent `motion` measurements. The shared client receives base pose and velocity through `/safety/policy_state`. Its schema is in [the examples guide](examples/README.md#shared-policy-observations).
 
 `status` in the report:
 

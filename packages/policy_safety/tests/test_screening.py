@@ -566,6 +566,10 @@ def test_evaluation_enforces_profile_and_reports_sampled_coverage(
     report = json.loads((output / "report.json").read_text())
     assert code == 1
     assert report["hashes"]["joint_profile"] == digest(joint_path)
+    assert "thrash.py" in report["hashes"]["implementation"]
+    assert report["thrash_checks"]["mode"] == "enforce"
+    assert "thrashing_energy" in report["acceptance_checks"]["always_checked"]
+    assert all(s["thrash"]["mode"] == "enforce" for s in report["scenarios"])
     assert not report["joint_movement_checks"]["uncovered_joints"]
     assert report["scenarios"][0]["first_violation"]["limit"] == 0.001
     assert report["coverage"]["planned"] == report["coverage"]["reported"] == 100

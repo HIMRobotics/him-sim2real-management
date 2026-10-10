@@ -32,7 +32,7 @@ packages/*/dist/
 
 tmp
 
-# Legacy build artifacts. New example builds use .cache/walker_submission/.
+# Legacy build artifacts. Shared example builds use .cache/sim_examples/.
 examples/submission.tar
 examples/.build/
 

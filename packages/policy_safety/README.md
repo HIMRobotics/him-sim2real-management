@@ -68,7 +68,7 @@ policy-safety evaluate \
   --output ./screening-result
 ```
 
-The wheel includes the shared checker and default joint profile. Copy the entire
+The wheel includes the shared joint checker, thrash detector, and default joint profile. Copy the entire
 bundle, including ONNX external weights and robot assets. Copying only the repository
 wrapper script is insufficient. Detailed hardware leg validation is separate follow-up
 work and is not required to run this offline pipeline.
@@ -92,10 +92,10 @@ velocities, previous network action, and commanded forward/lateral/yaw velocity.
 The sample ONNX graph already contains normalization. Outputs become joint
 position targets using explicit per-joint defaults and scales, with the sample's
 position actuator gains and 20 ms control / 2 ms physics timing. The same
-contract is the YAML described in
-[ONNX_BUNDLE.md](../../ONNX_BUNDLE.md). `prepare-g1` reads that YAML and writes
-`robot.json` for the checker. The walker test container is in
-[examples/submissions/walker/](../../examples/submissions/walker/).
+contract is defined in the
+[stairs bundle](../../examples/policies/stairs/walker.yaml). `prepare-g1` reads
+that YAML and writes `robot.json` for the checker. The example container uses the
+[shared policy client](../../containers/examples/README.md).
 
 This tests all 29 network outputs. It excludes the submission's scripted phase
 machine, hop modifications, and arm overrides. Consequently, its results do not
@@ -199,6 +199,22 @@ The joint rules clip out-of-range position proposals and desired joint speeds
 with warnings, and reject feedforward torque or total PD torque demand.
 Initial desired speed is limited to 0.05 rad/s.
 
+### Shared thrash checks
+
+Thrash enforcement is enabled by default in the standalone checker. Every physics
+step calls the same `ThrashDetector` used by the runtime checker, using measured
+joint velocities and simulation time. It uses the shared provisional defaults:
+a weighted oscillation RMS of 1.5 sustained for 500 ms. A detection records a
+`thrashing_energy` violation, including the score, persistence, and joint
+contributions. Branches stop at detection. Nominal runs continue through their
+checkpoints so dependent scenarios remain available.
+
+Detector filter history and persistence are saved and restored with checkpoints.
+Independent nominal runs and counterfactual starts reset the detector. Reports
+include `thrash_checks` settings and each scenario's `thrash` telemetry. NPZ traces
+include `initial_thrash_state_json` and final `thrash_json`. No ROS or hardware
+runtime is needed to use the shared detector.
+
 ### Shared speed checks
 
 Measured velocity is checked immediately against Unitree revision-1.0 model
@@ -243,8 +259,8 @@ violations include the joint, observed value, threshold, units and simulation ti
 The table counts problems out of the scenarios in each gait, each gait's pushes,
 and each starting pose. One run counts in every class it hits, so the fractions
 can overlap. A limit, a flail, a fall, any other violation, or an error is a
-`problem`. `flailing` means a measured joint speed exceeds its model limit or
-any body angular-velocity axis exceeds 6 rad/s, on any sample. Position, speed,
+`problem`. `flailing` includes sustained thrash detections, a measured joint speed
+exceeding its model limit, or any body angular-velocity axis exceeding 6 rad/s. Position, speed,
 torque, and range breaches are `limits`. A skipped branch is counted separately.
 Clipping warnings remain in each scenario's `warnings` map. Response errors
 remain diagnostic peaks and do not contribute to the problem counts.
