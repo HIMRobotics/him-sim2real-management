@@ -16,9 +16,15 @@ startup Balance and applies joint commands. Uploaded images use this same gate.
 The arm-only manual examples below retain stock leg control and are not this
 whole-body policy deployment route.
 
-Every whole-body deployment runs the bundled official GR00T Balance checkpoint
-before submitted actions reach the motors. The gate requires at least 2 seconds
-of Balance and a continuous 1-second window with tilt at most 0.15 rad, gyro norm
+Whole-body deployments default to the bundled official GR00T Balance checkpoint
+before submitted actions reach the motors, including the Holosoma example.
+An explicit `--startup holosoma` overrides the startup controller.
+Double F3 uses a separate Holosoma standing policy at zero velocity on all
+29 joints with model gains. It resets inference history from measured state
+and skips the startup crouch ramp. Recovery shares the 20 ms policy clock and
+2 ms command refresh. Double Start still requests stock damping.
+
+The startup gate requires at least 2 seconds of Balance and a continuous 1-second window with tilt at most 0.15 rad, gyro norm
 at most 0.25 rad/s, and every joint speed at most 0.6 rad/s. Samples must be finite
 and younger than 200 ms. Repeated timestamps or SDK ticks do not advance the
 window. These provisional thresholds passed local simulation, not physical

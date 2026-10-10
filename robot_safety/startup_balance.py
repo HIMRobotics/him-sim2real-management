@@ -51,7 +51,7 @@ class StartupBalance:
         return float(seconds), target
 
     def _entry_window(self):
-        """SONIC spends its ramp reaching the standing pose before inference."""
+        """Allow the standing-pose ramp to finish before checking stability."""
         spec = self._pose_ramp_spec()
         if spec is None:
             return self.entry_seconds

@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import replace
 from threading import Event, Lock, RLock, Thread
 
-from .balance_policy import LEG_KD, LEG_KP, MODEL_PATH, BalancePolicy
+from .balance_policy import MODEL_PATH, BalancePolicy
 from .config import Config
 from .controller import (
     LeftAndBDetector,
@@ -19,7 +19,6 @@ from .controller import (
 )
 from .feedback import feedback_from_sdk
 from .hardware_constants import (
-    ARM_INDICES,
     DAMPING_FSM_ID,
     G1_29_JOINT_NAMES,
     SDK_RPC_SEND_CODE,
@@ -49,7 +48,6 @@ from .joint_checks import (
 )
 from .joint_diagnostics import JointDeltaDiagnostics
 from .holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
-from .sonic_policy import SonicStandingPolicy
 from .control_trace import ControlTrace, default_trace_path
 from .sdk_latest import poll_deadline
 from .startup_balance import StartupBalance
@@ -117,9 +115,10 @@ class G1ArmAdapter:
         self.walk_rpc_code = None
         self.walk_stop = False
         self.balance_policy = None
+        self.soft_reset_policy = None
         self.startup_policy = None
         requested = os.environ.get("G1_STARTUP_POLICY", "groot").strip().lower()
-        if requested not in ("groot", "sonic", "holosoma"):
+        if requested not in ("groot", "holosoma"):
             print(
                 "Unknown G1_STARTUP_POLICY {0!r}; startup stays on GR00T Balance.".format(requested),
                 flush=True,
@@ -362,6 +361,8 @@ class G1ArmAdapter:
             if self.whole_body:
                 if not self._ensure_balance_policy():
                     return self.reject_arm("startup_balance_model_unavailable")
+                if not self._ensure_soft_reset_policy():
+                    return self.reject_arm("soft_reset_model_unavailable")
                 if not self._ensure_startup_policy():
                     return self.reject_arm("startup_balance_model_unavailable")
             # Serialize granting control with an abort arriving from another thread.
@@ -387,7 +388,8 @@ class G1ArmAdapter:
         self.last_worker_cycle_secs = None
         self.last_written_ownership_weight = 0.0
         self.ownership_taken = False
-        self.hold_targets = self.arm_hold_q = None
+        self.hold_targets = None
+        self.soft_reset_active = False
         self.joint_diagnostics = JointDeltaDiagnostics()
         self.position_warnings = {}
         self.startup = StartupBalance()
@@ -412,7 +414,7 @@ class G1ArmAdapter:
             if soft_balance and self.abort_reason is None:
                 # The recovery writer replaces the submission and its heartbeat.
                 self.q_applied = None
-                self.arm_hold_q = None
+                self.soft_reset_active = False
                 self.last_worker_cycle_secs = self.clock()
             first_fault = self.abort_reason is None
             if first_fault:
@@ -459,6 +461,9 @@ class G1ArmAdapter:
 
     def step(self):
         """Check and publish one command from the single output worker."""
+        if self.walk_stop and not self.hold_failed and self.stop_requested.is_set():
+            self.stop_once()
+            return
         with self.lock:
             if not self.armed or self.abort_reason or self.stop_requested.is_set():
                 return
@@ -789,43 +794,75 @@ class G1ArmAdapter:
             self._request_stock_damping()
 
     def _publish_balance(self):
-        """Hold the GR00T standing network on the legs. Arms stay at the captured pose."""
-        if self.balance_policy is None:
+        """Run zero-velocity Holosoma recovery on all 29 joints."""
+        policy = self.soft_reset_policy
+        if policy is None:
+            if self.balance_released or self.ownership_taken:
+                self.hold_failed = True
+                self._request_stock_damping()
             return
         if not self.balance_released:
+            self.release_pending = True
             try:
                 self.walk_rpc_code = self.transport.release_motion(announce_soft_reset=True)
             except Exception:  # noqa: BLE001
                 self.walk_rpc_code = None
                 return
+            finally:
+                self.release_pending = False
+                self.last_worker_cycle_secs = self.clock()
             if self.walk_rpc_code != 0:
                 return
             self.balance_released = True
-        if self.feedback is None:
-            return
-        feedback = self.feedback
-        q = feedback.q
-        if self.arm_hold_q is None:
-            reset = getattr(self.balance_policy, "reset", None)
-            if callable(reset):
-                reset()
-            self.arm_hold_q = tuple(q[index] for index in ARM_INDICES)
         try:
-            lower = self.balance_policy.update(q, feedback.dq, self.quat, self.gyro)
-            now = self.clock()
-            if not 0 <= now - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS:
+            feedback = self.feedback
+            if feedback is None or not self.feedback_fresh(self.clock()):
                 raise ValueError("stale balance feedback")
-            if self.hold_failed:
-                self._request_stock_damping()
+            if not self.soft_reset_active:
+                policy.reset()
+                self.soft_reset_active = True
+            q = policy.update(feedback.q, feedback.dq, self.quat, self.gyro)
+            if any(len(values) != 29 for values in (q, policy.kp, policy.kd)):
+                raise ValueError("invalid balance output shape")
+            if not all(math.isfinite(value) for values in (q, policy.kp, policy.kd) for value in values):
+                raise ValueError("nonfinite balance output")
+            if not self.feedback_fresh(self.clock()) or not (
+                0 <= self.clock() - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS
+            ):
+                raise ValueError("stale balance feedback")
+            # Recovery uses the trained full-body gains, outside submission movement limits.
+            targets = {
+                index: {"q": float(q[index]), "dq": 0.0, "tau": 0.0,
+                        "kp": float(policy.kp[index]), "kd": float(policy.kd[index])}
+                for index in range(29)
+            }
+            if self.hold_failed or not self.walk_stop:
                 return
-            # Soft-reset balancing does not use submission movement limits.
-            if not self.transport.write_lower_body(lower, self.arm_hold_q, LEG_KP, LEG_KD, self.machine_type or 0):
+            if not self.transport.write_body(targets, self.machine_type or 0):
                 raise RuntimeError("balance write failed")
+            if self.hold_failed or not self.walk_stop:
+                self.transport.clear_body()
+                return
             self.last_worker_cycle_secs = self.clock()
         except Exception as exc:  # noqa: BLE001 - Balance failures enter damping.
             self.abort_reason = "balance_output_error: " + str(exc)
             self.hold_failed = True
+            self.transport.clear_body()
             self._request_stock_damping()
+
+    def _ensure_soft_reset_policy(self):
+        """Prime a dedicated Holosoma recovery policy before motor ownership."""
+        if self.soft_reset_policy is not None:
+            return True
+        try:
+            policy = HolosomaLocomotionPolicy(str(holosoma_weights()))
+            policy.warmup()
+            self.soft_reset_policy = policy
+        except Exception as exc:  # noqa: BLE001
+            print("Holosoma soft-reset preparation failed: {0}. "
+                  "Set HIM_HOLOSOMA_ONNX to fastsac_g1_29dof.onnx.".format(exc), flush=True)
+            return False
+        return True
 
     def _ensure_balance_policy(self):
         """Load and prime inference at startup, then retain the prepared policy."""
@@ -838,45 +875,32 @@ class G1ArmAdapter:
         except Exception as exc:  # noqa: BLE001
             print(
                 f"balance preparation failed at {MODEL_PATH}: {exc}. "
-                "F3 balancing unavailable until restart.",
+                "GR00T startup unavailable until restart.",
                 flush=True,
             )
             return False
         return True
 
     def _ensure_startup_policy(self):
-        """Load the submit.sh startup controller. Soft reset stays on GR00T Balance."""
+        """Load startup independently from the Holosoma recovery policy."""
         if self.startup_policy is not None:
             return True
         if self.startup_policy_name == "groot":
             self.startup_policy = self.balance_policy
             return self.startup_policy is not None
-        if self.startup_policy_name == "holosoma":
-            try:
-                policy = HolosomaLocomotionPolicy(str(holosoma_weights()))
-                policy.warmup()
-                self.startup_policy = policy
-                print(
-                    "Holosoma: easing to the standing crouch over {0:.0f}s, "
-                    "then the standing policy.".format(policy.entry_ramp_seconds),
-                    flush=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    "Holosoma startup preparation failed: {0}. "
-                    "Set HIM_HOLOSOMA_ONNX to fastsac_g1_29dof.onnx.".format(exc),
-                    flush=True,
-                )
-                return False
-            return True
         try:
-            policy = SonicStandingPolicy()
+            policy = HolosomaLocomotionPolicy(str(holosoma_weights()))
             policy.warmup()
             self.startup_policy = policy
+            print(
+                "Holosoma: easing to the standing crouch over {0:.0f}s, "
+                "then the standing policy.".format(policy.entry_ramp_seconds),
+                flush=True,
+            )
         except Exception as exc:  # noqa: BLE001
             print(
-                "SONIC startup preparation failed: {0}. "
-                "Start again with --startup groot.".format(exc),
+                "Holosoma startup preparation failed: {0}. "
+                "Set HIM_HOLOSOMA_ONNX to fastsac_g1_29dof.onnx.".format(exc),
                 flush=True,
             )
             return False
@@ -957,7 +981,7 @@ class G1ArmAdapter:
     def _release_after_confirmed_damp(self):
         """Stop resending damp so a later stand from the remote is left alone."""
         with self.stop_lock:
-            self.arm_hold_q = None
+            self.soft_reset_active = False
             self.hold_failed = False
             self.walk_stop = False
             self.armed = False
@@ -974,6 +998,7 @@ class G1ArmAdapter:
     def start_workers(self):
         """Run output deadlines and stop RPC retries independently of ROS callbacks."""
         self._ensure_balance_policy()
+        self._ensure_soft_reset_policy()
         self._ensure_startup_policy()
         self.trace = ControlTrace(default_trace_path())
         self.trace.open()
@@ -992,9 +1017,9 @@ class G1ArmAdapter:
                 self.step()
 
         def body_repeat_loop():
-            # Every whole-body policy uses this bus: GR00T, SONIC, Holosoma,
+            # Every whole-body policy uses this bus: GR00T, Holosoma,
             # and the container policy after left and B. Inference stays in
-            # output_loop at 20 ms. A late cycle waits; it does not spin.
+            # output_loop at 20 ms. A late cycle waits without spinning.
             next_tick = time.monotonic()
             while not self.shutdown_requested.is_set():
                 self._repeat_body_once()
@@ -1029,7 +1054,10 @@ class G1ArmAdapter:
                         if self.damping_rpc_code == SDK_RPC_SEND_CODE
                         else DAMPING_RETRY_SECS
                     )
-                elif walk or holding:
+                elif walk:
+                    # Recovery inference runs on the same 20 ms clock as startup.
+                    continue
+                elif holding:
                     interval = HARDWARE_PERIOD_SECS
                 else:
                     continue
@@ -1041,8 +1069,8 @@ class G1ArmAdapter:
             Thread(target=output_loop, daemon=True),
             Thread(target=stop_loop, daemon=True),
         ]
+        self.workers.append(Thread(target=body_repeat_loop, daemon=True))
         if self.whole_body:
-            self.workers.append(Thread(target=body_repeat_loop, daemon=True))
             print(
                 "Whole-body rt/lowcmd refreshes every 2 ms. "
                 "Policy inference stays at 20 ms.",
@@ -1054,7 +1082,7 @@ class G1ArmAdapter:
     def _repeat_body_once(self):
         """Publish the latched whole-body command, or nothing once it is cleared."""
         transport = self.transport
-        if transport is None or not self.whole_body:
+        if transport is None or not (self.whole_body or self.soft_reset_active):
             return
         machine = self.machine_type
         if machine is None:

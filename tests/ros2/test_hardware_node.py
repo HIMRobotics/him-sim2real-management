@@ -66,7 +66,7 @@ class HardwareNodeTests(unittest.TestCase):
 
     def test_startup_ready_requires_warmup_telemetry_and_live_workers(self):
         adapter = SimpleNamespace(
-            balance_policy=None, feedback_fresh=Mock(return_value=True),
+            balance_policy=None, soft_reset_policy=None, startup_policy=None, feedback_fresh=Mock(return_value=True),
             feedback=SimpleNamespace(start_button_pressed=False), f3_pressed=False,
             abort_reason=None, workers=[Mock(is_alive=Mock(return_value=True))],
         )
@@ -81,6 +81,12 @@ class HardwareNodeTests(unittest.TestCase):
             notify()
             socket.assert_not_called()
             adapter.balance_policy = object()
+            notify()
+            socket.assert_not_called()
+            adapter.soft_reset_policy = object()
+            notify()
+            socket.assert_not_called()
+            adapter.startup_policy = object()
             adapter.feedback_fresh.return_value = False
             notify()
             socket.assert_not_called()

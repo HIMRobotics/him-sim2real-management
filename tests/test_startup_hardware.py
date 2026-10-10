@@ -36,12 +36,71 @@ def finish_entry(rig):
     assert rig.adapter.abort_reason is None
 
 
+@pytest.mark.parametrize('name', ['groot', 'holosoma'])
+def test_startup_selection_preserves_soft_reset_policy(rig, name):
+    rig.adapter.startup_policy_name = name
+    balance = rig.adapter.balance_policy
+    recovery = rig.adapter.soft_reset_policy
+    with patch('robot_safety.hardware_adapter.HolosomaLocomotionPolicy') as factory, \
+            patch('robot_safety.hardware_adapter.holosoma_weights', return_value='model.onnx'):
+        factory.return_value.entry_ramp_seconds = 10.0
+        assert rig.adapter._ensure_startup_policy()
+        if name == 'groot':
+            factory.assert_not_called()
+            assert rig.adapter.startup_policy is balance
+        else:
+            factory.assert_called_once_with('model.onnx')
+            factory.return_value.warmup.assert_called_once_with()
+            assert rig.adapter.startup_policy is factory.return_value
+        assert rig.adapter.balance_policy is balance
+        assert rig.adapter.soft_reset_policy is recovery
+        assert rig.adapter.startup_policy is not recovery
+        assert rig.adapter._ensure_startup_policy()
+        assert factory.call_count == (name == 'holosoma')
+
+
 def test_missing_balance_rejects_before_release(rig):
     rig.adapter.balance_policy = None
     with patch('robot_safety.hardware_adapter.BalancePolicy', side_effect=FileNotFoundError):
         assert not rig.adapter.arm()
     assert rig.transport.release_calls == 0
     rig.transport.write_body.assert_not_called()
+
+
+def test_missing_recovery_model_rejects_before_release(rig):
+    rig.adapter.soft_reset_policy = None
+    with patch('robot_safety.hardware_adapter.holosoma_weights', side_effect=ValueError('missing')):
+        assert not rig.adapter.arm()
+    assert rig.adapter.arm_rejection_reason == 'soft_reset_model_unavailable'
+    assert rig.transport.release_calls == 0
+    rig.transport.write_body.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', ['stale', 'nonfinite', 'shape', 'write', 'stop_during_inference'])
+def test_recovery_faults_stop_body_output(rig, failure):
+    start(rig)
+    rig.press_f3_twice()
+    rig.transport.write_body.reset_mock()
+    policy = rig.adapter.soft_reset_policy
+    if failure == 'stale':
+        rig.now += 0.3
+    elif failure == 'nonfinite':
+        policy.update.return_value = [float('nan')] * 29
+    elif failure == 'shape':
+        policy.update.return_value = [0.0] * 15
+    elif failure == 'write':
+        rig.transport.write_body.return_value = False
+    else:
+        def stop(*args):
+            rig.adapter.abort('hardware_controller_double_start', request_damping=True)
+            return [0.0] * 29
+        policy.update.side_effect = stop
+    rig.adapter.step()
+    if failure != 'write':
+        rig.transport.write_body.assert_not_called()
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls >= 1
+    assert rig.transport.body_cleared
 
 
 def test_inference_failure_before_ownership_never_releases(rig):
@@ -172,9 +231,12 @@ def test_whole_body_soft_reset_continues_balance_without_damping(rig):
         rig.state()
         rig.adapter.abort('hardware_controller_double_f3')
         rig.adapter.abort('policy_container_exit')
-        rig.adapter.stop_once()
+        rig.adapter.step()
         assert rig.adapter.last_worker_cycle_secs == rig.now
-    assert len(rig.transport.lowcmds) == 20
+    assert rig.transport.write_body.call_count >= 20
+    targets, _ = rig.transport.write_body.call_args[0]
+    assert all(target["kp"] == 40.0 for target in targets.values())
+    rig.adapter.soft_reset_policy.reset.assert_called_once()
     assert rig.transport.stop_calls == 0
     assert rig.adapter.walk_stop
     assert not rig.adapter.hold_failed

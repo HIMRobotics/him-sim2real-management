@@ -34,10 +34,11 @@ The service runs [run_safety_stops.sh](../tests/manual/run_safety_stops.sh), whi
 builds the ROS overlay under `~/.him-safety` and starts a hardware motor gate.
 It does not start an arm trajectory or arm a policy. The gate reads the robot's
 controller telemetry directly and watches for press–release–press gestures
-within 0.5 seconds: **double F3 requests balance with the arms held**, and
-**double Start requests stock whole-body damping**. F3 uses the local GR00T
-balance network, not the stock walking controller. The service can issue these
-commands even without a test policy running. While armed, it also checks command
+within 0.5 seconds: **double F3 requests Holosoma whole-body standing control**, and
+**double Start requests stock whole-body damping**. F3 uses the local Holosoma
+FastSAC network at zero commanded velocity, including its arm targets and model gains. Recovery starts from measured state without
+the startup crouch ramp. GR00T Balance remains the default submission startup.
+The service can issue these commands even without a test policy running. While armed, it also checks command
 and feedback freshness. Systemd restarts the process on failure, subject to the
 unit's retry limits. An active service alone does not establish physical stop
 performance.
@@ -61,9 +62,11 @@ changes likewise require a service restart before they take effect.
 The launcher uses ROS localhost domain 97, SDK domain 0, interface `eth0` and
 [g1_type5.template.json](profiles/g1_type5.template.json) by default. It requires
 ROS 2 Foxy, colcon, the system Python's Unitree SDK/native libraries and balance
-runtime, and `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx` in this
-clone. Installation does not provision those dependencies. Service environment
-variables `HIM_SAFETY_PROFILE` and `HIM_SAFETY_ROS_INSTALL` override the profile and
+runtime, the bundled GR00T Balance weights, and the Holosoma
+`fastsac_g1_29dof.onnx` checkpoint. Set `HIM_HOLOSOMA_ONNX` to its location, or
+keep the Holosoma clone at `/home/unitree/holosoma`. Both policies are warmed
+before the service reports ready. Installation does not provision those
+dependencies. Service environment variables `HIM_SAFETY_PROFILE` and `HIM_SAFETY_ROS_INSTALL` override the profile and
 overlay path. Set them through a systemd user-service override if needed.
 
 ```bash

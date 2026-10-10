@@ -48,6 +48,7 @@ class FakeTransport:
     def __init__(self):
         self.writes = []
         self.lowcmds = []
+        self.body_commands = []
         self.stop_calls = 0
         self.release_calls = 0
         self.restore_calls = 0
@@ -83,6 +84,10 @@ class FakeTransport:
     def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
         self.lowcmds.append((list(lower_q), list(arm_q), machine))
         return True
+
+    def write_body(self, targets, machine):
+        self.body_commands.append((targets, machine))
+        return self.write_success
 
     def clear_body(self):
         self.body_cleared = True
@@ -248,6 +253,9 @@ class HardwareAdapterTests(unittest.TestCase):
     def setUp(self):
         self.now = 10.0
         self.adapter = G1ArmAdapter(load_profile(profile_data()), lambda: self.now)
+        self.adapter.soft_reset_policy = Mock(
+            update=Mock(return_value=[0.0] * 29), kp=[40.0] * 29, kd=[1.0] * 29,
+        )
         self.transport = FakeTransport()
         self.adapter.transport = self.transport
         self.adapter.receive_battery(SimpleNamespace(soc=100))
@@ -386,76 +394,91 @@ class HardwareAdapterTests(unittest.TestCase):
         self.state(f3=True)
 
     def test_balance_preparation_is_cached_before_f3(self):
-        policy = Mock()
-        policy.update.return_value = [0.0] * 15
-        with patch("robot_safety.hardware_adapter.BalancePolicy", return_value=policy) as load:
-            self.assertTrue(self.adapter._ensure_balance_policy())
-            self.assertTrue(self.adapter._ensure_balance_policy())
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
+        policy.update.return_value = [0.0] * 29
+        self.adapter.soft_reset_policy = None
+        with patch("robot_safety.hardware_adapter.holosoma_weights", return_value="model.onnx"), patch("robot_safety.hardware_adapter.HolosomaLocomotionPolicy", return_value=policy) as load:
+            self.assertTrue(self.adapter._ensure_soft_reset_policy())
+            self.assertTrue(self.adapter._ensure_soft_reset_policy())
             self.press_f3_twice()
             self.adapter.stop_once()
             self.now += 0.02
             self.adapter.stop_once()
         load.assert_called_once()
         policy.warmup.assert_called_once()
-        self.assertEqual(len(self.transport.lowcmds), 2)
+        self.assertEqual(len(self.transport.body_commands), 2)
 
     def test_soft_reset_balance_bypasses_submission_limits(self):
         data = profile_data()
         data["joints"]["left_hip_pitch"]["max_torque_nm"] = 0.1
         self.adapter.profile = load_profile(data)
-        policy = Mock()
-        policy.update.return_value = [0.0] * 15
-        self.adapter.balance_policy = policy
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
+        policy.update.return_value = [0.0] * 29
+        self.adapter.soft_reset_policy = policy
         self.press_f3_twice()
         with patch("robot_safety.hardware_adapter.checked_targets") as command_check, patch(
             "robot_safety.hardware_adapter.check_torque"
         ) as torque_check:
             self.adapter.stop_once()
             self.now += 0.02
-            policy.update.return_value = [0.2] + [0.0] * 14
+            policy.update.return_value = [0.2] + [0.0] * 28
             self.adapter.stop_once()
         command_check.assert_not_called()
         torque_check.assert_not_called()
-        self.assertEqual(len(self.transport.lowcmds), 2)
-        self.assertEqual(self.transport.lowcmds[-1][0][0], 0.2)
+        self.assertEqual(len(self.transport.body_commands), 2)
+        self.assertEqual(self.transport.body_commands[-1][0][0]["q"], 0.2)
         self.assertEqual(self.transport.stop_calls, 0)
 
+    def test_soft_reset_refresh_reuses_the_last_policy_output(self):
+        self.transport.repeat_body = Mock(return_value=True)
+        self.adapter._repeat_body_once()
+        self.transport.repeat_body.assert_not_called()
+        self.press_f3_twice()
+        self.adapter.step()
+        self.adapter.soft_reset_policy.update.assert_called_once()
+        for _ in range(10):
+            self.adapter._repeat_body_once()
+        self.assertEqual(self.transport.repeat_body.call_count, 10)
+        self.adapter.soft_reset_policy.update.assert_called_once()
+        self.assertEqual(len(self.transport.body_commands), 1)
+
     def test_balance_inference_failure_requests_damping(self):
-        policy = Mock()
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
         policy.update.side_effect = ValueError("inference failed")
-        self.adapter.balance_policy = policy
+        self.adapter.soft_reset_policy = policy
         self.press_f3_twice()
         self.adapter.stop_once()
-        self.assertEqual(self.transport.lowcmds, [])
+        self.assertEqual(self.transport.body_commands, [])
         self.assertEqual(self.transport.stop_calls, 1)
 
     def test_failed_warmup_keeps_stock_control_and_does_not_reload_on_f3(self):
-        policy = Mock()
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
         policy.warmup.side_effect = ValueError("warmup failed")
-        with patch("robot_safety.hardware_adapter.BalancePolicy", return_value=policy) as load:
-            self.assertFalse(self.adapter._ensure_balance_policy())
+        self.adapter.soft_reset_policy = None
+        with patch("robot_safety.hardware_adapter.holosoma_weights", return_value="model.onnx"), patch("robot_safety.hardware_adapter.HolosomaLocomotionPolicy", return_value=policy) as load:
+            self.assertFalse(self.adapter._ensure_soft_reset_policy())
             self.press_f3_twice()
             self.adapter.stop_once()
         load.assert_called_once()
-        self.assertIsNone(self.adapter.balance_policy)
+        self.assertIsNone(self.adapter.soft_reset_policy)
         self.assertEqual(self.transport.release_calls, 0)
-        self.assertEqual(self.transport.lowcmds, [])
+        self.assertEqual(self.transport.body_commands, [])
 
     def test_double_f3_runs_the_balance_network(self):
         self.take_ownership()
-        self.adapter.balance_policy = type(
-            "HoldLegs",
-            (),
-            {"update": staticmethod(lambda q, dq, quat, gyro: list(q[:15]))},
-        )()
+        self.adapter.soft_reset_policy = Mock(
+            update=Mock(side_effect=lambda q, dq, quat, gyro: list(q)),
+            kp=list(range(1, 30)), kd=[0.5] * 29,
+        )
         self.press_f3_twice()
         self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_f3")
         self.adapter.stop_once()
         self.assertEqual(self.transport.release_calls, 1)
         self.assertEqual(self.transport.stop_calls, 0)
-        lower, arms, machine = self.transport.lowcmds[-1]
-        self.assertEqual(len(lower), 15)
-        self.assertEqual(len(arms), 14)
+        targets, machine = self.transport.body_commands[-1]
+        self.assertEqual(len(targets), 29)
+        self.assertEqual([targets[i]["kp"] for i in range(29)], list(range(1, 30)))
+        self.assertTrue(all(target["kd"] == 0.5 for target in targets.values()))
         self.assertEqual(machine, 5)
         self.state(pressed=True)
         self.now += 0.05
@@ -479,8 +502,8 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 2)
 
-        # The previous session's arm pose is cleared, so the new F3 session captures the new pose.
-        self.assertIsNone(self.adapter.arm_hold_q)
+        # The next soft reset initializes inference from the new measured state.
+        self.assertFalse(self.adapter.soft_reset_active)
         self.state()
         self.press_f3_twice()
         self.adapter.receive_state(
@@ -491,7 +514,8 @@ class HardwareAdapterTests(unittest.TestCase):
             )
         )
         self.adapter.stop_once()
-        self.assertEqual(self.transport.lowcmds[-1][1], [0.4] * 14)
+        self.assertEqual([v["q"] for v in self.transport.body_commands[-1][0].values()], [0.4] * 29)
+        self.assertEqual(self.adapter.soft_reset_policy.reset.call_count, 2)
 
     def test_rejected_readiness_shutdown_sends_no_motor_commands(self):
         self.transport.read_ready_fsm = lambda: (3104, None)

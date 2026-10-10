@@ -84,6 +84,7 @@ class HardwareMotorGateNode(MotorGateNode):
         adapter = self.adapter
         if (
             self.startup_ready or adapter.balance_policy is None
+            or adapter.soft_reset_policy is None or adapter.startup_policy is None
             or not adapter.feedback_fresh(time.monotonic())
             or adapter.feedback.start_button_pressed or adapter.f3_pressed
             or adapter.abort_reason or self.motor_gate.abort_reason
@@ -263,6 +264,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
                 "startup_policy": self.adapter.startup_policy_name,
+                "soft_reset_policy": "holosoma",
                 "hardware_profile_path": self.hardware_profile_path,
                 "motion_released": self.adapter.balance_released,
                 "motion_released_at_secs": self.adapter.motion_released_at_secs,

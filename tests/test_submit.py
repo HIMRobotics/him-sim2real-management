@@ -21,7 +21,8 @@ def launchers(tmp_path):
             "#!/bin/bash\npython3 - \"$@\" <<'INNER'\n"
             "import json, os, sys\n"
             'print(json.dumps({"args": sys.argv[1:], "gate": os.getenv("G1_USE_SAFETY_SERVICE"), '
-            '"command": os.getenv("G1_COMMAND_FILE")}))\nINNER\n'
+            '"command": os.getenv("G1_COMMAND_FILE"), '
+            '"startup": os.getenv("G1_STARTUP_POLICY")}))\nINNER\n'
         )
         path.chmod(0o755)
     return tmp_path
@@ -37,6 +38,7 @@ def call(root, script, args):
             "CONTAINER_RUNTIME": "unused-runtime",
             "G1_IMAGE": "",
             "G1_COMMAND_FILE": "",
+            "G1_STARTUP_POLICY": "",
         },
         timeout=10,
         check=False,
@@ -56,6 +58,27 @@ def test_simulation_routes_options_without_hardware_gate(launchers):
     result = call(launchers, "submit.sh", ["--mode", "sim", *args])
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["args"] == args
+
+
+@pytest.mark.parametrize('startup', ['groot', 'holosoma'])
+def test_startup_selection_reaches_supervisor(launchers, startup):
+    result = call(launchers, "submit.sh", ["--mode", "real", "--startup", startup])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["startup"] == startup
+
+
+@pytest.mark.parametrize('example', ['walker', 'holosoma'])
+def test_every_example_defaults_to_groot_startup(launchers, example):
+    result = call(launchers, "submit.sh", ["--mode", "real", "--example", example])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["startup"] == 'groot'
+
+
+def test_holosoma_example_preserves_explicit_groot_startup(launchers):
+    result = call(launchers, "submit.sh", ["--mode", "real", "--startup", "groot",
+                                         "--example", "holosoma"])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["startup"] == 'groot'
 
 
 @pytest.mark.parametrize(
@@ -99,7 +122,7 @@ def test_real_alias_preserves_gate_and_container_arguments(launchers, script, ar
 
 @pytest.mark.parametrize(
     "args",
-    [["--mode", "invalid"]],
+    [["--mode", "invalid"], ["--mode", "real", "--startup", "unsupported"]],
 )
 def test_invalid_submission_is_rejected(launchers, args):
     result = call(launchers, "submit.sh", args)

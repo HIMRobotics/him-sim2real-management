@@ -3,8 +3,8 @@
 The observation and decode match ``holosoma_inference`` locomotion:
 100-float ``actor_obs`` in alphabetical term order, scalar action scale
 0.25, and gains from the ONNX metadata. Targets are Unitree joint order.
-Callers publish them on ``/safety/precheck``. This module never opens a
-motor channel.
+Submission callers publish on ``/safety/precheck``. The host also uses this
+policy for soft-reset recovery. This module never opens a motor channel.
 """
 
 import json
