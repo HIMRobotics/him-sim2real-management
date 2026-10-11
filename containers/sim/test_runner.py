@@ -417,7 +417,7 @@ class RunnerTest(unittest.TestCase):
                 expected_error = 0.0 if follows_target else -0.02
                 self.assertAlmostEqual(runner.response_error[index], expected_error)
 
-    def test_direct_command_warns_on_torque_without_stopping(self):
+    def test_direct_command_limits_torque_target_without_stopping(self):
         runner = Runner()
         # Isolate output diagnostics after startup has completed.
         runner.startup.command = lambda now, stamp, state, command, **kw: command
@@ -438,13 +438,22 @@ class RunnerTest(unittest.TestCase):
             result = runner.step(0.02)
         self.assertIsNone(result["reason"])
         self.assertIsNotNone(runner.active)
-        demand = next(item for item in runner.position_warnings["left_wrist_pitch"]["limits"]
-                      if item["torque_kind"] == "PD demand")
-        self.assertEqual(demand["reason"], "joint_torque_limit")
-        self.assertGreater(demand["value"], demand["limit"])
-        from view import limit_warning_text
-        self.assertIn("left_wrist_pitch", limit_warning_text(runner.position_warnings))
-        self.assertIn("Run continued", limit_warning_text(runner.position_warnings))
+        warning = runner.position_warnings["left_wrist_pitch"]
+        clipping = warning["torque_target_clipping"]
+        self.assertTrue(clipping["active"])
+        self.assertAlmostEqual(clipping["requested_torque_nm"], 30.0)
+        self.assertAlmostEqual(clipping["command_budget_nm"], 4.5)
+        self.assertAlmostEqual(clipping["hard_limit_nm"], 5.0)
+        self.assertAlmostEqual(runner.active["q"][20] - runner.plant.q()[20], 0.075)
+        self.assertAlmostEqual(clipping["q_commanded"], runner.active["q"][20])
+        demand = runner.plant.demand(
+            runner.active["q"], runner.active["dq"], runner.active["kp"],
+            runner.active["kd"], runner.active["tau"], runner.plant.q(), runner.plant.dq())
+        self.assertAlmostEqual(demand[20], 4.5)
+        self.assertEqual(
+            [item for item in warning.get("limits", []) if item["torque_kind"] == "PD demand"],
+            [],
+        )
 
     def test_measured_joint_speed_warns_and_base_spin_still_stops(self):
         runner = Runner()
