@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import mujoco
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,8 +42,11 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual(demands, [])
 
     def test_walker_makes_forward_progress_with_checks_disabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            report = run("walker", tmp, 10, safety_checks=False)
+        # Allow Balance to settle for five seconds before the walking window.
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "robot_safety.startup_balance.StartupBalance.min_seconds", 5.0
+        ):
+            report = run("walker", tmp, 15, safety_checks=False)
         self.assertEqual(report["status"], "completed")
         motion = report["motion"]
         self.assertGreater(
@@ -157,8 +161,12 @@ class ExampleTests(unittest.TestCase):
             project = prepare("walker", tmp, container=False)
             plant = Plant(scene=project / "environment/scene.xml", check_fall=False)
         self.assertLessEqual(float(plant.data.qpos[plant.base_qadr + 2]), 0.80)
-        distances = plant._support_distances(plant.data)
-        self.assertTrue(distances)
+        # Query distance directly because zero-clearance contacts depend on roundoff.
+        distances = [
+            mujoco.mj_geomDistance(plant.model, plant.data, geom, plant.floor, 1.0, None)
+            for geom in plant.robot_geoms if plant.model.geom_contype[geom]
+        ]
+        self.assertLessEqual(min(distances), 1e-6)
         self.assertGreater(min(distances), -0.005)
         np.testing.assert_allclose(
             plant.q()[:6], [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0], atol=1e-6
