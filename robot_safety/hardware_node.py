@@ -9,7 +9,7 @@ from him_safety_interfaces.msg import Abort
 from std_msgs.msg import String
 
 from . import ros_topics as topics
-from .hardware_adapter import G1ArmAdapter
+from .hardware_adapter import G1HardwareAdapter
 from .hardware_constants import NUM_JOINTS
 from .hardware_profile import (
     JOINT_DIAGNOSTICS_PERIOD_SECS,
@@ -64,7 +64,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.last_status = None
         self.last_status_publish_secs = None
         self.startup_ready = False
-        self.adapter = G1ArmAdapter(
+        self.adapter = G1HardwareAdapter(
             profile, whole_body=whole_body,
             launch_gate=_as_bool(launch_gate),
             stance_blend_secs=float(stance_blend_secs),

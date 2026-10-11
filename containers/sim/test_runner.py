@@ -24,7 +24,7 @@ from runner import Runner
 
 from robot_safety.config import Config, ThrashConfig
 from robot_safety.core import Supervisor
-from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_adapter import G1HardwareAdapter
 from robot_safety.hardware_constants import UPPER_BODY_INDICES
 from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.thrash import ThrashDetector
@@ -519,7 +519,7 @@ class RunnerTest(unittest.TestCase):
             for case in ("gains", "clip", "velocity", "feedforward", "demand", "initial"):
                 with self.subTest(index=index, case=case):
                     runner = Runner()
-                    hardware = G1ArmAdapter(HardwareProfile.load(runner.rules.path))
+                    hardware = G1HardwareAdapter(HardwareProfile.load(runner.rules.path))
                     limits = runner.rules.entries[index][2]
                     if case == "clip":
                         runner.plant.data.qpos[runner.plant.qadr[index]] = limits.position_max_rad

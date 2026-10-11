@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from robot_safety.control_trace import ControlTrace
-from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_adapter import G1HardwareAdapter
 from tests.test_robot_safety_hardware import FakeTransport, load_profile, profile_data
 
 
@@ -33,7 +33,7 @@ class ControlTraceTests(unittest.TestCase):
     def test_hardware_step_writes_the_checked_command(self):
         with tempfile.TemporaryDirectory() as directory:
             now = 10.0
-            adapter = G1ArmAdapter(load_profile(profile_data()), lambda: now)
+            adapter = G1HardwareAdapter(load_profile(profile_data()), lambda: now)
             adapter.transport = FakeTransport()
             adapter.receive_battery(type("B", (), {"soc": 80})())
             adapter.trace = ControlTrace(Path(directory) / "trace.jsonl")

@@ -75,8 +75,8 @@ def whole_body_repeat_wait(next_tick, now, period=BODY_REPEAT_SECS):
     return poll_deadline(next_tick, now, period)
 
 
-class G1ArmAdapter:
-    """Connect approved safety-checker commands to robot motors and request damping."""
+class G1HardwareAdapter:
+    """Apply approved motor commands and handle recovery or damping."""
 
     def __init__(self, profile, clock=time.monotonic, *, whole_body=False,
                  launch_gate=False, stance_blend_secs=5.0):

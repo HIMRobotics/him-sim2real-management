@@ -9,7 +9,7 @@ from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from robot_safety.hardware_adapter import G1ArmAdapter, whole_body_repeat_wait
+from robot_safety.hardware_adapter import G1HardwareAdapter, whole_body_repeat_wait
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES, UPPER_BODY_INDICES
 from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.unitree_transport import UnitreeArmTransport
@@ -234,7 +234,7 @@ class HardwareAdapterTests(unittest.TestCase):
 
     def setUp(self):
         self.now = 10.0
-        self.adapter = G1ArmAdapter(load_profile(profile_data()), lambda: self.now)
+        self.adapter = G1HardwareAdapter(load_profile(profile_data()), lambda: self.now)
         self.adapter.soft_reset_policy = Mock(
             update=Mock(return_value=[0.0] * 29), kp=[40.0] * 29, kd=[1.0] * 29,
         )

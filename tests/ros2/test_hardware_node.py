@@ -116,9 +116,9 @@ class HardwareNodeTests(unittest.TestCase):
             self.assertTrue(node.startup_ready)
 
     def test_readiness_timeout_rejects_without_damping(self):
-        from robot_safety.hardware_adapter import G1ArmAdapter
+        from robot_safety.hardware_adapter import G1HardwareAdapter
 
-        adapter = G1ArmAdapter(load_profile(profile_data()))
+        adapter = G1HardwareAdapter(load_profile(profile_data()))
         transport = FakeTransport()
         transport.read_ready_fsm = lambda: (3104, None)
         adapter.transport = transport
@@ -176,7 +176,7 @@ class HardwareNodeTests(unittest.TestCase):
                     )
                 )
                 patches.enter_context(
-                    patch("robot_safety.hardware_node.G1ArmAdapter.start_workers")
+                    patch("robot_safety.hardware_node.G1HardwareAdapter.start_workers")
                 )
                 node = HardwareMotorGateNode()
             node.adapter.receive_state(

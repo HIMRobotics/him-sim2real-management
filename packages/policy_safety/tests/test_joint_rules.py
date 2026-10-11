@@ -31,10 +31,10 @@ def test_pose_gap_has_no_limit_for_every_joint(rules, sign, initial):
 def test_hardware_and_simulation_agree(rules, gap, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root))
-    from robot_safety.hardware_adapter import G1ArmAdapter
+    from robot_safety.hardware_adapter import G1HardwareAdapter
     from robot_safety.hardware_profile import HardwareProfile
 
-    hardware = G1ArmAdapter(HardwareProfile.load(DEFAULT_JOINT_PROFILE))
+    hardware = G1HardwareAdapter(HardwareProfile.load(DEFAULT_JOINT_PROFILE))
     q, dq, tau, measured = (np.zeros(29) for _ in range(4))
     q[15], measured[15] = gap, 0
     # Use a lower gain so this test isolates the command gap from torque.
