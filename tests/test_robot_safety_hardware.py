@@ -107,7 +107,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(len(self.adapter.q_applied), 29)
         recorded = self.adapter.joint_diagnostics_snapshot()[G1_29_JOINT_NAMES[0]]["applied_command"]
         self.assertEqual(recorded, dict(targets[0], written_at_secs=self.now))
-        self.adapter.abort("fault")
+        self.adapter.abort("hardware_write_failed")
         with patch.object(self.transport, "restore_motion", return_value=7002):
             self.adapter.stop_once()
         self.assertTrue(self.adapter.balance_released)
@@ -117,7 +117,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.transport.restore_calls, 1)
         self.assertEqual(self.transport.stop_calls, 1)
         self.adapter._release_after_confirmed_damp()
-        self.assertEqual(self.adapter.abort_reason, "fault")
+        self.assertEqual(self.adapter.abort_reason, "hardware_write_failed")
         self.assertFalse(self.adapter.arm())
         count = self.transport.write_body.call_count
         self.adapter.step()

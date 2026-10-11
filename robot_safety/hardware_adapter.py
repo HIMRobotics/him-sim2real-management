@@ -55,6 +55,15 @@ from .startup_balance import StartupBalance
 # Python hands the interpreter to a waiting thread only this often. The
 # default 5 ms turns the 2 ms refresh into about 170 Hz.
 INTERPRETER_SWITCH_SECS = 0.001
+SOFT_RESET_UPRIGHT_MIN = math.cos(math.radians(30.0))
+# These stops cannot rely on the recovery output worker or explicitly request damping.
+DAMP_ONLY_REASONS = frozenset({
+    "controller_double_start", "hardware_controller_double_start", "controller_stop",
+    "operator_stop", "external_abort",
+    "hardware_shutdown", "hardware_output_worker_stalled", "hardware_output_loop_stall",
+    "hardware_write_failed", "hardware_release_failed", "hardware_machine_type_changed",
+    "hardware_feedback_timeout", "invalid_hardware_feedback", "missing_hardware_imu",
+})
 
 
 def whole_body_repeat_wait(next_tick, now, period=BODY_REPEAT_SECS):
@@ -390,6 +399,7 @@ class G1ArmAdapter:
         self.ownership_taken = False
         self.hold_targets = None
         self.soft_reset_active = False
+        self.automatic_soft_reset = False
         self.joint_diagnostics = JointDeltaDiagnostics()
         self.position_warnings = {}
         self.startup = StartupBalance()
@@ -402,32 +412,60 @@ class G1ArmAdapter:
         self.arm_rejection_reason = reason
         return False
 
+    def _upright_for_soft_reset(self, feedback):
+        """Require fresh orientation within 30 degrees of world-up."""
+        if feedback is None or not (
+            0 <= self.clock() - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS
+        ):
+            return False
+        quat = feedback.quat
+        if (len(quat) != 4 or len(feedback.gyro) != 3
+                or len(feedback.q) != 29 or len(feedback.dq) != 29
+                or not all(math.isfinite(v) for values in (
+                    quat, feedback.gyro, feedback.q, feedback.dq) for v in values)):
+            return False
+        norm = sum(v * v for v in quat)
+        if not 0.9 <= norm <= 1.1:
+            return False
+        # Dot product of the measured body-up axis with world-up, independent of yaw.
+        upright = 1 - 2 * (quat[1] ** 2 + quat[2] ** 2) / norm
+        return upright >= SOFT_RESET_UPRIGHT_MIN - 1e-12
+
     def abort(self, reason, request_damping=False):
-        """Permanently prohibit arm writes and wake the independent damping RPC worker."""
+        """Latch the submission fault and select recovery or damping."""
         # Keep stop requests independent of a blocked SDK write.
         with self.stop_lock:
+            first_fault = self.abort_reason is None
+            if (first_fault and reason not in DAMP_ONLY_REASONS
+                    and self.whole_body and self.armed and not self.hold_failed
+                    and (self.ownership_taken or self.balance_released)
+                    and self.soft_reset_policy is not None
+                    and self._upright_for_soft_reset(self.feedback)):
+                self.automatic_soft_reset = reason != "hardware_controller_double_f3"
+                self.walk_stop = True
             soft_reason = "hardware_controller_double_f3"
             soft_balance = self.walk_stop and not self.hold_failed and (
                 reason == soft_reason
                 or (self.abort_reason == soft_reason and reason == "policy_container_exit")
+                or (self.automatic_soft_reset and (
+                    first_fault or reason in (self.abort_reason, "policy_container_exit")))
             )
             if soft_balance and self.abort_reason is None:
                 # The recovery writer replaces the submission and its heartbeat.
                 self.q_applied = None
                 self.soft_reset_active = False
                 self.last_worker_cycle_secs = self.clock()
-            first_fault = self.abort_reason is None
             if first_fault:
                 self.abort_reason = reason
                 self.startup.fail()
             self.command = None
-            if self.transport is not None:
+            if self.transport is not None and not (soft_balance and self.soft_reset_active):
                 self.transport.clear_body()
-            if request_damping or (self.whole_body and self.armed
-                                   and (self.ownership_taken or self.balance_released)
-                                   and not soft_balance):
+            if not soft_balance and (request_damping or (self.whole_body and self.armed
+                                     and (self.ownership_taken or self.balance_released))):
                 self.hold_failed = True
                 self.walk_stop = False
+                self.automatic_soft_reset = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
                 self.stop_requested.set()
         if first_fault and self.trace is not None:
@@ -770,7 +808,7 @@ class G1ArmAdapter:
         return targets if self.whole_body else {index: targets[index] for index in UPPER_BODY_INDICES}
 
     def stop_once(self):
-        """Damp on double Start, balance on double F3, otherwise hold the arms."""
+        """Apply recovery, damping, or an arm hold for the latched stop."""
         # SDK calls stay off the arm-write lock so a stuck motion write cannot delay the stop.
         if self.release_pending:
             return
@@ -818,10 +856,14 @@ class G1ArmAdapter:
             feedback = self.feedback
             if feedback is None or not self.feedback_fresh(self.clock()):
                 raise ValueError("stale balance feedback")
+            if self.automatic_soft_reset and not self._upright_for_soft_reset(feedback):
+                raise ValueError("robot is not upright for automatic recovery")
             if not self.soft_reset_active:
                 policy.reset()
                 self.soft_reset_active = True
-            q = policy.update(feedback.q, feedback.dq, self.quat, self.gyro)
+            quat, gyro = ((feedback.quat, feedback.gyro) if self.automatic_soft_reset
+                          else (self.quat, self.gyro))
+            q = policy.update(feedback.q, feedback.dq, quat, gyro)
             if any(len(values) != 29 for values in (q, policy.kp, policy.kd)):
                 raise ValueError("invalid balance output shape")
             if not all(math.isfinite(value) for values in (q, policy.kp, policy.kd) for value in values):
@@ -838,6 +880,8 @@ class G1ArmAdapter:
             }
             if self.hold_failed or not self.walk_stop:
                 return
+            if self.automatic_soft_reset and not self._upright_for_soft_reset(self.feedback):
+                raise ValueError("robot is not upright for automatic recovery")
             if not self.transport.write_body(targets, self.machine_type or 0):
                 raise RuntimeError("balance write failed")
             if self.hold_failed or not self.walk_stop:
@@ -846,7 +890,10 @@ class G1ArmAdapter:
             self.last_worker_cycle_secs = self.clock()
         except Exception as exc:  # noqa: BLE001 - Balance failures enter damping.
             self.abort_reason = "balance_output_error: " + str(exc)
-            self.hold_failed = True
+            with self.stop_lock:
+                self.hold_failed = True
+                self.walk_stop = False
+                self.automatic_soft_reset = False
             self.transport.clear_body()
             self._request_stock_damping()
 
@@ -982,6 +1029,7 @@ class G1ArmAdapter:
         """Stop resending damp so a later stand from the remote is left alone."""
         with self.stop_lock:
             self.soft_reset_active = False
+            self.automatic_soft_reset = False
             self.hold_failed = False
             self.walk_stop = False
             self.armed = False

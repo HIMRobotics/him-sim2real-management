@@ -43,6 +43,14 @@ and feedback freshness. Systemd restarts the process on failure, subject to the
 unit's retry limits. An active service alone does not establish physical stop
 performance.
 
+After whole-body control has taken ownership, automatic faults select Holosoma
+soft reset when fresh IMU orientation is within 30 degrees of vertical. The
+submission stays stopped while recovery runs at zero commanded velocity.
+Double Start always requests damping. Missing or stale orientation, tilt beyond
+30 degrees, unavailable recovery, failed motor output, output-worker stalls and
+service shutdown use damping. Automatic recovery also falls back to damping if
+orientation leaves that range or inference/output fails.
+
 Startup initializes the motion-switcher and optional speech clients, loads the
 balance model, and runs one dummy inference without changing policy history or
 writing motor commands. These objects are retained for subsequent button presses.

@@ -111,7 +111,7 @@ def test_inference_failure_before_ownership_never_releases(rig):
     rig.transport.write_body.assert_not_called()
 
 
-def test_inference_failure_after_ownership_requests_damping(rig):
+def test_inference_failure_after_ownership_requests_recovery_when_upright(rig):
     start(rig)
     rig.adapter.balance_policy.update.side_effect = RuntimeError('failed')
     rig.now += 0.02
@@ -119,7 +119,11 @@ def test_inference_failure_after_ownership_requests_damping(rig):
     rig.adapter.submit(rig.command, rig.now + 0.1)
     rig.adapter.step()
     assert rig.adapter.abort_reason
-    assert rig.adapter.hold_failed
+    assert rig.adapter.automatic_soft_reset
+    assert not rig.adapter.hold_failed
+    rig.adapter.step()
+    rig.adapter.soft_reset_policy.update.assert_called_once()
+    assert rig.transport.stop_calls == 0
     assert not rig.adapter.startup.status()['control_ready']
 
 
@@ -131,17 +135,18 @@ def test_feedback_torque_check_uses_written_balance_gains(rig):
         replace(limits, max_torque_nm=10) for limits in rig.adapter.profile.legs))
     rig.state()
     assert 'joint_torque_limit' in rig.adapter.abort_reason
-    assert rig.adapter.hold_failed
+    assert rig.adapter.automatic_soft_reset
+    assert rig.adapter.q_applied is None
 
 
 @pytest.mark.parametrize('handoff', [False, True])
-def test_abort_in_balance_or_handoff_latches_and_stops_writes(rig, handoff):
+def test_double_start_in_balance_or_handoff_latches_and_stops_writes(rig, handoff):
     start(rig)
     if handoff:
         finish_entry(rig)
         rig.adapter.startup.ready = True
         assert rig.adapter.startup.authorize(rig.now)
-    rig.adapter.abort('test_stop', request_damping=True)
+    rig.adapter.abort('hardware_controller_double_start', request_damping=True)
     count = rig.transport.write_body.call_count
     rig.adapter.submit(rig.command, rig.now + 0.1)
     rig.adapter.step()
@@ -199,24 +204,26 @@ def test_balance_overshoot_is_limited_and_recorded(rig):
     assert detail['requested_torque_nm'] == pytest.approx(36)
 
 
-def test_measured_torque_remains_a_hard_fault(rig):
+def test_measured_torque_fault_selects_recovery_when_upright(rig):
     start(rig)
     torques = [0.0] * 29
     torques[4] = rig.adapter.profile.legs[4].max_torque_nm + 0.1
     rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=tuple(torques))
     rig.adapter._abort_if_motion_exceeds_limits()
     assert 'joint_torque_limit' in rig.adapter.abort_reason
-    assert rig.adapter.hold_failed
+    assert rig.adapter.automatic_soft_reset
+    assert rig.adapter.command is None
 
 
-def test_motion_after_limited_write_can_still_trigger_hard_fault(rig):
+def test_motion_after_limited_write_can_still_fault_and_recover(rig):
     test_balance_overshoot_is_limited_and_recorded(rig)
     q = list(rig.adapter.feedback.q)
     q[4] = -0.2
     rig.adapter.feedback = replace(rig.adapter.feedback, q=tuple(q))
     rig.adapter._abort_if_motion_exceeds_limits()
     assert 'joint_torque_limit' in rig.adapter.abort_reason
-    assert rig.adapter.hold_failed
+    assert rig.adapter.automatic_soft_reset
+    assert rig.adapter.command is None
 
 
 def test_whole_body_soft_reset_continues_balance_without_damping(rig):
@@ -315,9 +322,13 @@ def test_fault_after_release_never_writes_and_uses_stop_path(rig, failure):
     rig.transport.write_body.assert_not_called()
     assert rig.adapter.abort_reason
     assert rig.adapter.startup.phase == 'fault'
-    assert rig.adapter.hold_failed
     rig.adapter.stop_once()
-    assert rig.transport.stop_calls == 1
+    if failure in ('expired', 'inference'):
+        assert rig.adapter.automatic_soft_reset
+        rig.adapter.soft_reset_policy.update.assert_called_once()
+        assert rig.transport.stop_calls == 0
+    else:
+        assert rig.transport.stop_calls == 1
 
 
 def test_failed_release_and_failed_restore_do_not_claim_stock_ownership(rig):
@@ -334,9 +345,134 @@ def test_failed_release_and_failed_restore_do_not_claim_stock_ownership(rig):
 
 def test_abort_during_post_release_reset_preserves_fault(rig):
     assert rig.adapter.arm()
-    rig.adapter.balance_policy.reset.side_effect = lambda: rig.adapter.abort('test_stop')
+    rig.adapter.balance_policy.reset.side_effect = lambda: rig.adapter.abort(
+        'hardware_controller_double_start', request_damping=True)
     rig.adapter.submit(rig.command, rig.now + 0.1)
     rig.adapter.step()
     rig.transport.write_body.assert_not_called()
     assert rig.adapter.startup.phase == 'fault'
     assert rig.adapter.hold_failed
+
+
+@pytest.mark.parametrize('tilt', [-90, -30.01, -30, 0, 30, 30.01, 90, 180])
+@pytest.mark.parametrize('yaw', [0, 90, 180])
+def test_automatic_fault_uses_measured_up_axis(rig, tilt, yaw):
+    start(rig)
+    pitch, heading = np.radians([tilt, yaw]) / 2
+    quat = (np.cos(heading) * np.cos(pitch), -np.sin(heading) * np.sin(pitch),
+            np.cos(heading) * np.sin(pitch), np.sin(heading) * np.cos(pitch))
+    rig.adapter.feedback = replace(rig.adapter.feedback, quat=quat)
+    rig.adapter.abort('thrash_detected', request_damping=True)
+    rig.adapter.stop_once()
+    assert rig.adapter.abort_reason == 'thrash_detected'
+    assert rig.adapter.command is None
+    assert not rig.adapter.startup.status()['control_ready']
+    if abs(tilt) <= 30:
+        assert rig.adapter.automatic_soft_reset
+        assert rig.transport.stop_calls == 0
+        rig.adapter.soft_reset_policy.update.assert_called_once()
+        assert rig.adapter.soft_reset_policy.update.call_args[0][2] == quat
+        targets, _ = rig.transport.write_body.call_args[0]
+        assert len(targets) == 29
+        assert all(t['dq'] == t['tau'] == 0 for t in targets.values())
+    else:
+        assert rig.transport.stop_calls == 1
+        rig.adapter.soft_reset_policy.update.assert_not_called()
+
+
+@pytest.mark.parametrize('bad', [
+    {'quat': ()}, {'quat': (0, 0, 0, 0)}, {'quat': (2, 0, 0, 0)},
+    {'quat': (float('nan'), 0, 0, 0)}, {'gyro': ()},
+    {'gyro': (0, float('inf'), 0)}, {'q': (0,)},
+    {'received_at_secs': 9.79}, {'received_at_secs': 10.1},
+])
+def test_automatic_recovery_requires_valid_fresh_telemetry(rig, bad):
+    start(rig)
+    rig.adapter.feedback = replace(rig.adapter.feedback, **bad)
+    rig.adapter.abort('thrash_detected')
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+    rig.adapter.soft_reset_policy.update.assert_not_called()
+
+
+def test_automatic_recovery_survives_fault_echoes_and_submission_exit(rig):
+    start(rig)
+    rig.adapter.abort('thrash_detected')
+    for _ in range(20):
+        rig.now += 0.02
+        rig.state()
+        rig.adapter.abort('thrash_detected', request_damping=True)
+        rig.adapter.abort('policy_container_exit')
+        rig.adapter.submit(rig.command, rig.now + 0.1)
+        rig.adapter.step()
+        assert rig.adapter.command is None
+        assert rig.adapter.last_worker_cycle_secs == rig.now
+    assert rig.adapter.abort_reason == 'thrash_detected'
+    assert rig.adapter.automatic_soft_reset
+    assert rig.transport.stop_calls == 0
+    assert rig.adapter.soft_reset_policy.update.call_count == 20
+    rig.adapter.soft_reset_policy.reset.assert_called_once()
+    rig.adapter.abort('controller_double_start')
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+    assert not rig.adapter.automatic_soft_reset
+
+
+@pytest.mark.parametrize('failure', [
+    'tilt', 'tilt_during_inference', 'stale', 'inference', 'write', 'watchdog',
+])
+def test_failed_automatic_recovery_falls_back_to_damping(rig, failure):
+    start(rig)
+    rig.adapter.abort('thrash_detected')
+    rig.adapter.step()
+    rig.transport.write_body.reset_mock()
+    if failure == 'tilt':
+        rig.adapter.feedback = replace(rig.adapter.feedback, quat=(0, 1, 0, 0))
+    elif failure == 'tilt_during_inference':
+        def tip(*args):
+            rig.adapter.feedback = replace(rig.adapter.feedback, quat=(0, 1, 0, 0))
+            return [0.0] * 29
+        rig.adapter.soft_reset_policy.update.side_effect = tip
+    elif failure == 'stale':
+        rig.now += 0.3
+    elif failure == 'inference':
+        rig.adapter.soft_reset_policy.update.side_effect = RuntimeError('failed')
+    elif failure == 'write':
+        rig.transport.write_body.return_value = False
+    else:
+        rig.adapter.abort('hardware_output_worker_stalled')
+    rig.adapter.step()
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls >= 1
+    assert not rig.adapter.automatic_soft_reset
+    if failure != 'write':
+        rig.transport.write_body.assert_not_called()
+
+
+@pytest.mark.parametrize('reason', [
+    'controller_double_start', 'hardware_controller_double_start', 'hardware_shutdown',
+    'hardware_write_failed', 'hardware_output_worker_stalled', 'hardware_output_loop_stall',
+])
+def test_unavailable_output_or_explicit_stop_never_enters_recovery(rig, reason):
+    start(rig)
+    rig.adapter.abort(reason)
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+    rig.adapter.soft_reset_policy.update.assert_not_called()
+
+
+def test_automatic_fault_before_ownership_does_not_start_recovery(rig):
+    assert rig.adapter.arm()
+    rig.adapter.abort('thrash_detected')
+    rig.adapter.stop_once()
+    assert rig.transport.release_calls == 0
+    assert rig.transport.stop_calls == 0
+    rig.transport.write_body.assert_not_called()
+
+
+def test_missing_recovery_policy_falls_back_to_damping(rig):
+    start(rig)
+    rig.adapter.soft_reset_policy = None
+    rig.adapter.abort('thrash_detected')
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1

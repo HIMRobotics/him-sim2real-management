@@ -265,6 +265,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 "whole_body_output": self.adapter.whole_body,
                 "startup_policy": self.adapter.startup_policy_name,
                 "soft_reset_policy": "holosoma",
+                "automatic_soft_reset": self.adapter.automatic_soft_reset,
                 "hardware_profile_path": self.hardware_profile_path,
                 "motion_released": self.adapter.balance_released,
                 "motion_released_at_secs": self.adapter.motion_released_at_secs,

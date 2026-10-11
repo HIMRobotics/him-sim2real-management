@@ -57,11 +57,26 @@ runs the existing recovery Balance path. Recovery continues until a hard stop,
 a real fault, or service shutdown, with no scheduled transition to damping.
 Double Start retains priority and requests damping.
 
+After whole-body ownership, an automatic fault selects zero-velocity Holosoma
+soft reset when the measured body-up axis dotted with world-up is at least
+`cos(30 degrees)`. This uses the normalized IMU quaternion from feedback less
+than 200 ms old. Missing, invalid or stale telemetry does not qualify. The
+30-degree recovery threshold is separate from the startup readiness threshold.
+The original fault stays latched and submitted commands remain inhibited.
+`/safety/hardware_status` reports `automatic_soft_reset` while this path is active.
+
+Double Start and service shutdown still damp. Failed writes, uncertain motion
+release, output-worker stalls and invalid hardware state also retain damping
+because recovery requires a working output path. Recovery needs a loaded policy
+and never takes ownership solely because a fault occurred before arming/release.
+Automatic recovery rechecks orientation each cycle and damps if tilt exceeds
+30 degrees, telemetry expires, or recovery inference/output fails.
+
 The recovery writer updates its output heartbeat so the stopped submission's
-old timestamp cannot trigger a false stall. Repeated F3 abort notifications and
-the policy client's normal exit cannot convert recovery into damping. Real
-faults still override recovery. The recovery helper retains its existing
-independence from submission command limits.
+old timestamp cannot trigger a false stall. Repeated notifications of the
+latched fault and the policy client's normal exit cannot convert recovery into
+damping. A new fault during recovery still overrides it. The recovery helper
+retains its existing independence from submission command limits.
 
 ### Initial takeover and readiness
 
@@ -332,7 +347,8 @@ Double Start latches stop and repeatedly requests whole-body damping. See
 A readiness or arming rejection before control is granted latches a software
 abort without sending damping or arm-release commands. The robot remains under
 its stock controller. Restart the test graph after correcting the issue.
-After successful arming, faults still request whole-body damping.
+After whole-body ownership, automatic faults select upright recovery or damping
+as described above. Arm-only faults retain the existing hold/damping behavior.
 Explicit double Start requests damping even during the readiness check.
 
 The producer first calls `/safety/motor_gate/ready`. This read-only SDK mode query
