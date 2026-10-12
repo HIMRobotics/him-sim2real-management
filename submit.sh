@@ -63,4 +63,4 @@ export G1_STARTUP_POLICY="$startup"
 if [[ "${kept[0]:-}" == stop ]]; then
   exec "$repo_dir/setup.sh" stop "${kept[@]:1}"
 fi
-exec "$repo_dir/setup.sh" --mode hardware --enable-hardware-output "${kept[@]}"
+exec "$repo_dir/setup.sh" --mode hardware --enable-hardware-output ${kept[@]+"${kept[@]}"}

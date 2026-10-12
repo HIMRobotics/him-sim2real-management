@@ -76,12 +76,14 @@ The recovery writer updates its output heartbeat so the stopped submission's
 old timestamp cannot trigger a false stall. Repeated notifications of the
 latched fault and the policy client's normal exit cannot convert recovery into
 damping. A new fault during recovery still overrides it. The recovery helper
-retains its existing independence from submission command limits.
+retains its trained gains, but its targets are clipped to the physical joint and torque envelope. Battery freshness, charge, motor temperatures and measured torque are checked before inference and again before motor output. A health failure enters damping.
 
 ### Initial takeover and readiness
 
 Whole-body arming checks the accepted stock mode, fresh telemetry, health,
 released stop buttons, absolute joint positions and physical joint-speed ceilings.
+A failed stock-mode query rejects arming for both startup policies; an unknown
+mode is never treated as a confirmed damping or developer mode.
 It does not reject a start because one measured velocity exceeds the old
 0.05 rad/s near-stationary tolerance. There is no separate stationary wait,
 position-drift gate or per-joint RMS gate. The initial desired command-speed

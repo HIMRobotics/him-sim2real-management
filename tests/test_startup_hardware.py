@@ -476,3 +476,30 @@ def test_missing_recovery_policy_falls_back_to_damping(rig):
     rig.adapter.abort('thrash_detected')
     rig.adapter.stop_once()
     assert rig.transport.stop_calls == 1
+
+
+@pytest.mark.parametrize('fault', ['battery', 'battery_stale', 'temperature', 'torque'])
+@pytest.mark.parametrize('recovering', [False, True])
+def test_health_faults_never_drive_recovery(rig, fault, recovering):
+    start(rig)
+    if recovering:
+        rig.adapter.abort('thrash_detected')
+        rig.adapter.step()
+    rig.transport.write_body.reset_mock()
+    rig.adapter.soft_reset_policy.update.reset_mock()
+    if fault == 'battery':
+        rig.adapter.receive_battery(SimpleNamespace(soc=1))
+    elif fault == 'battery_stale':
+        rig.adapter.battery_time = rig.now - 6
+    elif fault == 'temperature':
+        rig.adapter.feedback = replace(rig.adapter.feedback, temperature=((150, 150),) * 29)
+    else:
+        rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=(10000.,) * 29)
+    if not recovering:
+        rig.adapter.abort('thrash_detected')
+    rig.adapter.step()
+    rig.adapter.stop_once()
+    rig.transport.write_body.assert_not_called()
+    rig.adapter.soft_reset_policy.update.assert_not_called()
+    assert rig.transport.stop_calls >= 1
+    assert not rig.adapter.automatic_soft_reset

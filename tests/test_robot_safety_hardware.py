@@ -269,11 +269,13 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.startup_policy_name = "holosoma"
         self.assertTrue(self.adapter.check_ready_mode())
 
-    def test_holosoma_continues_when_the_mode_service_does_not_answer(self):
+    def test_holosoma_rejects_when_the_mode_service_does_not_answer(self):
         self.transport.read_ready_fsm = lambda: (3102, None)
         self.assertFalse(self.adapter.check_ready_mode())
         self.adapter.startup_policy_name = "holosoma"
-        self.assertTrue(self.adapter.check_ready_mode())
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.assertFalse(self.adapter.arm())
+        self.assertEqual(self.transport.writes, [])
 
     def test_only_confirmed_ready_mode_can_arm(self):
         self.transport.mode = 500
@@ -390,7 +392,7 @@ class HardwareAdapterTests(unittest.TestCase):
         policy.warmup.assert_called_once()
         self.assertEqual(len(self.transport.body_commands), 2)
 
-    def test_soft_reset_balance_bypasses_submission_limits(self):
+    def test_soft_reset_balance_preserves_gains_within_physical_limits(self):
         data = profile_data()
         data["joints"]["left_hip_pitch"]["max_torque_nm"] = 0.1
         self.adapter.profile = load_profile(data)
@@ -398,17 +400,14 @@ class HardwareAdapterTests(unittest.TestCase):
         policy.update.return_value = [0.0] * 29
         self.adapter.soft_reset_policy = policy
         self.press_f3_twice()
-        with patch("robot_safety.hardware_adapter.checked_targets") as command_check, patch(
-            "robot_safety.hardware_adapter.check_torque"
-        ) as torque_check:
-            self.adapter.stop_once()
-            self.now += 0.02
-            policy.update.return_value = [0.2] + [0.0] * 28
-            self.adapter.stop_once()
-        command_check.assert_not_called()
-        torque_check.assert_not_called()
+        self.adapter.stop_once()
+        self.now += 0.02
+        policy.update.return_value = [0.2] + [0.0] * 28
+        self.adapter.stop_once()
         self.assertEqual(len(self.transport.body_commands), 2)
-        self.assertEqual(self.transport.body_commands[-1][0][0]["q"], 0.2)
+        target = self.transport.body_commands[-1][0][0]
+        self.assertEqual(target["kp"], 40.0)
+        self.assertAlmostEqual(target["q"], 0.9 * 0.1 / 40)
         self.assertEqual(self.transport.stop_calls, 0)
 
     def test_soft_reset_refresh_reuses_the_last_policy_output(self):
@@ -490,7 +489,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.press_f3_twice()
         self.adapter.receive_state(
             SimpleNamespace(
-                motor_state=[SimpleNamespace(q=0.4, dq=0.0) for _ in range(35)],
+                motor_state=[SimpleNamespace(q=0.4, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 mode_machine=5,
                 wireless_remote=[0] * 40,
             )

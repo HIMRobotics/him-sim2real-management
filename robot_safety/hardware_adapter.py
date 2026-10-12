@@ -63,6 +63,7 @@ DAMP_ONLY_REASONS = frozenset({
     "hardware_shutdown", "hardware_output_worker_stalled", "hardware_output_loop_stall",
     "hardware_write_failed", "hardware_release_failed", "hardware_machine_type_changed",
     "hardware_feedback_timeout", "invalid_hardware_feedback", "missing_hardware_imu",
+    "low_battery", "invalid_battery_feedback", "battery_feedback_timeout",
 })
 
 
@@ -287,14 +288,6 @@ class G1HardwareAdapter:
             if self.abort_reason:
                 return self.reject_arm(f"already stopped: {self.abort_reason}")
             if code != 0:
-                if self.startup_policy_name == "holosoma":
-                    print(
-                        "Holosoma startup: mode query failed "
-                        "(rpc_code={0}). Damp and developer mode are accepted.".format(code),
-                        flush=True,
-                    )
-                    self.time_ready_mode_confirmed_secs = self.clock()
-                    return True
                 return self.reject_arm(
                     f"ready-mode query failed: rpc_code={code}, fsm_id={fsm_id}"
                 )
@@ -856,6 +849,9 @@ class G1HardwareAdapter:
             feedback = self.feedback
             if feedback is None or not self.feedback_fresh(self.clock()):
                 raise ValueError("stale balance feedback")
+            # A latched submission fault must not disable health checks for the
+            # replacement controller. Recovery still drives the same motors.
+            self.check_health()
             if self.automatic_soft_reset and not self._upright_for_soft_reset(feedback):
                 raise ValueError("robot is not upright for automatic recovery")
             if not self.soft_reset_active:
@@ -872,14 +868,23 @@ class G1HardwareAdapter:
                 0 <= self.clock() - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS
             ):
                 raise ValueError("stale balance feedback")
-            # Recovery uses the trained full-body gains, outside submission movement limits.
-            targets = {
-                index: {"q": float(q[index]), "dq": 0.0, "tau": 0.0,
-                        "kp": float(policy.kp[index]), "kd": float(policy.kd[index])}
-                for index in range(29)
-            }
+            # Retain the recovery policy's gains, but never bypass the robot's
+            # physical position and torque envelope for a replacement controller.
+            entries = tuple(
+                (index, G1_29_JOINT_NAMES[index], replace(
+                    limits, kp=float(policy.kp[index]), kd=float(policy.kd[index])))
+                for index, limits in self._monitored_joints()
+            )
+            targets = checked_targets(
+                {"q": q, "dq": [0.0] * 29, "tau": [0.0] * 29},
+                entries, feedback.q, feedback.dq, initial=False,
+                initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
+                warnings=self.position_warnings,
+                torque_target_fraction=TORQUE_TARGET_FRACTION,
+            )
             if self.hold_failed or not self.walk_stop:
                 return
+            self.check_health()
             if self.automatic_soft_reset and not self._upright_for_soft_reset(self.feedback):
                 raise ValueError("robot is not upright for automatic recovery")
             if not self.transport.write_body(targets, self.machine_type or 0):
