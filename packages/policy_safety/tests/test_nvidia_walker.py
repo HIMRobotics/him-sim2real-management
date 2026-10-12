@@ -93,8 +93,8 @@ def test_observation_history_scaling_selection_and_restore():
     policy.reset()
     policy.restore(saved)
     assert not policy.use_balance
-    np.testing.assert_array_equal(policy.history, saved[0])
-    np.testing.assert_array_equal(policy.previous_action, saved[1])
+    np.testing.assert_array_equal(policy.history, saved[:516].reshape(6, 86))
+    np.testing.assert_array_equal(policy.previous_action, saved[516:531])
 
 
 def test_nonfinite_output_and_wrong_model_rejected():
@@ -127,3 +127,28 @@ def test_portable_screening_bundle_runs_both_official_models(tmp_path):
         ][0]
         np.testing.assert_array_equal(raw, expected)
         assert policy.decode(raw).shape == (29,)
+
+
+def test_nvidia_scenario_writes_replayable_numeric_trace(tmp_path):
+    from policy_safety.config import profile_config
+    from policy_safety.evaluation import run_scenario
+    import policy_safety
+
+    destination = tmp_path / "bundle"
+    prepare_g1(BUNDLE, destination)
+    sim = Simulation(destination / "robot.json")
+    policy = NvidiaWalker(destination / "walker.onnx", sim.robot)
+    profile = profile_config(Path(policy_safety.__file__).parent / "profiles/provisional.json")
+    for index, command in enumerate(([0., 0., 0.], [0.3, 0., 0.])):
+        sim.reset(0)
+        policy.reset()
+        trace = tmp_path / f"{index}.npz"
+        result, _ = run_scenario(sim, policy, profile,
+            {"name": "smoke", "command": command, "seconds": 0.04, "upright": True}, trace)
+        assert result["status"] != "error"
+        with np.load(trace, allow_pickle=False) as data:
+            state = data["initial_policy_state"]
+            assert state.shape == (532,)
+            policy.restore(state)
+            for name in data.files:
+                assert data[name].dtype != object

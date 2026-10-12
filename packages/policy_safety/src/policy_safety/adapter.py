@@ -213,13 +213,17 @@ class NvidiaWalker:
         return target
 
     def snapshot(self):
-        return self.history.copy(), self.previous_action.copy(), self.use_balance
+        # Traces must remain numerical and loadable with allow_pickle=False.
+        return np.concatenate((self.history.ravel(), self.previous_action,
+                               np.array([float(self.use_balance)], dtype=np.float32)))
 
     def restore(self, state):
-        history, action, use_balance = state
-        self.history = np.asarray(history, dtype=np.float32).copy()
-        self.previous_action = vector(action, 15, "previous action").astype(np.float32)
-        self.use_balance = bool(use_balance)
+        state = vector(state, 532, "NVIDIA controller state").astype(np.float32)
+        if state[-1] not in (0, 1):
+            raise ValueError("invalid NVIDIA controller selection")
+        self.history = state[:516].reshape(6, 86).copy()
+        self.previous_action = state[516:531].copy()
+        self.use_balance = bool(state[-1])
 
     def command_velocity_and_torque(self):
         return np.zeros(29), np.zeros(29)
