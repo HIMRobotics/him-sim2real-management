@@ -81,13 +81,13 @@ experiment evaluator still uses its explicit bundle gains and torque-scale
 scenarios. Those configurations and unchecked/direct experiments do not claim
 hardware-equivalent actuation.
 
-With the unified profile gains, a checked walker run accepted six commands
-before rejecting `right_hip_pitch` PD torque demand of 104.9 Nm against an
-88 Nm limit. Reports record the first latch time as `stop_time_seconds`,
-separately from simulation that continues under damping after the rejection.
-The earlier run using policy gains is not a parity baseline for this
-configuration. The checked stairs example also reaches this torque limit
-during startup. No limits were relaxed to make these examples pass.
+In simulation, a joint velocity or torque past the model rating is a warning.
+The command stays applied, MuJoCo still saturates actuator force at the model
+force range, and the report names the worst exceedance. Protocol errors,
+timeouts, non-finite state, the startup speed gate, base angular speed, falls,
+and enforced thrash still stop the run. Hardware checks are separate: measured
+speed and torque still reject there. Reports record a real stop as
+`stop_time_seconds`.
 
 ## Shared thrash detection
 
@@ -129,20 +129,18 @@ separate `checks.thrash_monitoring` / `checks.thrash_enforcement` flags. The
 finished-run viewer shows the mode and any detection. Other checks passing
 does not mean a monitored thrash warning was absent.
 
-New traces and live views show whole-body weighted oscillation RMS, its limit,
+Traces and live views show whole-body weighted oscillation RMS, its limit,
 and the continuous time above that limit. Per-joint rows show oscillatory RMS,
 motion RMS, weight, and percentage of the total weighted energy. Hips, knees
 and waist weigh 4, shoulders 3, ankles 2, elbows 1, and wrists 0.25. The shared
 score is `sqrt(sum(weight * oscillatory_RMS²) / sum(weight))`, with a provisional
-limit of 1.5 for 500 ms. CV and the former local/distributed/severe rules no
-longer stop motion. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
+limit of 1.5 for 500 ms. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
 for details. These are motion-risk weights, not measured joint inertias.
 
 Space pauses and arrow keys step both motion and readings. **Go to start / Home**
 jumps to the first frame and pauses. **Restart replay / R** plays from the
-beginning, preserving the camera and without rerunning the simulation. Old traces preserve
-their original detections and are labeled as legacy recordings. Start a new run
-to see the new score. Detection defaults remain provisional, without automatic
+beginning, preserving the camera and without rerunning the simulation.
+Detection defaults remain provisional, without automatic
 threshold adaptation or task exemptions.
 
 ## Stop reasons in the viewer
@@ -181,12 +179,12 @@ With safety checks enabled, `containers/sim/runner.py` checks:
 
 - `session_id` matches the armed session, `sequence` increases, and `observation_id` is still fresh.
 - Targets, gains, and feedforward torque are finite and inside the sanity bounds.
-- The shared processor clips positions and checks target velocity, feedforward torque, and torque demand using profile gains.
-- During each physics step, overspeed latches. A fall latches only from the standing start.
+- The shared processor clips positions and desired joint speed. Feedforward torque, torque demand, applied torque, and measured joint speed are warnings; the startup speed gate still rejects.
+- During each physics step, a fall latches only from the standing start. Joint overspeed is recorded and the step continues.
 
 `hardware_authorization` in the report is always false. A passing sim run is not permission to run on the robot.
 
-With `--no-safety-checks`, the sim bypasses observation age, action timeout, numeric sanity bounds, joint position/tracking/rate/torque limits, feedforward-torque restrictions, overspeed, and falls. It keeps applying the last command until another arrives. MuJoCo's own physical joint and actuator limits remain part of the model. The ROS protocol still requires a matching session, increasing sequence, and an observation ID issued by the sim. Every command array must contain 29 finite numbers. Malformed commands and non-finite simulation state still terminate acceptance and report `error`.
+With `--no-safety-checks`, the sim bypasses freshness deadlines, numeric range checks, desired-speed clipping, torque-budget projection, measured joint-limit warnings, body-spin checks, and falls. Output positions are still clipped to joint bounds, and MuJoCo's physical joint and actuator limits remain part of the model. Thrash detection is configured separately. The last command remains active until another arrives. The ROS protocol still requires a matching session, increasing sequence, and an observation ID issued by the sim. Every command array must contain 29 finite numbers. Malformed commands and non-finite simulation state still terminate acceptance and report `error`.
 
 Unchecked runs and direct circle runs report `completed`, never `within_limits`. Reports and counterfactual summaries include `safety_checks` and the selected `scene` path (`null` means the bundled scene). `--safety-checks` explicitly re-enables checking. If both flags are supplied, the last one wins.
 
@@ -197,8 +195,9 @@ base angular speed, falls, and finite simulation state. These flags describe
 enabled checks, not proof that every fault condition was exercised.
 
 Direct control bypasses command protocol, command limits, and observation
-freshness checks. With safety enabled, action timeout, speed and standing-fall
-monitoring remain enabled. Its viewer displays `PARTIAL` and explicitly labels
+freshness checks. With safety enabled, action timeout and standing-fall
+monitoring remain enabled. Measured joint speed and torque past the model
+rating are shown on the viewer and do not stop the run. Its viewer displays `PARTIAL` and explicitly labels
 submission checks as bypassed. This metadata is also stored in the trace so a
 standalone replay retains that distinction.
 
@@ -224,13 +223,25 @@ To run a real policy immediately on a Mac or Windows laptop, use `./desktop_sim.
 
 Each pose writes `containers/sim/output/poses/<pose>/report.json` and a trace. The battery writes `containers/sim/output/poses/summary.json`. Replay one pose with `./sim.sh replay containers/sim/output/poses/supine/trace.npz`. `--self-test --counterfactuals` holds the measured joints of every pose for one second. A floor pose can still fail a joint check while the body settles. That failure is not a fall.
 
+The policy package, the container, and the velocity file are three different choices. `report.json` field `policy` is the name recorded for the run.
+
+| Choice | How to specify it | What runs | `policy` in the report |
+| --- | --- | --- | --- |
+| Policy package | `--example stairs`, `walker`, or `balance` | `examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
+| Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. See [build and export](examples/README.md#build-and-export-the-shared-image) for the shared walker image. `G1_TASK_COMMAND` sets the shared client's task velocity. | The selected example, when available |
+| Velocity file on the plant | `--command examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
+| Same file in the walker container | `--example walker --command examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
+| Circle shortcut | `--circle` | Same cached walker. The velocity file is `examples/commands/walker/circle.yaml`. | `circle` |
+
+`--command` does not select a policy package or start a container. `--example` does not read `examples/commands/walker/`.
+
 Other flags:
 
 | Flag | Effect |
 | --- | --- |
 | `--seconds 10` | Length of the run after the first accepted command. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
-| `--example stairs\|walker\|balance` | Prepare a real ONNX policy, its matching scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
+| `--example stairs\|walker\|balance` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
 | `--local` | Run an `--example` directly against MuJoCo without Docker, ROS, or sudo. |
 | `--output DIR` | Save a run separately so safety-on/off results can both be replayed. |
 | `--scene path/to/scene.xml` | Load a complete MuJoCo G1 scene from the host filesystem. Relative paths use the caller's working directory. |
@@ -241,7 +252,8 @@ Other flags:
 | `--battery` | Flat floor, all six poses, then a 10 N, 50 N, and 150 N pelvis push on each. Writes `containers/sim/output/battery/report.json`. |
 | `--push none\|small\|medium\|heavy` | Run that one battery case. Add `--pose` to pick the start. Add `--view`, press Start, and watch it. |
 | `--battery --circle` | Same pushes while the cached walker circles. Standing only. A gait step is applied directly, and the fall check stays on. |
-| `--circle` | Walk one flat circle with the cached G1 walker. No submission. The fall check stays on. The submission tracking window is not applied, because a gait step does not fit it. |
+| `--circle` | Cached walker, velocity file `circle.yaml`. No container. Report `policy` is `circle`. Uses direct policy commands, with the fall check on and active checks listed in the report. |
+| `--command FILE` | Same runner, with that velocity file. No container. Report `policy` is the file name without `.yaml`. `forward_stop.yaml` walks at 0.5 m/s for 2 s, then steps down 0.1 m/s each second to zero. Yaw is zero, and the final zero velocity selects NVIDIA Balance. Use `--seconds 7` to see the stop. |
 | `--view` | Open the page first. Press Start to run, then the recording plays from the first frame. |
 | `replay` | Serve the last recording. Does not start a new run. |
 | `--help` | Show usage without starting Docker or requesting sudo. |
@@ -266,7 +278,7 @@ The run writes:
 | `containers/sim/output/bridge.log` | ROS bridge log, if the run fails early. |
 | `containers/sim/output/policy.log` | Submitted container stdout/stderr, captured before removal. |
 
-When `--output` is supplied, these files go in that directory. Docker runs can be stopped with `./sim.sh stop --output DIR`. Reports include `execution`, the selected example `policy` when applicable, and independent `motion` measurements. The simulation-only `/sim/state` topic supplies base pose and velocity to example controllers. Its schema is in [the examples guide](examples/README.md#simulation-only-policy-observations).
+When `--output` is supplied, these files go in that directory. Docker runs can be stopped with `./sim.sh stop --output DIR`. Reports include `execution`, the selected example `policy` when applicable, and independent `motion` measurements. The shared client receives base pose and velocity through `/safety/policy_state`. Its schema is in [the examples guide](examples/README.md#shared-policy-observations).
 
 `status` in the report:
 

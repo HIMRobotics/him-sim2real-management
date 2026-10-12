@@ -2,17 +2,15 @@
 
 import json
 import time
-from threading import Thread
+from threading import Lock, Thread
 
 from .hardware_constants import (
-    ARM_INDICES,
     ARM_SDK_TOPIC,
     ARM_WEIGHT_INDEX,
     DAMPING_FSM_ID,
     ENGLISH_SPEAKER_ID,
     LOW_COMMAND_TOPIC,
     LOW_STATE_TOPIC,
-    LOWER_BODY_INDICES,
     MOTION_SWITCHER_SET_SILENT,
     NUM_JOINTS,
     SDK_RPC_TIMEOUT_CODE,
@@ -21,15 +19,46 @@ from .hardware_profile import (
     DAMPING_RPC_TIMEOUT_SECS,
     READINESS_QUERY_ATTEMPTS,
     READINESS_RPC_TIMEOUT_SECS,
+    STATE_POLL_SECS,
 )
+from .sdk_latest import LatestSdkPoller, LatestSdkReader
 
 SOFT_RESET_PHRASE = "Soft Reset"
+
+
+class MotorWriterLock:
+    """Exclude other repository motor writers on this host."""
+
+    def __init__(self, path="/tmp/g1-motor-writer.lock"):
+        import fcntl
+        import os
+
+        self.fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.close()
+            raise RuntimeError("another G1 motor writer is active") from None
+
+    def close(self):
+        import os
+
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def __del__(self):
+        if getattr(self, "fd", None) is not None:
+            self.close()
 
 
 class UnitreeArmTransport:
     """Own arm_sdk publication and a separate locomotion RPC client."""
 
-    def __init__(self, interface, domain, on_state, on_battery):
+    def __init__(self, interface, domain, on_state, on_battery, *, output_enabled=True):
+        self.output_enabled = output_enabled
+        self.writer_lock = MotorWriterLock() if output_enabled else None
+        self.write_lock = Lock()
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
             MotionSwitcherClient,
         )
@@ -46,10 +75,12 @@ class UnitreeArmTransport:
         ChannelFactoryInitialize(domain, interface)
         self.make_command = unitree_hg_msg_dds__LowCmd_
         self.crc = CRC()
-        self.publisher = ChannelPublisher(ARM_SDK_TOPIC, LowCmd_)
-        self.publisher.Init()
-        self.lowcmd = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
-        self.lowcmd.Init()
+        self.publisher = self.lowcmd = None
+        if output_enabled:
+            self.publisher = ChannelPublisher(ARM_SDK_TOPIC, LowCmd_)
+            self.publisher.Init()
+            self.lowcmd = ChannelPublisher(LOW_COMMAND_TOPIC, LowCmd_)
+            self.lowcmd.Init()
         self.audio = None
         self.saved_motion_name = None
         self.motion_restored = False
@@ -69,14 +100,21 @@ class UnitreeArmTransport:
             self._audio()
         except Exception as error:  # noqa: BLE001
             print(f"Optional speech initialization failed: {error}", flush=True)
-        self.subscriber = ChannelSubscriber(LOW_STATE_TOPIC, LowState_)
-        # No SDK queue that could conceal old samples behind new receipt timestamps.
-        self.subscriber.Init(on_state)
+        self._body_targets = None
+        self._body_message = None
+        self._body_ready = False
         self.bms_subscriber = ChannelSubscriber("rt/lf/bmsstate", BmsState_)
         self.bms_subscriber.Init(on_battery)
+        # Newest sample only, on a fixed schedule. A per-message callback
+        # decodes 1 kHz in Python and starves the policy and 2 ms threads.
+        self.state_reader = LatestSdkReader(LOW_STATE_TOPIC, LowState_)
+        self.state_poller = LatestSdkPoller(self.state_reader, on_state, STATE_POLL_SECS)
+        self.state_poller.start()
 
     def write_arm(self, targets, weight):
         """Send only explicitly mapped upper-body targets, plus SDK ownership weight."""
+        if not self.output_enabled:
+            return True
         message = self.make_command()
         for index, values in targets.items():
             motor = message.motor_cmd[index]
@@ -84,10 +122,13 @@ class UnitreeArmTransport:
                 setattr(motor, field, value)
         message.motor_cmd[ARM_WEIGHT_INDEX].q = weight
         message.crc = self.crc.Crc(message)
-        return self.publisher.Write(message)
+        with self.write_lock:
+            return self.publisher.Write(message)
 
-    def release_motion(self):
+    def release_motion(self, *, announce_soft_reset=False):
         """Hand the motors to rt/lowcmd. The sport service will not damp until restored."""
+        if not self.output_enabled:
+            return 0
         switcher = self.switcher
         _code, mode = switcher.CheckMode()
         if isinstance(mode, dict) and mode.get("name"):
@@ -95,16 +136,18 @@ class UnitreeArmTransport:
         self._set_motion_silent(True)
         release_code, _ = switcher.ReleaseMode()
         self.motion_restored = False
-        if release_code == 0:
+        if release_code == 0 and announce_soft_reset:
             # Speech must not block the first balance command.
             self._speech_thread = Thread(target=self._say_soft_reset, daemon=True)
             self._speech_thread.start()
-        else:
+        elif release_code != 0:
             self._set_motion_silent(False)
         return release_code
 
     def restore_motion(self):
         """Reselect the sport service after a release. 7002 means it is still busy."""
+        if not self.output_enabled:
+            return 0
         if self.motion_restored:
             return 0
         self._set_motion_silent(False)
@@ -116,26 +159,58 @@ class UnitreeArmTransport:
             self.motion_restored = True
         return code
 
-    def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
-        """Command 15 lower-body targets and hold the captured arm pose."""
+    def write_body(self, targets, machine):
+        """Encode a complete, already checked 29-joint command."""
+        if set(targets) != set(range(NUM_JOINTS)):
+            raise ValueError("whole-body output requires all 29 joints")
+        if not self.output_enabled:
+            return True
+        stored = {
+            index: {field: float(values[field]) for field in ("q", "dq", "kp", "kd", "tau")}
+            for index, values in targets.items()
+        }
+        message = self._encode_body(stored, machine)
+        with self.write_lock:
+            self._body_targets = stored
+            self._body_message = message
+            self._body_ready = True
+            return self.lowcmd.Write(message)
+
+    def repeat_body(self, machine):
+        """Resend the latched whole-body command with a fresh mode and CRC.
+
+        Returns None when no command is latched. Joint targets stay the ones
+        write_body checked. This does not rebuild the motor command or run
+        another safety check, so the 2 ms thread stays off the policy tick.
+        """
+        if not self.output_enabled:
+            return True
+        with self.write_lock:
+            message = getattr(self, "_body_message", None)
+            if not getattr(self, "_body_ready", False) or message is None:
+                return None
+            message.mode_machine = machine
+            message.crc = self.crc.Crc(message)
+            if not self._body_ready:
+                return None
+            return self.lowcmd.Write(message)
+
+    def clear_body(self):
+        """Drop the latched whole-body command so the 2 ms thread stops."""
+        with self.write_lock:
+            self._body_ready = False
+
+    def _encode_body(self, targets, machine):
         message = self.make_command()
         message.mode_pr = 0
         message.mode_machine = machine
-        for index in range(NUM_JOINTS):
+        for index, values in targets.items():
             motor = message.motor_cmd[index]
             motor.mode = 1
-            motor.dq = 0.0
-            motor.tau = 0.0
-            if index in LOWER_BODY_INDICES:
-                motor.q = float(lower_q[index])
-                motor.kp = float(leg_kp[index])
-                motor.kd = float(leg_kd[index])
-            else:
-                motor.q = float(arm_q[index - ARM_INDICES[0]])
-                motor.kp = 40.0
-                motor.kd = 1.0
+            for field in ("q", "dq", "kp", "kd", "tau"):
+                setattr(motor, field, float(values[field]))
         message.crc = self.crc.Crc(message)
-        return self.lowcmd.Write(message)
+        return message
 
     def _set_motion_silent(self, silent):
         """Mute the firmware mode announcement. ReleaseMode otherwise says developer mode."""
@@ -167,6 +242,8 @@ class UnitreeArmTransport:
 
     def request_damping(self):
         """Use Damp's underlying RPC because Damp() discards its return code."""
+        if not self.output_enabled:
+            return 0
         return self.locomotion.SetFsmId(DAMPING_FSM_ID)
 
     def read_ready_fsm(self):
@@ -190,6 +267,10 @@ class UnitreeArmTransport:
         return self.locomotion.GetFsmId()
 
     def close(self):
-        self.subscriber.Close()
+        self.state_poller.stop()
+        self.state_reader.close()
         self.bms_subscriber.Close()
-        self.publisher.Close()
+        if self.output_enabled:
+            self.publisher.Close()
+            self.lowcmd.Close()
+            self.writer_lock.close()

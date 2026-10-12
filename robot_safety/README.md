@@ -34,13 +34,22 @@ The service runs [run_safety_stops.sh](../tests/manual/run_safety_stops.sh), whi
 builds the ROS overlay under `~/.him-safety` and starts a hardware motor gate.
 It does not start an arm trajectory or arm a policy. The gate reads the robot's
 controller telemetry directly and watches for press–release–press gestures
-within 0.5 seconds: **double F3 requests balance with the arms held**, and
-**double Start requests stock whole-body damping**. F3 uses the local GR00T
-balance network, not the stock walking controller. The service can issue these
-commands even without a test policy running. While armed, it also checks command
+within 0.5 seconds: **double F3 requests Holosoma whole-body standing control**, and
+**double Start requests stock whole-body damping**. F3 uses the local Holosoma
+FastSAC network at zero commanded velocity, including its arm targets and model gains. Recovery starts from measured state without
+the startup crouch ramp. GR00T Balance remains the default submission startup.
+The service can issue these commands even without a test policy running. While armed, it also checks command
 and feedback freshness. Systemd restarts the process on failure, subject to the
 unit's retry limits. An active service alone does not establish physical stop
 performance.
+
+After whole-body control has taken ownership, automatic faults select Holosoma
+soft reset when fresh IMU orientation is within 30 degrees of vertical. The
+submission stays stopped while recovery runs at zero commanded velocity.
+Double Start always requests damping. Missing or stale orientation, tilt beyond
+30 degrees, unavailable recovery, failed motor output, output-worker stalls and
+service shutdown use damping. Automatic recovery also falls back to damping if
+orientation leaves that range or inference/output fails.
 
 Startup initializes the motion-switcher and optional speech clients, loads the
 balance model, and runs one dummy inference without changing policy history or
@@ -61,9 +70,11 @@ changes likewise require a service restart before they take effect.
 The launcher uses ROS localhost domain 97, SDK domain 0, interface `eth0` and
 [g1_type5.template.json](profiles/g1_type5.template.json) by default. It requires
 ROS 2 Foxy, colcon, the system Python's Unitree SDK/native libraries and balance
-runtime, and `.cache/groot_balance/GR00T-WholeBodyControl-Balance.onnx` in this
-clone. Installation does not provision those dependencies. Service environment
-variables `HIM_SAFETY_PROFILE` and `HIM_SAFETY_ROS_INSTALL` override the profile and
+runtime, the bundled GR00T Balance weights, and the Holosoma
+`fastsac_g1_29dof.onnx` checkpoint. Set `HIM_HOLOSOMA_ONNX` to its location, or
+keep the Holosoma clone at `/home/unitree/holosoma`. Both policies are warmed
+before the service reports ready. Installation does not provision those
+dependencies. Service environment variables `HIM_SAFETY_PROFILE` and `HIM_SAFETY_ROS_INSTALL` override the profile and
 overlay path. Set them through a systemd user-service override if needed.
 
 ```bash
@@ -106,7 +117,7 @@ module or simulation-specific set of thresholds is introduced.
 - `MotorGateNode`: separate process with an independent 5 ms target timer. It watches postcheck freshness and immutable expiry, rejects replayed sequences and wrong sessions, and selects fake damping on abort or timeout. A frozen checker cannot refresh its deadlines.
 - `ControllerStopNode`: observes physical Start, detects a double press and publishes abort directly to both nodes. It also aborts on stale feedback. Fresh DDS data does not prove a live radio link.
 
-The core remains the ROS-independent checker logic. `motor_gate.py` contains the independently testable final-gate logic. The earlier `runtime.py` is retained as an in-process test/reference implementation, not the scheduler used by these ROS nodes. ROS executors run callbacks and timers. Run roles as separate OS processes in deployment to avoid a checker freeze freezing the gate too.
+The core remains the ROS-independent checker logic. `motor_gate.py` contains the independently testable final-gate logic. ROS executors run callbacks and timers. Run roles as separate OS processes in deployment to avoid a checker freeze freezing the gate too.
 
 ## Thrash detection in the existing checker
 
@@ -225,12 +236,9 @@ is reserved for the manual test launcher, including physical output.
 The tests verify typed postcheck delivery, invalid-command abort delivery and independent gate damping when the checker stops executing. Ordinary safety tests do not require ROS:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q tests \
+  --ignore=tests/ros2 --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
 ```
-
-## Next review checkpoint
-
-The feedback adapter, manual policies, per-joint profile and opt-in hardware gate are implemented. A systemd-managed hardware watchdog is available below. Coordinated reset, publisher access isolation and frontend integration remain pending. Physical stop acceptance is unresolved after the reported joint shutdown. See [ESTOP_PLAN.md](../ESTOP_PLAN.md) for next-session work.
 
 ---
 
@@ -269,7 +277,8 @@ No fresh state produces a warning and resets the gesture. Backlogged or invalid 
 ## Offline validation
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_robot_safety*.py'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q tests \
+  --ignore=tests/ros2 --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
 ```
 
 ## Troubleshooting missing double presses
@@ -281,12 +290,6 @@ If transitions appear but no stop event, check that two rising edges occur withi
 ## Recorded operator validation
 
 On September 22, 2026, the operator confirmed successful detection using the actual G1 controller. The supplied debug trace showed Start as `0400`, two double-press events with approximately 160 ms between presses, and rejection of an interval of approximately 1.06 seconds. Displayed telemetry gaps were around 1 ms. Firmware version, interface and selected topic were not recorded in the supplied trace. This validates controller-input decoding and gesture detection only, not motor damping or stop priority over a policy.
-
-## Offline runtime reference
-
-`runtime.py` is the earlier in-process implementation, retained for deterministic
-queue and scheduling tests. ROS nodes do not run it. Use the ROS build/run
-instructions above for the current architecture.
 
 ## Identifying the physical setup
 
@@ -374,4 +377,3 @@ See [HARDWARE_ADAPTER.md](HARDWARE_ADAPTER.md) for the implemented arm SDK adapt
 required profile and whole-body damping request path. Dry-run launch behavior is
 unchanged. The operator has exercised the small elbow test and reported a joint
 shutdown during a T-pose stop. Stop behavior is not accepted for deployment.
-See [the next-session plan](../ESTOP_PLAN.md#next-session--september-25-custom-e-stop-damping).

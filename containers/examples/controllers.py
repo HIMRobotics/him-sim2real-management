@@ -1,15 +1,16 @@
-"""ONNX examples shared by local and ROS simulation runs."""
+"""ONNX examples shared by simulation and hardware containers."""
 
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
 import yaml
-from policy_safety.adapter import G1Walker
+from policy_safety.adapter import ADAPTERS
 
 from robot_safety.balance_policy import LEG_KD, LEG_KP, BalancePolicy
+from robot_safety.holosoma_policy import HolosomaLocomotionPolicy
 
-NAMES = ("stairs", "walker", "balance")
+NAMES = ("stairs", "walker", "balance", "holosoma")
 
 
 def session(path):
@@ -40,6 +41,11 @@ class ExamplePolicy:
             self.policy.warmup()
             self.kp = np.concatenate((LEG_KP, np.full(14, 40.0)))
             self.kd = np.concatenate((LEG_KD, np.full(14, 1.0)))
+        elif name == "holosoma":
+            path = project / "holosoma.onnx"
+            self.policy = HolosomaLocomotionPolicy(str(path), session=session(path))
+            self.kp = self.policy.kp
+            self.kd = self.policy.kd
         else:
             cfg = yaml.safe_load((project / "policy.yaml").read_text())
             joints = cfg["joints"]
@@ -50,16 +56,20 @@ class ExamplePolicy:
                 "action_scales": [j["action_scale"] for j in joints],
             }
             path = project / cfg["model"]["file"]
-            self.policy = G1Walker(path, robot, session=session(path))
+            self.policy = ADAPTERS[cfg["contract"]](path, robot, session=session(path))
             self.kp = np.array([j["kp"] for j in joints])
             self.kd = np.array([j["kd"] for j in joints])
-            self.policy.infer(np.zeros((1, 99), dtype=np.float32))
+            self.policy.infer(self.policy.observation(
+                self.policy.default, np.zeros(29), [1, 0, 0, 0], np.zeros(6), [0, 0, 0]
+            ))
             self.policy.reset()
 
     def velocity_command(self, state):
         """Command forward walking or the stair submission's scripted phases."""
+        if "task_command" in state:
+            return np.asarray(state["task_command"], dtype=np.float32)
         if self.name == "walker":
-            return np.array([0.6, 0.0, 0.0], dtype=np.float32)
+            return np.array([0.3, 0.0, 0.0], dtype=np.float32)
         x, y, z = state["position"]
         if self.phase == "walk":
             if x >= 1.55 and abs(y) < 0.35 and z > 0.60 and state["upright"] > 0.75:
@@ -86,22 +96,33 @@ class ExamplePolicy:
         q = np.asarray(state["q"], dtype=float)
         if self.arm_pose is None:
             self.arm_pose = q[15:].copy()
-        if self.sequence == 0:
-            target = q.copy()
-        elif self.name == "balance":
+            self.hold_pose = q.copy()
+        if self.name == "balance":
             lower = self.policy.update(q, state["dq"], state["quat"], state["gyro"])
             target = np.concatenate((lower, self.arm_pose))
+        elif self.name == "holosoma":
+            velocity = (
+                self.velocity_command(state) if "task_command" in state
+                else np.zeros(3)
+            )
+            if not state.get("control_ready", True):
+                velocity = np.zeros(3)
+            target = self.policy.update(
+                q, state["dq"], state["quat"], state["gyro"], velocity
+            )
         else:
             observation = self.policy.observation(
                 q,
                 state["dq"],
                 state["quat"],
-                state["base_velocity"],
-                self.velocity_command(state),
+                ([0.0, 0.0, 0.0, *state["gyro"]]
+                 if self.name == "walker" else state["base_velocity"]),
+                (self.velocity_command(state) if state.get("control_ready", True)
+                 else np.zeros(3, dtype=np.float32)),
             )
             target = self.policy.decode(self.policy.infer(observation))
             if self.name == "stairs":
-                if self.phase == "cross" and 1.88 <= state["position"][0] < 2.05:
+                if state.get("control_ready", True) and self.phase == "cross" and 1.88 <= state["position"][0] < 2.05:
                     phase = self.phase_time % 0.8
                     if phase < 0.25:
                         target[[0, 6]], target[[3, 9]], target[[4, 10]] = (

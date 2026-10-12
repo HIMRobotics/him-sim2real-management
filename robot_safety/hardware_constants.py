@@ -47,10 +47,13 @@ LEFT_ELBOW_INDEX = G1_29_JOINT_NAMES.index("left_elbow")
 RIGHT_ELBOW_INDEX = G1_29_JOINT_NAMES.index("right_elbow")
 G1_MACHINE_TYPE = 5
 
-# Wireless remote packet layout.
+# Wireless remote packet layout. Bits match unitree_sdk2py.utils.joystick.
 START_BUTTON_BYTE = 2
 START_BUTTON_MASK = 1 << 2
 F3_BUTTON_MASK = 1 << 7
+DPAD_BUTTON_BYTE = 3
+LEFT_BUTTON_MASK = 1 << 7
+B_BUTTON_MASK = 1 << 1
 WIRELESS_REMOTE_SIZE = 40
 
 # Unitree SDK topics and protocol identifiers.

@@ -1,0 +1,4 @@
+# NVIDIA Decoupled WBC velocity command.
+forward_velocity: 0.3  # m/s
+sideways_velocity: 0.0
+yaw_rate: 0.0  # rad/s

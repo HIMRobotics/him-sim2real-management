@@ -99,6 +99,52 @@ class SafetyGraphTests(unittest.TestCase):
         )
         self.assertEqual(self.checker.abort_reason, "invalid_action")
 
+    def test_shared_container_client_reaches_the_same_checked_gate(self):
+        import importlib.util
+        import sys
+
+        from std_msgs.msg import String
+
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location("policy_client_test", root / "containers/examples/client.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"controllers": Mock()}), patch.object(
+            sys, "path", [str(root / "containers/examples"), *sys.path]
+        ):
+            spec.loader.exec_module(module)
+        command = self.arm()
+        for index, mode in enumerate(("sim", "dry-run"), 1):
+            policy = Mock()
+            policy.name = "balance"
+            frame = {key: list(getattr(command, key)) for key in ("q", "dq", "kp", "kd", "tau")}
+            frame.update(session_id=command.session_id, sequence=index, observation_id=command.observation_id)
+            policy.command.return_value = frame
+            client = module.PolicyNode(policy, mode)
+            self.executor.add_node(client)
+            try:
+                self.wait_for(lambda client=client: client.pub.get_subscription_count() > 0)
+                state = {"session_id": command.session_id, "observation_id": command.observation_id,
+                         "received_at_secs": time.monotonic(), "host_boot_id": self.checker.host_boot_id}
+                client.session_id = command.session_id
+                message = String()
+                message.data = json.dumps(state)
+                client.on_state(message)
+                client.publish_command()
+                self.wait_for(lambda index=index: self.motor.motor_gate.last_command_sequence == index)
+                self.assertEqual(self.motor.motor_gate.last_checked_command["q"], frame["q"])
+                policy.name = "walker"
+                with self.assertRaisesRegex(RuntimeError, "measured base velocity"):
+                    client.on_state(message)
+                state["base_velocity"] = [0.] * 6
+                message.data = json.dumps(state)
+                client.on_state(message)
+                client.trial = Mock()
+                with self.assertRaisesRegex(RuntimeError, "measured base position"):
+                    client.on_state(message)
+            finally:
+                self.executor.remove_node(client)
+                client.destroy_node()
+
     def test_silent_checker_causes_independent_gate_damping(self):
         self.checker.on_precheck(self.arm())
         self.wait_for(
@@ -173,7 +219,7 @@ class SimGatewayGraphTests(unittest.TestCase):
         with patch.dict(os.environ, {"G1_SIM_EXAMPLE": "walker"}):
             self.bridge = SimBridge(plant, 10, Path(self.tmp.name) / "report.json", Mock(), self.checker)
         self.policy = self.bridge.create_publisher(JointCommand, "/safety/precheck", self.checker.command_qos)
-        self.bridge.create_subscription(String, "/sim/state", self.on_state, self.checker.feedback_qos)
+        self.bridge.create_subscription(String, "/safety/policy_state", self.on_state, self.checker.feedback_qos)
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.checker)
         self.executor.add_node(self.bridge)
@@ -336,6 +382,68 @@ class FeedbackBridgeTests(unittest.TestCase):
         self.bridge.time_last_feedback_secs = time.monotonic() - 0.3
         self.bridge.publish_feedback()
         self.assertEqual(self.bridge.abort_reason, "sdk_feedback_timeout")
+
+    def test_policy_state_preserves_ids_and_requires_fresh_post_release_base(self):
+        from robot_safety.feedback import FeedbackSample
+
+        bridge = self.bridge
+        bridge.publish_policy = bridge.require_base = True
+        bridge.policy_publisher = Mock()
+        now = time.monotonic()
+        sample = FeedbackSample(now, (0.,) * 29, (0.,) * 29, False,
+                                quat=(1., 0., 0., 0.), gyro=(0., 0., 0.))
+        bridge.base_frame = "body"
+        base_message = SimpleNamespace(stamp=SimpleNamespace(sec=123, nanosec=0),
+                                       position=(0., 0., 0.8), velocity=(0.1, 0., 0.))
+        bridge.on_base_state(base_message)
+        self.assertIsNone(bridge.base)
+        self.assertIsNone(bridge.abort_reason)
+        bridge.latest_sample = sample
+        bridge.on_base_state(base_message)
+        self.assertEqual(bridge.base["linear_velocity"], (0.1, 0., 0.))
+        bridge.pending[now] = sample
+        message = RobotFeedback()
+        message.received_at_secs, message.observation_id = now, 17
+        bridge.base = {"position": (0., 0., 0.8), "linear_velocity": (0.1, 0., 0.),
+                       "base_received_at_secs": now - 0.01, "base_source_time_secs": 123.}
+        bridge.hardware_status = {"handover_complete": True, "motion_released_at_secs": now,
+                                  "left_b_count": 1, "left_b_at_secs": now}
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertEqual(state["observation_id"], 17)
+        self.assertEqual(state["left_b_count"], 1)
+        self.assertEqual(state["left_b_at_secs"], now)
+        self.assertFalse(state["control_ready"])
+        bridge.base["base_received_at_secs"] = time.monotonic()
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertTrue(state["control_ready"])
+        bridge.hardware_status["launch_gate"] = True
+        bridge.hardware_status["policy_launched"] = False
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertFalse(state["control_ready"])
+        bridge.hardware_status["policy_launched"] = True
+        bridge.on_observation(message)
+        state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
+        self.assertTrue(state["control_ready"])
+        self.assertEqual(state["base_velocity"], [0.1, 0., 0., 0., 0., 0.])
+        bridge.time_started_secs = now - 6
+        bridge.base["base_received_at_secs"] = now - 1
+        bridge.policy_publisher.publish.reset_mock()
+        bridge.on_observation(message)
+        self.assertEqual(bridge.abort_reason, "base_feedback_timeout")
+        bridge.policy_publisher.publish.assert_not_called()
+
+    def test_frozen_base_source_time_latches_even_with_fresh_receipts(self):
+        bridge = self.bridge
+        bridge.base_frame = "world"
+        message = SimpleNamespace(stamp=SimpleNamespace(sec=123, nanosec=0),
+                                  position=(0., 0., 0.8), velocity=(0.1, 0., 0.))
+        bridge.on_base_state(message)
+        self.assertIsNone(bridge.abort_reason)
+        bridge.on_base_state(message)
+        self.assertEqual(bridge.abort_reason, "nonadvancing_base_state")
 
     def test_stale_sample_latches_and_blocks_recovery(self):
         from robot_safety.feedback import FeedbackSample

@@ -19,7 +19,7 @@ policy-safety = "policy_safety.cli:main"
 
 [tool.setuptools]
 packages = ["policy_safety", "policy_safety.profiles"]
-py-modules = ["joint_checks"]
+py-modules = ["joint_checks", "thrash"]
 package-dir = {"" = "../../robot_safety", "policy_safety" = "src/policy_safety"}
 
 [tool.setuptools.package-data]

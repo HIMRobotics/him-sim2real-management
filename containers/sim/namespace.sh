@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Sim needs root to enter the isolated network. Re-running with sudo."
-  exec sudo --preserve-env=G1_SIM_BACKEND,G1_SIM_VIEW_PORT,G1_SIM_SECONDS,G1_SIM_PYTHON,G1_SIM_THRASH_MODE,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=G1_SIM_BACKEND,G1_SIM_VIEW_PORT,G1_SIM_SECONDS,G1_SIM_PYTHON,G1_SIM_THRASH_MODE,G1_JOINT_PROFILE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,CONTAINER_RUNTIME,G1_IMAGE,HIM_BALANCE_ONNX,DISPLAY,XAUTHORITY -- "$0" "${original_args[@]}"
 fi
 
 stop_sim() {
@@ -71,6 +71,7 @@ run_session() {
     "G1_SIM_SCENE=$scene"
     "G1_SIM_SAFETY_CHECKS=$safety_checks"
     "G1_SIM_THRASH_MODE=${G1_SIM_THRASH_MODE:-}"
+    "G1_JOINT_PROFILE=${G1_JOINT_PROFILE:-}"
     "G1_SIM_EXAMPLE=$example"
     "G1_SIM_SECONDS=$seconds"
     "G1_SIM_REPORT=$out_dir/report.json"
@@ -89,7 +90,9 @@ run_session() {
     sim_env+=("G1_SIM_LIVE=$out_dir/live.jsonl")
   fi
   if [[ "$circle" -eq 1 ]]; then
-    sim_env+=("G1_SIM_CIRCLE=1" "G1_SIM_EXAMPLE=circle" "G1_SIM_COMMAND=$command_file")
+    command_name="$(basename "${command_file%.yaml}")"
+    [[ -n "$command_name" ]] || command_name=circle
+    sim_env+=("G1_SIM_CIRCLE=1" "G1_SIM_EXAMPLE=$command_name" "G1_SIM_COMMAND=$command_file")
   fi
 
   # Foxy's setup hook forces ROS_LOCALHOST_ONLY=0 when it is already set.
@@ -123,7 +126,16 @@ run_session() {
     in_netns "$net_pid" env "${sim_env[@]}" bash -c "$hold_cmd" >"$out_dir/hold.log" 2>&1 &
     echo $! >"$out_dir/hold.pid"
   else
+    trial_args=()
+    if [[ -n "${G1_TRIAL_CONFIG:-}" ]]; then
+      trial_args=(-v "$(realpath "$G1_TRIAL_CONFIG"):/trial.json:ro" -e G1_TRIAL_CONFIG=/trial.json)
+    fi
+    if [[ -n "${command_file:-}" ]]; then
+      trial_args+=(-v "$(realpath "$command_file"):/command.yaml:ro" -e G1_COMMAND_FILE=/command.yaml)
+    fi
     "$runtime" run -d --name "$user_name" --network "container:$net_name" --ipc "container:$net_name" \
+      "${trial_args[@]}" -e "G1_THRASH_MODE=${G1_SIM_THRASH_MODE:-monitor}" \
+      -e "G1_TASK_COMMAND=${G1_TASK_COMMAND:-}" \
       -v "$repo_dir/containers/sim/fastdds.xml:/fastdds.xml:ro" \
       -e ROBOT_INTERFACE=lo \
       -e G1_SIM_NETNS=1 \

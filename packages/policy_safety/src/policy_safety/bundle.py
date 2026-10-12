@@ -55,8 +55,9 @@ def read_policy_yaml(directory):
     if len(policies) != 1:
         raise ValueError("policy directory needs exactly one policy YAML")
     data = policies[0]
-    if data.get("contract") != "g1-walker-99-v1" or data.get("normalization") != "embedded":
-        raise ValueError("expected the g1-walker-99-v1 contract with embedded normalization")
+    contracts = {"g1-walker-99-v1": "embedded", "nvidia-decoupled-wbc-516-v1": "explicit"}
+    if data.get("contract") not in contracts or data.get("normalization") != contracts[data["contract"]]:
+        raise ValueError("unsupported policy contract or normalization")
     joints = data.get("joints")
     if (
         not isinstance(joints, list)
@@ -82,6 +83,12 @@ def prepare_g1(submission, output):
     cfg, model_path = read_policy_yaml(submission)
     joints = cfg["joints"]
     files = model_files(model_path)
+    if cfg["contract"] == "nvidia-decoupled-wbc-516-v1":
+        files += model_files(model_path.with_name("balance.onnx"))
+        for name in ("LICENSE", "provenance.json"):
+            source = submission / name
+            if source.is_file():
+                files.append(source)
     output.mkdir(parents=True, exist_ok=False)
     shutil.copy2(ROBOT_DIR / "g1_robot.xml", output / "g1_robot.xml")
     shutil.copytree(ROBOT_DIR / "third_party", output / "third_party")
@@ -102,8 +109,8 @@ def prepare_g1(submission, output):
     names = [item["name"] for item in joints]
     robot = {
         "version": 1,
-        "contract": "g1-walker-99-v1",
-        "normalization": "embedded",
+        "contract": cfg["contract"],
+        "normalization": cfg["normalization"],
         "scene": "scene.xml",
         "control_seconds": float(cfg["control_seconds"]),
         "physics_seconds": float(cfg["physics_seconds"]),
@@ -115,7 +122,7 @@ def prepare_g1(submission, output):
         "kd": [float(item["kd"]) for item in joints],
         "base_body": "pelvis",
         "floor_geom": "safety_floor",
-        "standing_height": 0.79,
+        "standing_height": 0.80 if cfg["contract"] == "nvidia-decoupled-wbc-516-v1" else 0.79,
         "assets": [
             str(p.relative_to(output))
             for p in sorted(output.rglob("*"))

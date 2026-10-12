@@ -16,6 +16,8 @@ import numpy as np
 from joint_checks import (
     JointViolation,
     check_base_motion,
+    checked_targets,
+    TORQUE_TARGET_FRACTION,
 )
 from metrics import MotionMetrics
 from plant import PHYSICS_DT, POSES, Plant
@@ -24,6 +26,7 @@ from policy_safety.joint_rules import JointRules
 from robot_safety.config import COMMAND_FIELDS, Config, ThrashConfig
 from robot_safety.core import action_error, watchdog_reason
 from robot_safety.thrash import ThrashDetector
+from robot_safety.startup_balance import StartupBalance
 
 
 class Runner:
@@ -46,7 +49,9 @@ class Runner:
         self.plant = Plant(pose, scene=scene, check_fall=self.safety_checks)
         if config.joints != len(self.plant.joint_names):
             raise ValueError("simulation config must match the G1 joint count")
-        self.rules = JointRules(self.plant.joint_names)
+        profile = os.environ.get("G1_JOINT_PROFILE")
+        self.rules = (JointRules(self.plant.joint_names, profile) if profile
+                      else JointRules(self.plant.joint_names))
         self.session_id = "sim-" + uuid.uuid4().hex[:12]
         self.observation_id = 0
         self.observations = {}
@@ -56,6 +61,7 @@ class Runner:
         self.last_robot_time = None
         self.command_observation_id = None
         self.active = None
+        self.submitted = None
         self.reason = None
         self.detail = None
         self.stop_sim_time = None
@@ -78,6 +84,8 @@ class Runner:
         self.metrics = MotionMetrics(self.plant)
         self._live = None
         self._circle = None
+        self.startup = StartupBalance()
+        self.startup.prepare()
         self._remember()
 
     def arm(self):
@@ -95,6 +103,9 @@ class Runner:
         state["observation_id"] = self.observation_id
         state["start_button_pressed"] = False
         state["session_id"] = self.session_id
+        state.update(self.startup.status())
+        if self.reason:
+            state["control_ready"] = False
         return state
 
     def command(self, frame, time):
@@ -112,7 +123,7 @@ class Runner:
             try:
                 frame.update(self.rules.process_command(
                     frame, self.plant.q(), self.plant.dq(), initial=self.active is None,
-                    warnings=self.position_warnings,
+                    warnings=self.position_warnings, enforce_torque=False,
                 ))
             except JointViolation as exc:
                 self._latch(exc.reason, exc.details)
@@ -125,10 +136,11 @@ class Runner:
         self.last_sequence = int(frame["sequence"])
         self.last_command_time = float(time)
 
-        self.active = {
+        self.submitted = {
             key: np.asarray(frame[key], dtype=float).copy()
             for key in COMMAND_FIELDS
         }
+        self.active = self.submitted
         return None
 
     def step(self, time):
@@ -140,7 +152,26 @@ class Runner:
             q_des, dq_des, kp, kd, tau = self.plant.damping_command(q, dq)
             self.plant._apply_arrays(q_des, dq_des, kp, kd, tau)
         else:
-            self.plant.apply(self.active)
+            try:
+                self.active = self.startup.command(
+                    self.sim_time, self.sim_time, self.plant.state(), self.submitted, automatic=True)
+                self.active["q"] = self.rules.clip_positions(
+                    self.active["q"], self.position_warnings)
+                if self.safety_checks:
+                    entries = ((i, name, replace(limits, kp=float(self.active["kp"][i]),
+                                                kd=float(self.active["kd"][i])))
+                               for i, name, limits in self.rules.entries)
+                    targets = checked_targets(
+                        self.active, entries, self.plant.q(), self.plant.dq(),
+                        initial=False, initial_velocity=self.rules.profile["initial_velocity_tolerance_rad_secs"],
+                        warnings=self.position_warnings, enforce_torque=False,
+                        torque_target_fraction=TORQUE_TARGET_FRACTION)
+                    self.active = {key: np.array([targets[i][key] for i in range(29)])
+                                   for key in COMMAND_FIELDS}
+                self.plant.apply(self.active)
+            except Exception as exc:  # noqa: BLE001
+                self._latch("startup_balance_error", {"detail": str(exc)})
+                self.plant._apply_arrays(*self.plant.damping_command(self.plant.q(), self.plant.dq()))
         violation = None
         for _ in range(self.plant.substeps):
             dq = self.plant.step_physics()
@@ -157,19 +188,21 @@ class Runner:
                 if self.plant.fallen():
                     violation = ("fall", {"height": self.plant.state()["height"]})
                     break
+                self.rules.note_measured_velocity(dq, self.position_warnings)
                 try:
-                    self.rules.check_measured_velocity(dq)
                     check_base_motion(self.plant.data.qvel[
                         self.plant.base_vadr + 3:self.plant.base_vadr + 6])
-                    if self.active is not None and self.control_path == "submission":
-                        tau_demand = self.plant.demand(
-                            self.active["q"], self.active["dq"], self.active["kp"],
-                            self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
-                        self.rules.check_torque(tau_demand, kind="PD demand")
-                        self.rules.check_torque(self.plant.data.qfrc_actuator[self.plant.vadr], kind="applied torque")
                 except JointViolation as exc:
                     violation = (exc.reason, exc.details)
                     break
+                if self.active is not None:
+                    tau_demand = self.plant.demand(
+                        self.active["q"], self.active["dq"], self.active["kp"],
+                        self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
+                    self.rules.note_torque(tau_demand, self.position_warnings, kind="PD demand")
+                    self.rules.note_torque(
+                        self.plant.data.qfrc_actuator[self.plant.vadr],
+                        self.position_warnings, kind="applied torque")
             if self.reason is None and self.commands:
                 reason = self.thrash_detector.observe(dq, self.sim_time)
                 if reason:
@@ -228,6 +261,7 @@ class Runner:
             status = "within_limits" if self.checks()["command_limits"] else "completed"
         trace = self._write_trace()
         return {
+            **self.startup.status(),
             "version": 1,
             "status": status,
             "reason": self.reason,
@@ -281,8 +315,11 @@ class Runner:
             target.parent.mkdir(parents=True, exist_ok=True)
             self._live = target.open("w")
         qpos = [round(float(value), 5) for value in self.plant.data.qpos]
+        from view import limit_warning_text
+
+        warning = limit_warning_text(self.position_warnings) or None
         self._live.write(json.dumps({"t": self.sim_time, "qpos": qpos, "thrash": telemetry,
-                                    "stop": stop}) + "\n")
+                                    "stop": stop, "warning": warning}) + "\n")
         self._live.flush()
 
     def _write_trace(self):
@@ -307,7 +344,7 @@ class Runner:
         return str(target)
 
     def circle(self, time):
-        """One walking step of a flat circle. Movement limits are not applied."""
+        """One walking step of a flat command. Limit exceedances warn and do not stop."""
         self.control_path = "direct"
         try:
             if self._circle is None:
@@ -317,6 +354,8 @@ class Runner:
                 self._circle.settle(self.plant)
                 self._reset_trace()
             if self.reason is None:
+                self._circle.started = self.startup.handoff is not None
+                self._circle.gait_start = self.startup.handoff
                 target = self._circle.targets(self.plant)
                 self.active = {
                     "q": np.asarray(target, dtype=float).copy(),
@@ -325,9 +364,10 @@ class Runner:
                     "kd": self._circle.kd.copy(),
                     "tau": np.zeros(29),
                 }
+                self.submitted = self.active
                 self.commands += 1
                 self.last_command_time = float(time)
-                self._circle.started = True
+
         except Exception as exc:  # noqa: BLE001
             self._latch("plant_error", {"detail": str(exc)})
         return self.step(time)
@@ -403,6 +443,7 @@ class Runner:
         first = self.reason is None
         if first:
             self.reason = reason
+            self.startup.fail()
             self.detail = detail
             self.stop_sim_time = self.sim_time
         self.active = None

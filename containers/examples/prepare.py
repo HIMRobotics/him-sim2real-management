@@ -1,6 +1,8 @@
 """Prepare a portable example image context and matching MuJoCo scene."""
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -12,7 +14,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from robot_safety.balance_policy import DEFAULT_JOINT_POSITIONS
+from robot_safety.balance_policy import DEFAULT_JOINT_POSITIONS, LEG_KD, LEG_KP
+from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 
 # Simulation presets reuse the existing controller and model bundle.
 SCENARIOS = {
@@ -25,7 +28,7 @@ def run_settings(name):
     """Resolve an example into controller, pose, checks and detector mode."""
     if name in SCENARIOS:
         return SCENARIOS[name]
-    if name in ("stairs", "walker", "balance"):
+    if name in ("stairs", "walker", "balance", "holosoma"):
         return name, "standing", 1, "default"
     raise ValueError("unknown example: " + name)
 
@@ -40,11 +43,18 @@ def copy_file(source, target):
 
 def prepare(name, destination=None, *, container=True):
     """Copy only the files needed by this example, without running Docker."""
-    if name not in ("stairs", "walker", "balance"):
+    if name not in ("stairs", "walker", "balance", "holosoma"):
         raise ValueError("unknown example")
     root = Path(destination or ROOT / ".cache/sim_examples" / name).resolve()
     project = root / "container/project"
-    if name == "balance":
+    if name == "holosoma":
+        from robot_safety.holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
+
+        copy_file(holosoma_weights(), project / "holosoma.onnx")
+        policy = HolosomaLocomotionPolicy(project / "holosoma.onnx")
+        defaults = policy.default_angles.tolist()
+        gains = list(zip(policy.kp.tolist(), policy.kd.tolist()))
+    elif name == "balance":
         model = Path(
             os.environ.get(
                 "HIM_BALANCE_ONNX",
@@ -57,23 +67,42 @@ def prepare(name, destination=None, *, container=True):
             )
         copy_file(model, project / "balance.onnx")
         defaults = DEFAULT_JOINT_POSITIONS.tolist()
+        gains = list(zip(list(LEG_KP) + [40.] * 14, list(LEG_KD) + [1.] * 14))
     else:
-        bundle = ROOT / "examples/policies/walker"
+        bundle = ROOT / "examples/policies" / ("stairs" if name == "stairs" else "walker")
+        model_names = (
+            ("walker.onnx", "walker.onnx.data") if name == "stairs"
+            else ("walker.onnx", "balance.onnx", "LICENSE", "provenance.json")
+        )
         missing = [
             filename
-            for filename in ("walker.onnx", "walker.onnx.data", "walker.yaml")
+            for filename in (*model_names, "walker.yaml")
             if not (bundle / filename).is_file()
         ]
         if missing:
             raise ValueError(
-                "Walker bundle missing in examples/policies/walker/: "
+                f"Policy bundle missing in {bundle}: "
                 + ", ".join(missing)
             )
-        for filename in ("walker.onnx", "walker.onnx.data"):
+        for filename in ("walker.onnx.data", "balance.onnx"):
+            if filename not in model_names:
+                (project / filename).unlink(missing_ok=True)
+        for filename in model_names:
             copy_file(bundle / filename, project / filename)
         copy_file(bundle / "walker.yaml", project / "policy.yaml")
         cfg = yaml.safe_load((project / "policy.yaml").read_text())
         defaults = [j["default_position"] for j in cfg["joints"]]
+        names = [j["name"].replace("_joint", "") for j in cfg["joints"]]
+        if names != list(G1_29_JOINT_NAMES):
+            raise ValueError("policy joints must follow the G1 SDK order")
+        gains = [(j["kp"], j["kd"]) for j in cfg["joints"]]
+    profile = json.loads((ROOT / "robot_safety/profiles/g1_type5.template.json").read_text())
+    for joint, (kp, kd) in zip(G1_29_JOINT_NAMES, gains):
+        profile["joints"][joint].update(kp=float(kp), kd=float(kd))
+    (project / "joint_profile.json").write_text(json.dumps(profile, indent=2) + "\n")
+    hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in sorted(project.iterdir()) if p.is_file() and p.name != "hashes.json"}
+    (project / "hashes.json").write_text(json.dumps(hashes, indent=2) + "\n")
     env = root / "environment"
     robot = ROOT / "packages/policy_safety/src/policy_safety/robots/g1"
     shutil.copytree(
@@ -88,7 +117,7 @@ def prepare(name, destination=None, *, container=True):
     start = (
         [0.002739233746429086, -0.004604265724722594, 0.79, 1, 0, 0, 0]
         if name == "stairs"
-        else [0, 0, 0.79, 1, 0, 0, 0]
+        else [0, 0, 0.80 if name == "walker" else 0.79, 1, 0, 0, 0]
     )
     key.set("qpos", " ".join(map(str, start + defaults)))
     key.set("ctrl", " ".join(map(str, defaults)))
@@ -104,9 +133,9 @@ def prepare(name, destination=None, *, container=True):
     if not container:
         return root
     context = root / "container"
-    for filename in ("controllers.py", "client.py", "Dockerfile", "entrypoint.sh"):
+    for filename in ("controllers.py", "client.py", "trial.py", "command.py", "Dockerfile", "entrypoint.sh"):
         copy_file(ROOT / "containers/examples" / filename, context / filename)
-    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py"):
+    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py", "holosoma_policy.py"):
         copy_file(ROOT / "robot_safety" / filename, context / "robot_safety" / filename)
     for filename in ("__init__.py", "adapter.py", "config.py"):
         copy_file(
@@ -123,7 +152,7 @@ def prepare(name, destination=None, *, container=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("example", choices=("stairs", "walker", "balance", *SCENARIOS))
+    parser.add_argument("example", choices=("stairs", "walker", "balance", "holosoma", *SCENARIOS))
     parser.add_argument("--assets-only", action="store_true")
     parser.add_argument("--settings", action="store_true", help="Print simulation preset settings.")
     args = parser.parse_args()

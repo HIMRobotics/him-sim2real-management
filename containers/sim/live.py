@@ -97,6 +97,7 @@ class LiveSession:
             frame = view.pose_frame(self.model, self.data, self.base, self.geoms, qpos, item["t"])
             frame["thrash"] = item.get("thrash")
             frame["stop"] = view.describe_stop(item.get("stop"))
+            frame["warning"] = item.get("warning") or ""
             self.frames.append(frame)
         return reset
 

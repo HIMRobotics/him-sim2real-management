@@ -44,31 +44,31 @@ All positions are absolute joint angles in radians. At 50 Hz, an interval lasts
 - `command_gap = q_commanded - q_measured`: diagnostic only, including at startup.
 - `response_error = q_measured - q_applied`: measured after execution, diagnostic only.
 
-There is no startup or runtime command-gap, consecutive-command delta or desired-velocity-
-change rejection. Custom profiles must remove the obsolete `max_command_gap_rad`,
-`max_position_target_rate_rad_secs`, `max_acceleration_rad_secs2` and
-`max_tracking_error_rad` fields. The removed `initial_position_tolerance_rad` field
-is accepted and ignored when loading legacy hardware profiles.
-
-`max_velocity_rad_secs` checks both the desired velocity field and measured
-velocity using the model values above, immediately on each sample. No 50 ms
-persistence delay remains. `max_torque_nm` bounds feedforward torque, total
+`max_velocity_rad_secs` caps the desired velocity field. A proposal past that
+cap is clipped and recorded as a warning, on the same path as position clipping.
+Measured velocity still rejects immediately, with no 50 ms persistence delay.
+`max_torque_nm` bounds feedforward torque, total
 estimated PD plus feedforward demand, and available measured torque. Simulator
 checks use its actual gains. Checked submissions and the hardware arm adapter use profile gains, which
 are the gains it actually sends, and forwards validated feedforward torque.
 
 Position clipping records a warning with the original and clipped angles, bounds,
 count and largest correction per joint. Clipping alone does not latch a stop.
-Torque checks use the clipped command and can still reject it. A small response error does not establish safety. Response diagnostics
+Whole-body output additionally projects position targets into a 90% torque
+budget using measured state and effective gains. The hard torque ceiling stays
+unchanged. `torque_target_clipping` reports these corrections. Infeasible targets
+and measured or last-written-command effort above the hard ceiling still fault.
+Arm-only helpers retain rejection without this projection. A small response error does not establish safety. Response diagnostics
 never latch a stop or silently increase any limit.
 
-## Next priority: thrashing and flailing detection
+## Thrashing and flailing detection
 
-Develop a detector based on measured motion over time, with joint speed, torque
-and body motion as inputs. Validate it against normal gait and deliberately
-unstable simulation cases before enabling a new stop condition. A position
-command gap alone is not evidence of thrashing. Existing physical limits remain
-active but are not a complete detector of unstable motion.
+The shared thrash detector evaluates measured joint velocities over time using
+filtered, weighted oscillation energy and a persistence window. Hardware
+submission defaults to enforcement. Simulation supports monitor, enforce and
+off modes. See [thrash detection](../README.md#thrash-detection-in-the-existing-checker)
+for configuration and telemetry. Command gaps and response errors remain
+diagnostic only, while physical speed and torque limits remain active.
 
 ## Runtime and startup checks
 
@@ -79,7 +79,7 @@ helper defaults, not published universal operating recommendations.
 [Unitree helper source](https://github.com/unitreerobotics/unitree_sdk2/blob/main/include/unitree/robot/g1/common/terminations.hpp).
 
 Hardware also checks casing temperature **85 C**, winding temperature **120 C**,
-and battery charge **at least 20%**. Temperatures come from `LowState` and battery
+and battery charge **at least 10%**. Temperatures come from `LowState` and battery
 charge from `rt/lf/bmsstate`. Missing temperature or battery data prevents arming.
 The lower-frequency BMS stream has a local **5 s** freshness deadline. Motor
 feedback retains its **200 ms** deadline and command publication its **100 ms**
@@ -87,10 +87,14 @@ deadline. Invalid numeric data is rejected. Thermal and measured-torque checks
 run on fresh hardware feedback. Simulation reports battery/temperature checks
 as unavailable rather than inferring them from motion.
 
-Initial speed remains **0.05 rad/s**, and the
-hardware ownership ramp **3 s**. The simulator validates its initial hold before
-policy motion. Hardware startup still requires the verified ready FSM and
-machine type. No launcher enables hardware output automatically.
+Initial desired command speed remains **0.05 rad/s**. The legacy arm-only path
+also uses that measured startup-speed tolerance and a **3 s** ownership ramp.
+Whole-body arming uses physical per-joint speed ceilings, without the separate
+near-stationary gate. Real deployments default to enforcing the existing weighted
+RMS thrashing detector. Hardware startup still requires the verified ready FSM,
+machine type, fresh telemetry and health checks. Whole-body entry into Balance
+uses the separate 0.5 s target blend described in
+[HARDWARE_ADAPTER.md](../HARDWARE_ADAPTER.md).
 
 ## Hardware scope and diagnostics
 
@@ -105,6 +109,3 @@ not an exact 20 ms actuator response interval.
 and `measured_velocity_rad_secs` extrema. Rejected proposals contribute command
 gaps but never become applied commands. The existing F3 balance/stop controller
 is a separate recovery path, not a screened submission.
-
-No robot service was restarted when updating these profiles. Applying them to a
-physical robot still requires the existing explicit hardware launch procedure.

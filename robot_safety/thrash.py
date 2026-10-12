@@ -2,6 +2,39 @@
 
 import math
 from copy import deepcopy
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ThrashConfig:
+    """Provisional oscillation settings, calibrated independently of policy commands."""
+
+    mode: str = "monitor"
+    slow_cutoff_hz: float = 4.0
+    fast_cutoff_hz: float = 25.0
+    averaging_secs: float = 0.15
+    persistence_secs: float = 0.5
+    weighted_rms_limit: float = 1.5
+    velocity_scales: tuple = ()
+    joint_weights: tuple = ()
+
+    def __post_init__(self):
+        if self.mode not in ("off", "monitor", "enforce"):
+            raise ValueError("thrash mode must be off, monitor or enforce")
+        for name, value in self.__dict__.items():
+            if name in ("mode", "velocity_scales", "joint_weights"):
+                continue
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"invalid thrash setting: {name}")
+        if self.fast_cutoff_hz <= self.slow_cutoff_hz:
+            raise ValueError("thrash filter cutoffs must be ordered")
+        for name in ("velocity_scales", "joint_weights"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(
+                type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                for v in values
+            ):
+                raise ValueError(f"thrash {name} must be finite and positive")
 
 
 def default_weights(joints):
@@ -56,6 +89,18 @@ class ThrashDetector:
                 "weighted_rms_limit", "persistence_secs",
             )},
         }
+
+    def save_state(self):
+        """Copy filter history for deterministic simulation branches."""
+        return deepcopy({name: getattr(self, name) for name in (
+            "last_time", "fast", "slow", "energy", "activity", "evidence",
+            "metrics", "event",
+        )})
+
+    def restore_state(self, state):
+        """Restore a checkpoint without sharing mutable filter history."""
+        for name, value in deepcopy(state).items():
+            setattr(self, name, value)
 
     def update(self, velocities, now):
         """Consume validated measured velocities once per receipt timestamp."""

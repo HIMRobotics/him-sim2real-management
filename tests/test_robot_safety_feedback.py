@@ -3,7 +3,12 @@
 import unittest
 from types import SimpleNamespace
 
-from robot_safety.feedback import FeedbackInbox, feedback_from_sdk
+from robot_safety.feedback import (
+    FeedbackInbox,
+    base_state_from_sdk,
+    feedback_from_sdk,
+    policy_state,
+)
 
 
 def sdk_state(pressed=False):
@@ -16,6 +21,32 @@ def sdk_state(pressed=False):
 
 
 class FeedbackTests(unittest.TestCase):
+    def test_policy_state_requires_real_imu(self):
+        message = sdk_state()
+        with self.assertRaises(ValueError):
+            policy_state(feedback_from_sdk(message, 1.), 42, "boot")
+        message.imu_state = SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.))
+        state = policy_state(feedback_from_sdk(message, 1.), 42, "boot")
+        self.assertEqual(state["observation_id"], 42)
+        self.assertEqual(state["received_at_secs"], 1.)
+        self.assertNotIn("base_velocity", state)
+
+    def test_base_frame_conversion_and_missing_source_time(self):
+        from math import sqrt
+
+        message = SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=0),
+                                  position=(2., 3., 0.), velocity=(1., 0., 0.))
+        sample = base_state_from_sdk(message, 9., "body", (sqrt(0.5), 0., 0., sqrt(0.5)))
+        self.assertAlmostEqual(sample["linear_velocity"][0], 0.)
+        self.assertAlmostEqual(sample["linear_velocity"][1], 1.)
+        self.assertEqual(sample["position"], (2., 3., 0.))
+        self.assertEqual(sample["base_source_time_secs"], 1.)
+        with self.assertRaises(ValueError):
+            base_state_from_sdk(message, 9., "unknown", ())
+        message.stamp.sec = 0
+        with self.assertRaises(ValueError):
+            base_state_from_sdk(message, 9., "world", ())
+
     def test_mapping_copies_only_body_joints(self):
         message = sdk_state(True)
         sample = feedback_from_sdk(message, 10.0)

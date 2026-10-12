@@ -16,7 +16,7 @@ def test_walker_policy_is_selected_alongside_command_files(tmp_path):
             shutil.copy2(source, tmp_path / source.name)
     shutil.copy2(EXAMPLES / "commands/walker/stand.yaml", tmp_path / "stand.yaml")
     config, model = read_policy_yaml(tmp_path)
-    assert config["contract"] == "g1-walker-99-v1"
+    assert config["contract"] == "nvidia-decoupled-wbc-516-v1"
     assert model == tmp_path / "walker.onnx"
 
 

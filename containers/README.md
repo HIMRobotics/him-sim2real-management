@@ -1,6 +1,6 @@
 # Containers
 
-A submission is one Docker image. `./setup.sh` on the G1 loads it and starts it. The host safety service stays in charge of motor writes and stops.
+A submission is one Docker image for simulation and hardware. `./setup.sh` defaults to preflight. Explicit dry-run and hardware modes start the existing host safety graph. See [hardware execution and qualification](../robot_safety/HARDWARE_ADAPTER.md#same-container-in-simulation-and-hardware).
 
 The image may contain several models, and the code inside may be laid out however the author wants. The platform runs it only if it follows the rules below. It does not install dependencies for a submission, and it does not adapt a different sensor set or control API onto the robot.
 
@@ -9,7 +9,7 @@ The image may contain several models, and the code inside may be laid out howeve
 | | What the submission must do | What the platform supports |
 | --- | --- | --- |
 | Packaging | One `linux/arm64` image, dependencies already installed, one `ENTRYPOINT`. Delivered as `containers/upload/submission.tar`. | Loads that archive and starts the entrypoint. Does not look for ONNX files, a Python layout, or a second container. |
-| Inputs | Read robot state from the topics below. Do not assume a camera, lidar, or odometry feed. | `/safety/robot_feedback` (29 joint `q` and `dq`) and `rt/lowstate` (IMU and the same 29 motors). No camera images. |
+| Inputs | Read robot state from the topics below. Do not assume a camera, lidar, or odometry feed. | `/safety/policy_state` supplies timestamped joints/IMU and explicitly configured base measurements. `/safety/policy_observation` supplies checker-issued IDs. No camera images. |
 | Outputs | Publish a 29-slot `JointCommand` on `/safety/precheck` every control step. Stop when `/safety/abort` arrives. | The host checks that message and is the only writer of motor commands. |
 | Limits | Stay inside the joint profile. A command uses a fresh `observation_id` (0.2 s) and the next one arrives before the action timeout (0.2 s). | Rejects a bad frame and latches the abort. In sim, the first command must arrive within 30 s, then the run lasts `--seconds` (default 10). A rejected command clears policy output and selects simulated damping. On the robot the process runs until the operator stops it or the abort latches. No memory or CPU quota is applied. |
 | Access | Talk to sensors and motors only through those interfaces. | Reads state and takes `/safety/precheck`. Does not grant `rt/lowcmd`, `rt/arm_sdk`, or control of `g1-safety-stops`. |

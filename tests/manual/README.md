@@ -14,8 +14,8 @@ process failure. It does not launch an arm test. See the
 for dependencies, configuration and removal.
 
 Double presses require press–release–press within 0.5 seconds. Double **F3**
-requests the local GR00T lower-body balance policy and holds the captured arm
-pose. Double **Start** requests stock whole-body damping (`SetFsmId(1)`), which
+requests the local Holosoma whole-body standing policy at zero velocity,
+including its arm targets and model gains. Double **Start** requests stock whole-body damping (`SetFsmId(1)`), which
 can fold the robot. Ordinary test completion or faults after arm ownership
 normally hold the measured arm pose, with damping if that hold cannot continue.
 These are different outcomes: completion alone does not test either button.
@@ -100,8 +100,8 @@ within 0.02 rad of the target, or `small_elbow_did_not_follow` otherwise.
 ## Verify both stops
 
 Keep the service journal visible throughout the test. While the arms are moving,
-double press F3. Confirm that the trajectory stops, the arms hold their captured
-pose, and the lower-body balance policy takes over. The robot may make balance
+double press F3. Confirm that the trajectory stops and Holosoma whole-body
+standing control takes over, including the arms. The robot may make balance
 corrections. The service status output should show
 `hardware_controller_double_f3` and `walk_stop: true`. That flag records the
 request, so also check for model errors and observe the physical response.
@@ -157,10 +157,11 @@ ros2 topic echo /safety/hardware_status std_msgs/msg/String
 ros2 topic echo /safety/joint_diagnostics std_msgs/msg/String
 ```
 
-Joint diagnostics report tracking error, target step and measured velocity for
-the 17 controlled joints, including rejected proposals. They reset on process
-rearm and are not proof of executed motion. The gate logs final extrema on
-abort, which places them in the service journal for the procedure above.
+Joint diagnostics report command gaps and measured velocities for all 29 joints,
+including rejected proposals. Response errors use newer feedback after successful
+full-weight writes for the controlled joints. These are diagnostics, not stop
+conditions. They reset on process rearm and are not proof of executed motion.
+The gate logs final extrema on abort in the service journal.
 
 Use `./tests/manual/run_unitree_arm_test.sh --small-step --hardware` for the
 elbow test through the same service, followed by `--start` in another terminal.

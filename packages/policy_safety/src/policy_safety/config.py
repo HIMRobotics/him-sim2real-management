@@ -84,8 +84,8 @@ METRICS = {
     "contact_force",
     "clipping",
 }
-ISSUE_COLUMNS = ("limits", "misses", "flailing", "falls", "other", "errors", "skipped")
-SUMMARY_COLUMNS = ("problems", "warnings", *ISSUE_COLUMNS)
+ISSUE_COLUMNS = ("limits", "flailing", "falls", "other", "errors", "skipped")
+SUMMARY_COLUMNS = ("problems", *ISSUE_COLUMNS)
 
 
 def read_json(path):

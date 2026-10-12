@@ -48,13 +48,16 @@ PAGE = """<!DOCTYPE html>
   #thrash th { position: sticky; top: 0; background: #fff; font-size: 11px; }
   #thrash th:first-child, #thrash td:first-child { text-align: left; }
   #thrash tr.flagged { background: #fff0da; }
-  #stop { position: absolute; left: 12px; bottom: 18px; max-width: min(670px, 75vw);
-    background: #fff4eeed; border-left: 5px solid #b54a22; border-radius: 6px;
-    padding: 12px 16px; font: 14px system-ui, sans-serif; white-space: pre-line; color: #682811; }
+  #stop, #warn { position: absolute; left: 12px; max-width: min(670px, 75vw);
+    border-radius: 6px; padding: 12px 16px; font: 14px system-ui, sans-serif; white-space: pre-line; }
+  #stop { bottom: 18px; background: #fff4eeed; border-left: 5px solid #b54a22; color: #682811; }
+  #warn { bottom: 18px; background: #fff8e8; border-left: 5px solid #c48a12; color: #6a4b08; }
+  #warn.raised { bottom: 108px; }
 </style>
 </head>
 <body>
 <div id="hud">loading</div>
+<div id="warn" role="status" hidden></div>
 <div id="stop" role="status" hidden></div>
 <div id="playback" aria-label="Replay controls">
   <button id="go-start" type="button" title="Jump to the first frame and pause (Home)" aria-keyshortcuts="Home">Go to start · Home</button>
@@ -86,6 +89,15 @@ const motion = await (await fetch("motion.json")).json();
 const hud = document.getElementById("hud");
 motion.thrash ||= [];
 motion.stop ||= [];
+motion.warning ||= [];
+function showWarning(index) {
+  const warning = motion.warning[index] || "";
+  const panel = document.getElementById("warn");
+  const listed = String(motion.summary || "").includes("Limit warning");
+  panel.hidden = !warning || listed;
+  panel.classList.toggle("raised", !document.getElementById("stop").hidden);
+  if (!panel.hidden) panel.textContent = warning;
+}
 function showStop(index) {
   const stop = motion.stop[index] || motion.run_stop;
   const panel = document.getElementById("stop");
@@ -107,7 +119,7 @@ function showThrash(index) {
   const thresholds = document.getElementById("thrash-thresholds");
   const event = document.getElementById("thrash-event");
   const metrics = sample?.metrics || {};
-  const available = sample?.mode !== "off" && metrics.oscillatory_rms?.length;
+  const available = sample?.mode !== "off" && metrics.weighted_rms != null;
   thrashRows.forEach(row => { row.hidden = !available; });
   peak.textContent = "";
   thresholds.textContent = "";
@@ -120,26 +132,20 @@ function showThrash(index) {
     if (!sample) event.textContent = "";
     return;
   }
-  const contribution = metrics.energy_share || metrics.oscillatory_rms;
+  const contribution = metrics.energy_share;
   const order = contribution.map((_, i) => i).sort((a, b) => contribution[b] - contribution[a]);
-  const top = metrics.oscillatory_rms.indexOf(Math.max(...metrics.oscillatory_rms));
-  peak.textContent = metrics.weighted_rms == null
-    ? `Legacy recording · peak oscillation ${metrics.oscillatory_rms[top].toFixed(3)}`
-    : `Whole-body oscillation: ${metrics.weighted_rms.toFixed(3)} / ${metrics.weighted_rms_limit.toFixed(2)} · ${(1000 * metrics.persistence_elapsed_secs).toFixed(0)} ms`;
+  peak.textContent = `Whole-body oscillation: ${metrics.weighted_rms.toFixed(3)} / ${metrics.weighted_rms_limit.toFixed(2)} · ${(1000 * metrics.persistence_elapsed_secs).toFixed(0)} ms`;
   order.forEach((joint, slot) => {
     const row = thrashRows[slot];
     const values = [motion.joint_names[joint].replaceAll("_", " "),
       metrics.oscillatory_rms[joint].toFixed(3), metrics.activity_rms[joint].toFixed(3),
-      metrics.joint_weights?.[joint]?.toFixed(2) ?? "—",
-      metrics.energy_share ? `${(100 * metrics.energy_share[joint]).toFixed(1)}%` : "—"];
+      metrics.joint_weights[joint].toFixed(2), `${(100 * metrics.energy_share[joint]).toFixed(1)}%`];
     values.forEach((value, column) => { row.cells[column].textContent = value; });
     row.classList.toggle("flagged", metrics.joint_indices.includes(joint));
   });
   const t = sample.thresholds;
-  if (t) thresholds.textContent = t.weighted_rms_limit == null
-    ? "Legacy detector thresholds. Replay preserves its original detections."
-    : `Stop threshold: whole-body RMS ≥ ${t.weighted_rms_limit.toFixed(2)} for ${1000 * t.persistence_secs} ms continuously. Timer resets below threshold. No CV or separate joint stop rules.`;
-  if (sample.control_path === "direct") thresholds.textContent += " Direct circle: submission-command checks bypassed.";
+  if (t) thresholds.textContent = `Stop threshold: whole-body RMS ≥ ${t.weighted_rms_limit.toFixed(2)} for ${1000 * t.persistence_secs} ms continuously. Timer resets below threshold.`;
+  if (sample.control_path === "direct") thresholds.textContent += " Direct command: submission-command checks bypassed.";
 }
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -223,6 +229,7 @@ function show(index) {
   hud.style.whiteSpace = "pre-line";
   showThrash(frame);
   showStop(frame);
+  showWarning(frame);
 }
 let trailCount = 0;
 function updateTrail() {
@@ -255,6 +262,7 @@ function remember(frames, replace) {
     motion.focus = [];
     motion.thrash = [];
     motion.stop = [];
+    motion.warning = [];
     for (const geom of motion.geoms) geom.poses = [];
   }
   for (const item of frames) {
@@ -262,6 +270,7 @@ function remember(frames, replace) {
     motion.focus.push(item.focus);
     motion.thrash.push(item.thrash || null);
     motion.stop.push(item.stop || null);
+    motion.warning.push(item.warning || "");
     item.poses.forEach((pose, index) => motion.geoms[index].poses.push(pose));
   }
   motion.frames = motion.time.length;
@@ -526,7 +535,6 @@ def describe_stop(stop):
     reason = stop["reason"]
     labels = {
         "joint_velocity_limit": "Measured joint velocity (q dot) exceeded limit",
-        "joint_target_velocity_limit": "Target joint velocity exceeded limit",
         "initial_joint_target_velocity_limit": "Initial target velocity exceeded limit",
         "joint_torque_limit": "Torque demand or measured torque exceeded limit",
         "joint_feedforward_torque_limit": "Feedforward torque exceeded limit",
@@ -535,10 +543,6 @@ def describe_stop(stop):
         "nonfinite_simulation": "Simulation produced non-finite state",
         "invalid_command": "Malformed command or command sanity bound exceeded",
         "thrashing_energy": "Sustained whole-body oscillation detected",
-        # Historical recordings retain their original reason labels.
-        "thrashing_local": "Thrashing detected within one body region",
-        "thrashing_distributed": "Thrashing detected across body regions",
-        "thrashing_severe": "Severe joint thrashing detected",
     }
     when = stop.get("time_secs")
     lines = ["Policy stopped" + (f" at {when:.3f} s" if when is not None else ""),
@@ -567,7 +571,7 @@ def describe_stop(stop):
         for key in ("field", "detail", "torque_kind", "rejection", "bounds"):
             if key in detail:
                 lines.append(f"{key.replace('_', ' ').capitalize()}: {detail[key]}")
-        if reason.startswith("thrashing_"):
+        if reason == "thrashing_energy":
             if "weighted_rms" in detail:
                 lines.append(f"Whole-body RMS: {detail['weighted_rms']:.3f} / "
                              f"{detail['weighted_rms_limit']:.3f}, sustained "
@@ -575,9 +579,7 @@ def describe_stop(stop):
             for index in indices:
                 values = []
                 for key, label in (("oscillatory_rms", "osc RMS"), ("activity_rms", "motion RMS"),
-                                   ("joint_weights", "weight"), ("energy_share", "energy fraction"),
-                                   ("irregularity_cv", "CV"), ("evidence_secs", "normal evidence s"),
-                                   ("severe_evidence_secs", "severe evidence s")):
+                                   ("joint_weights", "weight"), ("energy_share", "energy fraction")):
                     samples = detail.get(key, [])
                     if type(index) is int and 0 <= index < len(samples):
                         values.append(f"{label}={samples[index]:.3f}")
@@ -586,6 +588,25 @@ def describe_stop(stop):
     elif detail:
         lines.append(str(detail))
     return dict(stop, description="\n".join(lines))
+
+
+def limit_warning_text(warnings):
+    """One line naming the worst limit exceedance. The run was not stopped for it."""
+    items = []
+    for joint, fields in (warnings or {}).items():
+        if not isinstance(fields, dict):
+            continue
+        for item in fields.get("limits", ()):
+            items.append((joint, item))
+    if not items:
+        return ""
+    joint, item = max(items, key=lambda pair: (
+        pair[1]["value"] / pair[1]["limit"] if pair[1]["limit"] else pair[1]["value"]))
+    kind = item.get("torque_kind")
+    kind_text = f" {kind}" if kind else ""
+    extra = f" and {len(items) - 1} more" if len(items) > 1 else ""
+    return (f"Limit warning: {joint}{kind_text} {item['value']:.4g} > "
+            f"{item['limit']:.4g} {item['units']}{extra}. Run continued.")
 
 
 def report_summary(report, safety_checks=True):
@@ -606,6 +627,9 @@ def report_summary(report, safety_checks=True):
         summary += "\n" + describe_stop(stop_from_report(report))["description"]
     elif report.get("status") == "no_command":
         summary += "\nNo policy commands were accepted before the run ended."
+    warning = limit_warning_text(report.get("warnings"))
+    if warning:
+        summary += "\n" + warning
     motion = report.get("motion", {})
     if "fell" in motion:
         summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")

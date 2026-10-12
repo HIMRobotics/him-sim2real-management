@@ -1,2 +1,2 @@
-# Walker command, not the GR00T balance network. vx, vy, yaw_rate.
+# NVIDIA Decoupled WBC command: vx, vy, yaw_rate.
 command: [0.0, 0.0, 0.0]

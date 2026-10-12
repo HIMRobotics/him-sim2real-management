@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 
 from .hardware_constants import NUM_JOINTS
+from .thrash import ThrashConfig
 
 MAX_CONFIGURED_JOINTS = 35  # Existing software cap, not a robot capability claim.
 EXPIRY_ROUNDING_TOLERANCE_SECS = 1e-9  # Allow floating-point subtraction roundoff.
@@ -50,38 +51,6 @@ class JointCommandLimits:
                 self.feedforward_torque_nm,
             ),
         )
-
-
-@dataclass(frozen=True)
-class ThrashConfig:
-    """Provisional oscillation settings, calibrated independently of policy commands."""
-
-    mode: str = "monitor"
-    slow_cutoff_hz: float = 4.0
-    fast_cutoff_hz: float = 25.0
-    averaging_secs: float = 0.15
-    persistence_secs: float = 0.5
-    weighted_rms_limit: float = 1.5
-    velocity_scales: tuple = ()
-    joint_weights: tuple = ()
-
-    def __post_init__(self):
-        if self.mode not in ("off", "monitor", "enforce"):
-            raise ValueError("thrash mode must be off, monitor or enforce")
-        for name, value in self.__dict__.items():
-            if name in ("mode", "velocity_scales", "joint_weights"):
-                continue
-            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"invalid thrash setting: {name}")
-        if self.fast_cutoff_hz <= self.slow_cutoff_hz:
-            raise ValueError("thrash filter cutoffs must be ordered")
-        for name in ("velocity_scales", "joint_weights"):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(
-                type(v) not in (int, float) or not math.isfinite(v) or v <= 0
-                for v in values
-            ):
-                raise ValueError(f"thrash {name} must be finite and positive")
 
 
 @dataclass(frozen=True)

@@ -24,7 +24,7 @@ from runner import Runner
 
 from robot_safety.config import Config, ThrashConfig
 from robot_safety.core import Supervisor
-from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_adapter import G1HardwareAdapter
 from robot_safety.hardware_constants import UPPER_BODY_INDICES
 from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.thrash import ThrashDetector
@@ -52,7 +52,7 @@ class RunnerTest(unittest.TestCase):
         import os
 
         from live import LiveSession
-        from view import export_replay
+        from view import export_replay, report_summary
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -60,6 +60,8 @@ class RunnerTest(unittest.TestCase):
             trace = root / "trace.npz"
             with patch.dict(os.environ, {"G1_SIM_LIVE": str(live), "G1_SIM_TRACE": str(trace)}):
                 runner = Runner(record_trace=True)
+                # Isolate output diagnostics after startup has completed.
+                runner.startup.command = lambda now, stamp, state, command, **kw: command
                 state = runner.feedback(0.0)
                 runner.command(hold(runner, state, 0), 0.0)
                 runner.step(0.0)
@@ -67,15 +69,19 @@ class RunnerTest(unittest.TestCase):
                 bad["tau"][0] = 89.0
                 runner.command(bad, 0.01)
                 runner.handle({"op": "abort", "reason": "later_fault"})
-                runner.report()
+                report = runner.report()
             samples = [json.loads(line) for line in live.read_text().splitlines()]
             telemetry = samples[-1]["thrash"]
             self.assertEqual(telemetry["mode"], "monitor")
             self.assertEqual(len(telemetry["metrics"]["oscillatory_rms"]), 29)
             self.assertEqual(telemetry["thresholds"]["persistence_secs"], runner.config.thrash.persistence_secs)
             self.assertIsNone(samples[0]["stop"])
-            self.assertEqual(samples[-1]["stop"]["reason"], "joint_feedforward_torque_limit")
-            self.assertEqual(samples[-1]["stop"]["detail"]["joint"], "left_hip_pitch")
+            self.assertEqual(samples[-1]["stop"]["reason"], "later_fault")
+            summary = report_summary(report)
+            self.assertIn("Limit warning", summary)
+            self.assertIn("left_hip_pitch", summary)
+            self.assertIn("89", summary)
+            self.assertIn("88", summary)
             runner.thrash_detector.reset()
             self.assertEqual(runner.trace_thrash[-1], telemetry)
             session = LiveSession(root, live, root / "start", root / "report.json", "standing", None)
@@ -87,9 +93,7 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(len(motion["thrash"]), motion["frames"])
             self.assertEqual(len(motion["joint_names"]), 29)
             self.assertEqual(motion["stop"][-1], frames[-1]["stop"])
-            self.assertIn("left_hip_pitch", motion["stop"][-1]["description"])
-            self.assertIn("89", motion["stop"][-1]["description"])
-            self.assertIn("88", motion["stop"][-1]["description"])
+            self.assertIn("later_fault", motion["stop"][-1]["description"])
             runner._reset_trace()
             self.assertEqual(len(runner.trace_thrash), 1)
             self.assertEqual(runner.trace_thrash[0]["metrics"], {})
@@ -106,8 +110,11 @@ class RunnerTest(unittest.TestCase):
              ("left_wrist_pitch", "6", "5", "Nm", "PD demand")),
             ("base_angular_speed_limit", {"joint": "0", "value": 6.16, "limit": 6, "units": "rad/s"},
              ("Base axis: x", "6.16", "6")),
-            ("thrashing_local", {"joint_indices": [9, 10], "oscillatory_rms": [2.0] * 29},
-             ("right_knee", "right_ankle_pitch", "osc RMS=2.000")),
+            ("thrashing_energy", {"joint_indices": [9, 10], "oscillatory_rms": [2.0] * 29,
+                                  "weighted_rms": 1.6, "weighted_rms_limit": 1.5,
+                                  "persistence_elapsed_secs": 0.5},
+             ("right_knee", "right_ankle_pitch", "osc RMS=2.000",
+              "Whole-body RMS: 1.600 / 1.500", "500 ms")),
             ("action_timeout", None, ("action_timeout",)),
             ("invalid_action", {"field": "q", "joint_index": 20, "value": 11,
                                 "bounds": [-10, 10], "rejection": "invalid_command"},
@@ -209,6 +216,8 @@ class RunnerTest(unittest.TestCase):
 
     def test_clipped_ankle_is_sent_and_used_for_response(self):
         runner = Runner()
+        # Isolate output diagnostics after startup has completed.
+        runner.startup.command = lambda now, stamp, state, command, **kw: command
         index = runner.plant.joint_names.index("right_ankle_pitch_joint")
         runner.plant.data.qpos[runner.plant.qadr[index]] = -0.86
         state = runner.feedback(0.0)
@@ -299,7 +308,7 @@ class RunnerTest(unittest.TestCase):
             self.skipTest("cached walker weights are not on this machine")
         runner = Runner()
         start = None
-        for step in range(150):
+        for step in range(250):
             result = runner.circle(step * 0.02)
             self.assertIsNone(result.get("reason"))
             position = runner.plant.state()["position"]
@@ -355,26 +364,32 @@ class RunnerTest(unittest.TestCase):
                 if safety_checks:
                     self.assertEqual(report["reason"], "fall")
 
-    def test_rejected_command_revokes_output_and_preserves_first_fault(self):
+    def test_torque_limit_warns_and_a_later_error_still_stops(self):
         runner = Runner()
         state = runner.feedback(0.0)
         self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
         q = list(state["q"])
         q[0] = q[0] + 2.3
-        reason = runner.command(hold(runner, state, 1, q=q), 0.02)
-        self.assertEqual(reason, "joint_torque_limit")
-        self.assertIsNone(runner.active)
-        self.assertEqual(runner.command(hold(runner, state, 2), 0.03), reason)
+        self.assertIsNone(runner.command(hold(runner, state, 1, q=q), 0.02))
+        self.assertIsNotNone(runner.active)
+        demand = next(item for item in runner.position_warnings["left_hip_pitch"]["limits"]
+                      if item["torque_kind"] == "PD demand")
+        self.assertEqual(demand["reason"], "joint_torque_limit")
+        self.assertGreater(demand["value"], demand["limit"])
+        self.assertIsNone(runner.command(hold(runner, state, 2), 0.03))
         runner.handle({"op": "abort", "reason": "later_fault"})
-        self.assertEqual(runner.reason, reason)
+        self.assertEqual(runner.reason, "later_fault")
+        self.assertIsNone(runner.active)
         with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
             runner.step(0.04)
         np.testing.assert_array_equal(runner.plant.model.actuator_gainprm[runner.plant.actuators, 0], 0)
 
-    def test_tracking_uses_response_after_a_complete_control_interval(self):
+    def test_response_diagnostics_sample_after_a_complete_control_interval(self):
         for follows_target in (True, False):
             with self.subTest(follows_target=follows_target):
                 runner = Runner()
+                # Isolate output diagnostics after startup has completed.
+                runner.startup.command = lambda now, stamp, state, command, **kw: command
                 index = 15
                 state = runner.feedback(0.0)
                 self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
@@ -402,15 +417,80 @@ class RunnerTest(unittest.TestCase):
                 expected_error = 0.0 if follows_target else -0.02
                 self.assertAlmostEqual(runner.response_error[index], expected_error)
 
-    def test_feedforward_torque_rejected(self):
+    def test_direct_command_limits_torque_target_without_stopping(self):
+        runner = Runner()
+        # Isolate output diagnostics after startup has completed.
+        runner.startup.command = lambda now, stamp, state, command, **kw: command
+        runner.control_path = "direct"
+        runner.commands = 1
+        runner.last_command_time = 0.0
+        q = runner.plant.q()
+        q[20] += 0.5
+        runner.active = {
+            "q": q,
+            "dq": np.zeros(29),
+            "kp": np.full(29, 60.0),
+            "kd": np.full(29, 1.5),
+            "tau": np.zeros(29),
+        }
+        runner.submitted = runner.active
+        with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
+            result = runner.step(0.02)
+        self.assertIsNone(result["reason"])
+        self.assertIsNotNone(runner.active)
+        warning = runner.position_warnings["left_wrist_pitch"]
+        clipping = warning["torque_target_clipping"]
+        self.assertTrue(clipping["active"])
+        self.assertAlmostEqual(clipping["requested_torque_nm"], 30.0)
+        self.assertAlmostEqual(clipping["command_budget_nm"], 4.5)
+        self.assertAlmostEqual(clipping["hard_limit_nm"], 5.0)
+        self.assertAlmostEqual(runner.active["q"][20] - runner.plant.q()[20], 0.075)
+        self.assertAlmostEqual(clipping["q_commanded"], runner.active["q"][20])
+        demand = runner.plant.demand(
+            runner.active["q"], runner.active["dq"], runner.active["kp"],
+            runner.active["kd"], runner.active["tau"], runner.plant.q(), runner.plant.dq())
+        self.assertAlmostEqual(demand[20], 4.5)
+        self.assertEqual(
+            [item for item in warning.get("limits", []) if item["torque_kind"] == "PD demand"],
+            [],
+        )
+
+    def test_measured_joint_speed_warns_and_base_spin_still_stops(self):
+        runner = Runner()
+        state = runner.feedback(0.0)
+        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+        index, name, limits = runner.rules.entries[3]
+        fast = np.zeros(29)
+        fast[index] = limits.max_velocity_rad_secs + 1
+        with patch.object(runner.plant, "step_physics", return_value=fast):
+            runner.step(0.02)
+        self.assertIsNone(runner.reason)
+        self.assertIsNotNone(runner.active)
+        noted = next(item for item in runner.position_warnings[name]["limits"]
+                     if item["reason"] == "joint_velocity_limit")
+        self.assertGreater(noted["value"], noted["limit"])
+        runner.plant.data.qvel[runner.plant.base_vadr + 3] = 7
+        with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
+            runner.step(0.04)
+        self.assertEqual(runner.reason, "base_angular_speed_limit")
+
+    def test_feedforward_torque_is_a_warning(self):
+        from view import report_summary
+
         runner = Runner()
         state = runner.feedback(0.0)
         tau = [0.0] * 29
         tau[0] = 89.0
-        reason = runner.command(hold(runner, state, 0, tau=tau), 0.0)
-        self.assertEqual(reason, "joint_feedforward_torque_limit")
-        self.assertEqual(runner.report()["status"], "violation")
-        self.assertEqual(runner.command(hold(runner, state, 1), 0.02), reason)
+        self.assertIsNone(runner.command(hold(runner, state, 0, tau=tau), 0.0))
+        self.assertIsNotNone(runner.active)
+        report = runner.report()
+        self.assertEqual(report["status"], "within_limits")
+        self.assertIsNone(report["reason"])
+        feedforward = next(item for item in report["warnings"]["left_hip_pitch"]["limits"]
+                           if item["reason"] == "joint_feedforward_torque_limit")
+        self.assertEqual(feedforward["value"], 89.0)
+        self.assertEqual(feedforward["limit"], 88.0)
+        self.assertIn("Run continued", report_summary(report))
 
     def test_initial_pose_gap_does_not_reject_a_command(self):
         runner = Runner()
@@ -421,22 +501,25 @@ class RunnerTest(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertAlmostEqual(runner.active["q"][0], q[0])
 
-    def test_wrist_torque_rejected(self):
+    def test_wrist_torque_is_a_warning(self):
         runner = Runner()
         state = runner.feedback(0.0)
         self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
         q = list(state["q"])
         q[20] = q[20] + 0.5
-        reason = runner.command(hold(runner, state, 1, q=q, kp=[0.0] * 29), 0.02)
-        self.assertEqual(reason, "joint_torque_limit")
-        self.assertEqual(runner.report()["detail"]["joint"], "left_wrist_pitch")
+        self.assertIsNone(runner.command(hold(runner, state, 1, q=q, kp=[0.0] * 29), 0.02))
+        demand = next(item for item in runner.position_warnings["left_wrist_pitch"]["limits"]
+                      if item["torque_kind"] == "PD demand")
+        self.assertEqual(demand["reason"], "joint_torque_limit")
+        self.assertGreater(demand["value"], demand["limit"])
+        self.assertIsNone(runner.reason)
 
     def test_checked_targets_match_hardware_for_every_joint(self):
         for index in range(29):
             for case in ("gains", "clip", "velocity", "feedforward", "demand", "initial"):
                 with self.subTest(index=index, case=case):
                     runner = Runner()
-                    hardware = G1ArmAdapter(HardwareProfile.load(runner.rules.path))
+                    hardware = G1HardwareAdapter(HardwareProfile.load(runner.rules.path))
                     limits = runner.rules.entries[index][2]
                     if case == "clip":
                         runner.plant.data.qpos[runner.plant.qadr[index]] = limits.position_max_rad
@@ -463,10 +546,18 @@ class RunnerTest(unittest.TestCase):
                     try:
                         expected = hardware.checked_targets(0.02)
                     except ValueError as exc:
-                        reason = runner.command(frame, 0.02)
-                        self.assertEqual(reason, exc.reason)
-                        self.assertEqual(runner.detail, exc.details)
-                        self.assertIsNone(runner.active)
+                        if exc.reason in ("joint_torque_limit", "joint_feedforward_torque_limit"):
+                            self.assertIsNone(runner.command(frame, 0.02))
+                            self.assertIsNotNone(runner.active)
+                            self.assertEqual(runner.active["kp"][index], limits.kp)
+                            self.assertEqual(runner.active["kd"][index], limits.kd)
+                            noted = runner.position_warnings[runner.rules.sdk_names[index]]["limits"]
+                            self.assertTrue(any(item["value"] > item["limit"] for item in noted))
+                        else:
+                            reason = runner.command(frame, 0.02)
+                            self.assertEqual(reason, exc.reason)
+                            self.assertEqual(runner.detail, exc.details)
+                            self.assertIsNone(runner.active)
                     else:
                         self.assertIsNone(runner.command(frame, 0.02))
                         for joint in UPPER_BODY_INDICES:
@@ -721,6 +812,22 @@ class RunnerTest(unittest.TestCase):
         circle = load_command(ROOT / "examples/commands/walker/circle.yaml")
         self.assertTrue(np.allclose(stand, [0.0, 0.0, 0.0]))
         self.assertTrue(np.allclose(circle, [0.45, 0.0, 0.9]))
+
+    def test_forward_stop_command_holds_then_zeros(self):
+        from circle import load_schedule
+
+        schedule = load_schedule(ROOT / "examples/commands/walker/forward_stop.yaml")
+        self.assertTrue(np.allclose(schedule.at(0.0), [0.50, 0.0, 0.0]))
+        self.assertTrue(np.allclose(schedule.at(1.99), [0.50, 0.0, 0.0]))
+        for step, command in enumerate((
+            [0.40, 0.0, 0.0],
+            [0.30, 0.0, 0.0],
+            [0.20, 0.0, 0.0],
+            [0.10, 0.0, 0.0],
+        )):
+            self.assertTrue(np.allclose(schedule.at(2.0 + step), command))
+        self.assertTrue(np.allclose(schedule.at(6.0), [0.0, 0.0, 0.0]))
+        self.assertTrue(np.allclose(schedule.at(7.0), [0.0, 0.0, 0.0]))
 
     def test_circle_battery_uses_the_walker_gait(self):
         model = ROOT / "examples/policies/walker/walker.onnx"

@@ -31,10 +31,10 @@ def test_pose_gap_has_no_limit_for_every_joint(rules, sign, initial):
 def test_hardware_and_simulation_agree(rules, gap, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root))
-    from robot_safety.hardware_adapter import G1ArmAdapter
+    from robot_safety.hardware_adapter import G1HardwareAdapter
     from robot_safety.hardware_profile import HardwareProfile
 
-    hardware = G1ArmAdapter(HardwareProfile.load(DEFAULT_JOINT_PROFILE))
+    hardware = G1HardwareAdapter(HardwareProfile.load(DEFAULT_JOINT_PROFILE))
     q, dq, tau, measured = (np.zeros(29) for _ in range(4))
     q[15], measured[15] = gap, 0
     # Use a lower gain so this test isolates the command gap from torque.
@@ -65,6 +65,17 @@ def test_official_velocity_and_torque_boundaries(rules, sign):
             values[i] += sign * 1e-6
             with pytest.raises(JointViolation, match=reason):
                 method(values)
+
+
+def test_desired_velocity_above_the_model_cap_is_clipped(rules):
+    q, dq, tau, measured = (np.zeros(29) for _ in range(4))
+    _index, name, limits = rules.entries[0]
+    dq[0] = limits.max_velocity_rad_secs + 1
+    warnings = {}
+    rules.check_command(q, dq, tau, measured, warnings=warnings)
+    assert dq[0] == limits.max_velocity_rad_secs
+    assert warnings[name]["velocity_reason"] == "joint_velocity_clipped"
+    assert warnings[name]["dq_proposed"] == limits.max_velocity_rad_secs + 1
 
 
 def test_startup_velocity_and_finite_checks_remain(rules):

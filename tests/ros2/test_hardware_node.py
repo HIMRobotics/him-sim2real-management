@@ -28,7 +28,7 @@ from tests.test_robot_safety_hardware import FakeTransport, load_profile, profil
 
 
 class HardwareNodeTests(unittest.TestCase):
-    def test_diagnostics_distinguish_proposed_offsets_from_tracking(self):
+    def test_diagnostics_distinguish_proposed_offsets_from_measured_response(self):
         import json
 
         from robot_safety.joint_diagnostics import JointDeltaDiagnostics
@@ -49,10 +49,11 @@ class HardwareNodeTests(unittest.TestCase):
         shoulder = payload["joints"]["left_shoulder_roll"]
         self.assertEqual(shoulder["command_gap_rad"]["max_abs"], 0.1)
         self.assertEqual(shoulder["response_error_rad"]["samples"], 0)
-        node.get_logger.assert_not_called()
+        self.assertIn('"command_gap_rad"', node.get_logger().info.call_args[0][0])
         diagnostics.record_response({16: 0.05}, feedback)
         HardwareMotorGateNode.publish_joint_diagnostics(node)
-        self.assertIn("largest=left_shoulder_roll", node.get_logger().info.call_args[0][0])
+        logged = json.loads(node.get_logger().info.call_args[0][0].split(": ", 1)[1])
+        self.assertEqual(logged["joints"]["left_shoulder_roll"]["response_error_rad"]["samples"], 1)
         snapshot = diagnostics.snapshot()
         warning = {"reason": "joint_position_clipped", "q_proposed": 1.2,
                    "q_commanded": 1.0, "count": 1}
@@ -65,7 +66,7 @@ class HardwareNodeTests(unittest.TestCase):
 
     def test_startup_ready_requires_warmup_telemetry_and_live_workers(self):
         adapter = SimpleNamespace(
-            balance_policy=None, feedback_fresh=Mock(return_value=True),
+            balance_policy=None, soft_reset_policy=None, startup_policy=None, feedback_fresh=Mock(return_value=True),
             feedback=SimpleNamespace(start_button_pressed=False), f3_pressed=False,
             abort_reason=None, workers=[Mock(is_alive=Mock(return_value=True))],
         )
@@ -80,6 +81,12 @@ class HardwareNodeTests(unittest.TestCase):
             notify()
             socket.assert_not_called()
             adapter.balance_policy = object()
+            notify()
+            socket.assert_not_called()
+            adapter.soft_reset_policy = object()
+            notify()
+            socket.assert_not_called()
+            adapter.startup_policy = object()
             adapter.feedback_fresh.return_value = False
             notify()
             socket.assert_not_called()
@@ -109,9 +116,9 @@ class HardwareNodeTests(unittest.TestCase):
             self.assertTrue(node.startup_ready)
 
     def test_readiness_timeout_rejects_without_damping(self):
-        from robot_safety.hardware_adapter import G1ArmAdapter
+        from robot_safety.hardware_adapter import G1HardwareAdapter
 
-        adapter = G1ArmAdapter(load_profile(profile_data()))
+        adapter = G1HardwareAdapter(load_profile(profile_data()))
         transport = FakeTransport()
         transport.read_ready_fsm = lambda: (3104, None)
         adapter.transport = transport
@@ -136,7 +143,8 @@ class HardwareNodeTests(unittest.TestCase):
         adapter.step()
         self.assertEqual(transport.writes, [])
         self.assertEqual(transport.stop_calls, 0)
-        node.latch_abort.assert_called_once_with("hardware_readiness_rejected")
+        node.latch_abort.assert_not_called()
+        self.assertIsNone(adapter.abort_reason)
 
     def test_arm_checked_command_and_abort_reach_fake_hardware(self):
         rclpy.init(
@@ -168,7 +176,7 @@ class HardwareNodeTests(unittest.TestCase):
                     )
                 )
                 patches.enter_context(
-                    patch("robot_safety.hardware_node.G1ArmAdapter.start_workers")
+                    patch("robot_safety.hardware_node.G1HardwareAdapter.start_workers")
                 )
                 node = HardwareMotorGateNode()
             node.adapter.receive_state(

@@ -5,10 +5,11 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from robot_safety.hardware_adapter import G1ArmAdapter
+from robot_safety.hardware_adapter import G1HardwareAdapter, whole_body_repeat_wait
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES, UPPER_BODY_INDICES
 from robot_safety.hardware_profile import HardwareProfile
 from robot_safety.unitree_transport import UnitreeArmTransport
@@ -46,7 +47,7 @@ def load_profile(data):
 class FakeTransport:
     def __init__(self):
         self.writes = []
-        self.lowcmds = []
+        self.body_commands = []
         self.stop_calls = 0
         self.release_calls = 0
         self.restore_calls = 0
@@ -71,7 +72,7 @@ class FakeTransport:
         self.writes.append((targets, weight))
         return self.write_success
 
-    def release_motion(self):
+    def release_motion(self, *, announce_soft_reset=False):
         self.release_calls += 1
         return 0
 
@@ -79,28 +80,164 @@ class FakeTransport:
         self.restore_calls += 1
         return 0
 
-    def write_lower_body(self, lower_q, arm_q, leg_kp, leg_kd, machine):
-        self.lowcmds.append((list(lower_q), list(arm_q), machine))
-        return True
+    def write_body(self, targets, machine):
+        self.body_commands.append((targets, machine))
+        return self.write_success
+
+    def clear_body(self):
+        self.body_cleared = True
 
 
 class HardwareAdapterTests(unittest.TestCase):
-    def test_startup_and_runtime_pose_gaps_do_not_reject_any_joint(self):
-        legacy = profile_data()
-        legacy["initial_position_tolerance_rad"] = 0.0001
-        self.adapter.profile = load_profile(legacy)
-        self.assertFalse(hasattr(self.adapter.profile, "initial_position_tolerance_rad"))
-        self.command["q"] = [0.8] * 29
-        self.adapter.command = self.command
-        for last_output in (None, 10.0):
-            self.adapter.last_output_secs = last_output
-            targets = self.adapter.checked_targets(10.0)
-            self.assertEqual(set(targets), set(UPPER_BODY_INDICES))
-            self.assertTrue(all(target["q"] == 0.8 for target in targets.values()))
+    def test_whole_body_checks_then_releases_writes_and_latches(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+        self.assertTrue(self.adapter.arm())
+        self.command["q"] = [0.1] * 29
+        self.command["tau"] = [0.01] * 29
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(self.transport.release_calls, 1)
+        self.transport.write_body.assert_called_once()
+        self.adapter.step()
+        targets, machine = self.transport.write_body.call_args[0]
+        self.assertEqual((len(targets), machine), (29, 5))
+        self.assertEqual(targets[0]["kp"], 150.)
+        self.assertEqual(targets[0]["tau"], 0.0)
+        self.assertEqual(len(self.adapter.q_applied), 29)
+        recorded = self.adapter.joint_diagnostics_snapshot()[G1_29_JOINT_NAMES[0]]["applied_command"]
+        self.assertEqual(recorded, dict(targets[0], written_at_secs=self.now))
+        self.adapter.abort("hardware_write_failed")
+        with patch.object(self.transport, "restore_motion", return_value=7002):
+            self.adapter.stop_once()
+        self.assertTrue(self.adapter.balance_released)
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.assertFalse(self.adapter.arm())
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.restore_calls, 1)
+        self.assertEqual(self.transport.stop_calls, 1)
+        self.adapter._release_after_confirmed_damp()
+        self.assertEqual(self.adapter.abort_reason, "hardware_write_failed")
+        self.assertFalse(self.adapter.arm())
+        count = self.transport.write_body.call_count
+        self.adapter.step()
+        self.assertEqual(self.transport.write_body.call_count, count)
+
+    def test_slow_motion_release_is_not_an_output_stall(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+
+        def slow_release():
+            self.now += 0.05
+            self.transport.release_calls += 1
+            return 0
+
+        self.transport.release_motion = slow_release
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.15)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertTrue(self.adapter.balance_released)
+        self.state()
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(self.transport.write_body.call_count, 2)
+
+    def test_whole_body_confirmed_damp_does_not_repeat(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.adapter.step()
+        self.adapter.abort("hardware_output_worker_stalled")
+        self.adapter._request_stock_damping()
+        self.assertEqual(self.adapter.reported_fsm_id, 1)
+        self.assertFalse(self.adapter.stop_requested.is_set())
+        self.assertFalse(self.adapter.ownership_taken)
+        self.assertEqual(self.adapter.abort_reason, "hardware_output_worker_stalled")
+        calls = self.transport.stop_calls
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, calls)
+
+    def test_failed_release_restores_stock_control_without_damping(self):
+        self.adapter.whole_body = True
+        self.transport.write_body = Mock(return_value=True)
+        self.transport.release_motion = lambda: 3104
+        self.assertTrue(self.adapter.arm())
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(self.adapter.abort_reason, "hardware_release_failed")
+        self.assertEqual(self.transport.restore_calls, 1)
+        self.assertEqual(self.transport.stop_calls, 0)
+        self.assertFalse(self.adapter.balance_released)
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.stop_calls, 0)
+
+    def test_startup_requires_stability_then_new_left_and_b(self):
+        import numpy as np
+
+        self.adapter.whole_body = True
+        self.adapter.balance_policy = Mock(update=Mock(return_value=np.zeros(15)))
+        self.transport.write_body = Mock(return_value=True)
+        self.assertTrue(self.adapter.arm())
+        self.command["q"] = [0.4] * 29
+
+        def step():
+            self.adapter.submit(self.command, self.now + 0.15)
+            self.adapter.step()
+
+        def buttons(pressed):
+            remote = [0] * 40
+            remote[3] = ((1 << 7) | (1 << 1)) if pressed else 0
+            self.adapter.receive_state(SimpleNamespace(
+                motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
+                mode_machine=5,
+                imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
+                wireless_remote=remote,
+            ))
+
+        step()
+        step()
+        buttons(True)
+        self.assertFalse(self.adapter.policy_launched)
+        for _ in range(220):
+            self.now += 0.01
+            self.adapter.receive_battery(SimpleNamespace(soc=100))
+            buttons(True)
+            step()
+        self.assertTrue(self.adapter.startup.ready)
+        self.assertFalse(self.adapter.policy_launched)
+        self.assertEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.)
+        buttons(False)
+        buttons(True)
+        step()
+        self.assertTrue(self.adapter.policy_launched)
+        self.assertEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.)
+        for _ in range(110):
+            self.now += 0.01
+            self.adapter.receive_battery(SimpleNamespace(soc=100))
+            buttons(False)
+            step()
+        self.assertAlmostEqual(self.transport.write_body.call_args[0][0][0]["q"], 0.4)
+        self.assertIsNone(self.adapter.abort_reason)
+
+    def test_bad_whole_body_command_never_releases_stock_control(self):
+        self.adapter.whole_body = True
+        self.assertTrue(self.adapter.arm())
+        self.command["q"][0] = float("nan")
+        self.adapter.submit(self.command, self.now + 0.1)
+        self.adapter.step()
+        self.assertEqual(self.transport.release_calls, 0)
+        self.assertIsNotNone(self.adapter.abort_reason)
 
     def setUp(self):
         self.now = 10.0
-        self.adapter = G1ArmAdapter(load_profile(profile_data()), lambda: self.now)
+        self.adapter = G1HardwareAdapter(load_profile(profile_data()), lambda: self.now)
+        self.adapter.soft_reset_policy = Mock(
+            update=Mock(return_value=[0.0] * 29), kp=[40.0] * 29, kd=[1.0] * 29,
+        )
         self.transport = FakeTransport()
         self.adapter.transport = self.transport
         self.adapter.receive_battery(SimpleNamespace(soc=100))
@@ -115,6 +252,7 @@ class HardwareAdapterTests(unittest.TestCase):
             SimpleNamespace(
                 motor_state=[SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 mode_machine=machine,
+                imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
                 wireless_remote=remote,
             )
         )
@@ -124,6 +262,20 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertTrue(self.adapter.arm())
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
+
+    def test_holosoma_can_arm_from_damping(self):
+        self.transport.mode = 1
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.adapter.startup_policy_name = "holosoma"
+        self.assertTrue(self.adapter.check_ready_mode())
+
+    def test_holosoma_rejects_when_the_mode_service_does_not_answer(self):
+        self.transport.read_ready_fsm = lambda: (3102, None)
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.adapter.startup_policy_name = "holosoma"
+        self.assertFalse(self.adapter.check_ready_mode())
+        self.assertFalse(self.adapter.arm())
+        self.assertEqual(self.transport.writes, [])
 
     def test_only_confirmed_ready_mode_can_arm(self):
         self.transport.mode = 500
@@ -226,76 +378,88 @@ class HardwareAdapterTests(unittest.TestCase):
         self.state(f3=True)
 
     def test_balance_preparation_is_cached_before_f3(self):
-        policy = Mock()
-        policy.update.return_value = [0.0] * 15
-        with patch("robot_safety.hardware_adapter.BalancePolicy", return_value=policy) as load:
-            self.assertTrue(self.adapter._ensure_balance_policy())
-            self.assertTrue(self.adapter._ensure_balance_policy())
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
+        policy.update.return_value = [0.0] * 29
+        self.adapter.soft_reset_policy = None
+        with patch("robot_safety.hardware_adapter.holosoma_weights", return_value="model.onnx"), patch("robot_safety.hardware_adapter.HolosomaLocomotionPolicy", return_value=policy) as load:
+            self.assertTrue(self.adapter._ensure_soft_reset_policy())
+            self.assertTrue(self.adapter._ensure_soft_reset_policy())
             self.press_f3_twice()
             self.adapter.stop_once()
             self.now += 0.02
             self.adapter.stop_once()
         load.assert_called_once()
         policy.warmup.assert_called_once()
-        self.assertEqual(len(self.transport.lowcmds), 2)
+        self.assertEqual(len(self.transport.body_commands), 2)
 
-    def test_soft_reset_balance_bypasses_submission_limits(self):
+    def test_soft_reset_balance_preserves_gains_within_physical_limits(self):
         data = profile_data()
         data["joints"]["left_hip_pitch"]["max_torque_nm"] = 0.1
         self.adapter.profile = load_profile(data)
-        policy = Mock()
-        policy.update.return_value = [0.0] * 15
-        self.adapter.balance_policy = policy
-        self.press_f3_twice()
-        with patch("robot_safety.hardware_adapter.checked_targets") as command_check, patch(
-            "robot_safety.hardware_adapter.check_torque"
-        ) as torque_check:
-            self.adapter.stop_once()
-            self.now += 0.02
-            policy.update.return_value = [0.2] + [0.0] * 14
-            self.adapter.stop_once()
-        command_check.assert_not_called()
-        torque_check.assert_not_called()
-        self.assertEqual(len(self.transport.lowcmds), 2)
-        self.assertEqual(self.transport.lowcmds[-1][0][0], 0.2)
-        self.assertEqual(self.transport.stop_calls, 0)
-
-    def test_balance_inference_failure_requests_damping(self):
-        policy = Mock()
-        policy.update.side_effect = ValueError("inference failed")
-        self.adapter.balance_policy = policy
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
+        policy.update.return_value = [0.0] * 29
+        self.adapter.soft_reset_policy = policy
         self.press_f3_twice()
         self.adapter.stop_once()
-        self.assertEqual(self.transport.lowcmds, [])
+        self.now += 0.02
+        policy.update.return_value = [0.2] + [0.0] * 28
+        self.adapter.stop_once()
+        self.assertEqual(len(self.transport.body_commands), 2)
+        target = self.transport.body_commands[-1][0][0]
+        self.assertEqual(target["kp"], 40.0)
+        self.assertAlmostEqual(target["q"], 0.9 * 0.1 / 40)
+        self.assertEqual(self.transport.stop_calls, 0)
+
+    def test_soft_reset_refresh_reuses_the_last_policy_output(self):
+        self.transport.repeat_body = Mock(return_value=True)
+        self.adapter._repeat_body_once()
+        self.transport.repeat_body.assert_not_called()
+        self.press_f3_twice()
+        self.adapter.step()
+        self.adapter.soft_reset_policy.update.assert_called_once()
+        for _ in range(10):
+            self.adapter._repeat_body_once()
+        self.assertEqual(self.transport.repeat_body.call_count, 10)
+        self.adapter.soft_reset_policy.update.assert_called_once()
+        self.assertEqual(len(self.transport.body_commands), 1)
+
+    def test_balance_inference_failure_requests_damping(self):
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
+        policy.update.side_effect = ValueError("inference failed")
+        self.adapter.soft_reset_policy = policy
+        self.press_f3_twice()
+        self.adapter.stop_once()
+        self.assertEqual(self.transport.body_commands, [])
         self.assertEqual(self.transport.stop_calls, 1)
 
     def test_failed_warmup_keeps_stock_control_and_does_not_reload_on_f3(self):
-        policy = Mock()
+        policy = Mock(kp=[40.0] * 29, kd=[1.0] * 29)
         policy.warmup.side_effect = ValueError("warmup failed")
-        with patch("robot_safety.hardware_adapter.BalancePolicy", return_value=policy) as load:
-            self.assertFalse(self.adapter._ensure_balance_policy())
+        self.adapter.soft_reset_policy = None
+        with patch("robot_safety.hardware_adapter.holosoma_weights", return_value="model.onnx"), patch("robot_safety.hardware_adapter.HolosomaLocomotionPolicy", return_value=policy) as load:
+            self.assertFalse(self.adapter._ensure_soft_reset_policy())
             self.press_f3_twice()
             self.adapter.stop_once()
         load.assert_called_once()
-        self.assertIsNone(self.adapter.balance_policy)
+        self.assertIsNone(self.adapter.soft_reset_policy)
         self.assertEqual(self.transport.release_calls, 0)
-        self.assertEqual(self.transport.lowcmds, [])
+        self.assertEqual(self.transport.body_commands, [])
 
     def test_double_f3_runs_the_balance_network(self):
         self.take_ownership()
-        self.adapter.balance_policy = type(
-            "HoldLegs",
-            (),
-            {"update": staticmethod(lambda q, dq, quat, gyro: list(q[:15]))},
-        )()
+        self.adapter.soft_reset_policy = Mock(
+            update=Mock(side_effect=lambda q, dq, quat, gyro: list(q)),
+            kp=list(range(1, 30)), kd=[0.5] * 29,
+        )
         self.press_f3_twice()
         self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_f3")
         self.adapter.stop_once()
         self.assertEqual(self.transport.release_calls, 1)
         self.assertEqual(self.transport.stop_calls, 0)
-        lower, arms, machine = self.transport.lowcmds[-1]
-        self.assertEqual(len(lower), 15)
-        self.assertEqual(len(arms), 14)
+        targets, machine = self.transport.body_commands[-1]
+        self.assertEqual(len(targets), 29)
+        self.assertEqual([targets[i]["kp"] for i in range(29)], list(range(1, 30)))
+        self.assertTrue(all(target["kd"] == 0.5 for target in targets.values()))
         self.assertEqual(machine, 5)
         self.state(pressed=True)
         self.now += 0.05
@@ -319,19 +483,20 @@ class HardwareAdapterTests(unittest.TestCase):
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 2)
 
-        # The previous session's arm pose is cleared, so the new F3 session captures the new pose.
-        self.assertIsNone(self.adapter.arm_hold_q)
+        # The next soft reset initializes inference from the new measured state.
+        self.assertFalse(self.adapter.soft_reset_active)
         self.state()
         self.press_f3_twice()
         self.adapter.receive_state(
             SimpleNamespace(
-                motor_state=[SimpleNamespace(q=0.4, dq=0.0) for _ in range(35)],
+                motor_state=[SimpleNamespace(q=0.4, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 mode_machine=5,
                 wireless_remote=[0] * 40,
             )
         )
         self.adapter.stop_once()
-        self.assertEqual(self.transport.lowcmds[-1][1], [0.4] * 14)
+        self.assertEqual([v["q"] for v in self.transport.body_commands[-1][0].values()], [0.4] * 29)
+        self.assertEqual(self.adapter.soft_reset_policy.reset.call_count, 2)
 
     def test_rejected_readiness_shutdown_sends_no_motor_commands(self):
         self.transport.read_ready_fsm = lambda: (3104, None)
@@ -453,33 +618,17 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.adapter.abort_reason, "hardware_controller_double_start")
         self.assertTrue(self.adapter.stop_requested.is_set())
 
-    def test_first_target_jump_is_not_a_stop(self):
-        self.command["q"][16] = 0.05
-        self.run_first()
-        self.assertIsNone(self.adapter.abort_reason)
-        self.assertTrue(self.transport.writes)
-
-    def test_leg_command_gap_does_not_reject(self):
-        self.run_first()
-        self.now += 0.005
-        self.command["q"][3] = 0.6
-        self.adapter.submit(self.command, self.now + 0.1)
-        self.adapter.step()
-        self.assertIsNone(self.adapter.abort_reason)
-        self.assertEqual(len(self.transport.writes), 2)
-        self.assertNotIn(3, self.transport.writes[-1][0])
-
-    def test_leg_velocity_limit_is_rejected(self):
+    def test_leg_velocity_above_the_cap_is_clipped_and_warned(self):
         self.run_first()
         self.now += 0.005
         self.command["dq"][3] = 0.101
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
-        self.assertIn(
-            "left_knee: joint_target_velocity_limit",
-            self.adapter.abort_reason,
-        )
-        self.assertEqual(len(self.transport.writes), 1)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 2)
+        warning = self.adapter.position_warnings["left_knee"]
+        self.assertEqual(warning["velocity_reason"], "joint_velocity_clipped")
+        self.assertEqual(warning["dq_commanded"], 0.1)
 
     def test_leg_torque_is_rejected(self):
         legs = list(self.adapter.profile.legs)
@@ -490,19 +639,27 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertIn("left_knee: joint_torque_limit", self.adapter.abort_reason)
         self.assertEqual(self.transport.writes, [])
 
-    def test_commanded_speed_is_rejected(self):
+    def test_commanded_speed_above_the_cap_is_clipped(self):
         self.run_first()
         self.now += 0.005
         self.command["dq"][16] = 0.101
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
-        self.assertIsNotNone(self.adapter.abort_reason)
-        self.assertEqual(len(self.transport.writes), 1)
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(len(self.transport.writes), 2)
+        self.assertEqual(
+            self.adapter.position_warnings["left_shoulder_roll"]["dq_commanded"], 0.1
+        )
 
-    def test_command_gap_remains_diagnostic_without_rejection(self):
+    def test_initial_and_runtime_pose_gaps_remain_diagnostic(self):
+        self.command["q"][16] = 0.05
+        self.command["q"][3] = 0.6
         self.run_first()
+        self.assertIsNone(self.adapter.abort_reason)
+        self.assertEqual(set(self.transport.writes[-1][0]), set(UPPER_BODY_INDICES))
         self.now += 0.005
         self.command["q"][16] = 0.6
+        self.command["q"][3] = -0.6
         self.adapter.submit(self.command, self.now + 0.1)
         self.adapter.step()
         self.assertIsNone(self.adapter.abort_reason)
@@ -512,7 +669,7 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(ranges["command_gap_rad"]["max_abs"], 0.6)
         self.assertEqual(ranges["response_error_rad"]["samples"], 0)
 
-    def test_tracking_waits_for_feedback_after_a_successful_full_weight_write(self):
+    def test_response_diagnostics_wait_for_feedback_after_a_successful_full_weight_write(self):
         self.adapter.profile = replace(self.adapter.profile, handover_secs=0.005)
         self.run_first()
         self.assertIsNone(self.adapter.q_applied)
@@ -541,7 +698,7 @@ class HardwareAdapterTests(unittest.TestCase):
             ["response_error_rad"]["max_abs"], 0.0005,
         )
 
-    def test_failed_writes_and_uncontrolled_legs_do_not_create_tracking_targets(self):
+    def test_failed_writes_and_uncontrolled_legs_do_not_create_response_targets(self):
         self.adapter.profile = replace(self.adapter.profile, handover_secs=0.005)
         self.run_first()
         self.now += 0.01
@@ -600,36 +757,51 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertEqual(self.transport.writes[-1], ({}, 0.0))
         self.assertEqual(self.adapter.reported_fsm_id, 1)
 
-    def test_abort_rpc_does_not_wait_for_blocked_motion_write(self):
+    def test_feedback_and_damping_continue_during_a_blocked_write(self):
         from threading import Event, Thread
 
-        entered_write = Event()
-        release_write = Event()
-        original_write = self.transport.write_arm
+        for whole_body in (False, True):
+            with self.subTest(whole_body=whole_body):
+                self.setUp()
+                self.adapter.whole_body = whole_body
+                entered, release, stopped = Event(), Event(), Event()
 
-        def blocked_write(targets, weight):
-            if targets:
-                entered_write.set()
-                release_write.wait(2.0)
-            return original_write(targets, weight)
+                def blocked_write(targets, _mode, entered=entered, release=release):
+                    if targets:
+                        entered.set()
+                        release.wait(2.0)
+                    return True
 
-        self.transport.write_arm = blocked_write
-        self.assertTrue(self.adapter.arm())
-        self.adapter.submit(self.command, self.now + 0.1)
-        writer = Thread(target=self.adapter.step, daemon=True)
-        writer.start()
-        try:
-            self.assertTrue(entered_write.wait(1.0))
-            self.adapter.abort("abort_during_write")
-            self.adapter.stop_once()
-            self.assertEqual(self.transport.stop_calls, 0)
-            self.assertTrue(self.adapter.stop_requested.is_set())
-        finally:
-            release_write.set()
-            writer.join(timeout=1.0)
-        count = len(self.transport.writes)
-        self.adapter.step()
-        self.assertEqual(len(self.transport.writes), count)
+                if whole_body:
+                    self.transport.write_body = blocked_write
+                else:
+                    self.transport.write_arm = blocked_write
+                self.assertTrue(self.adapter.arm())
+                self.adapter.submit(self.command, self.now + 0.1)
+                if whole_body:
+                    self.adapter.step()
+                writer = Thread(target=self.adapter.step, daemon=True)
+
+                def stop_from_feedback(stopped=stopped):
+                    self.state()
+                    self.adapter.abort("controller_stop", request_damping=True)
+                    self.adapter.stop_once()
+                    stopped.set()
+
+                stopper = Thread(target=stop_from_feedback, daemon=True)
+                writer.start()
+                try:
+                    self.assertTrue(entered.wait(1.0))
+                    stopper.start()
+                    self.assertTrue(stopped.wait(0.5))
+                    self.assertEqual(self.transport.stop_calls, 1)
+                    self.assertEqual(self.adapter.abort_reason, "controller_stop")
+                    self.assertEqual(self.adapter.stop_requested.is_set(), not whole_body)
+                finally:
+                    release.set()
+                    writer.join(timeout=1.0)
+                    if stopper.ident is not None:
+                        stopper.join(timeout=1.0)
 
     def test_template_profile_loads_and_contains_example_targets(self):
         path = (
@@ -694,7 +866,7 @@ class HardwareAdapterTests(unittest.TestCase):
             with self.subTest(fault=fault):
                 self.setUp()
                 if fault == "battery":
-                    self.adapter.receive_battery(SimpleNamespace(soc=19))
+                    self.adapter.receive_battery(SimpleNamespace(soc=9))
                 else:
                     temps = [(85, 120)] * 29
                     if fault == "winding": temps[0] = (85, 121)
@@ -705,7 +877,7 @@ class HardwareAdapterTests(unittest.TestCase):
 
     def test_health_fault_during_execution_aborts(self):
         self.run_first()
-        self.adapter.receive_battery(SimpleNamespace(soc=19))
+        self.adapter.receive_battery(SimpleNamespace(soc=9))
         self.assertEqual(self.adapter.abort_reason, "low_battery")
         self.adapter.stop_once()
         self.assertEqual(self.transport.stop_calls, 1)
@@ -758,27 +930,56 @@ class HardwareAdapterTests(unittest.TestCase):
         self.assertFalse(self.transport.writes)
 
 
+class WholeBodyRepeatTests(unittest.TestCase):
+    def test_late_refresh_waits_instead_of_spinning(self):
+        delay, following = whole_body_repeat_wait(10.0, 9.999)
+        self.assertAlmostEqual(delay, 0.001)
+        self.assertEqual(following, 10.0)
+        delay, following = whole_body_repeat_wait(10.0, 10.004)
+        self.assertEqual((delay, following), (0.002, 10.006))
+
+
 class TransportEncodingTests(unittest.TestCase):
     def test_startup_initializes_clients_without_control_rpcs(self):
-        sdk = Mock()
-        modules = {
-            "unitree_sdk2py." + name: sdk for name in (
-                "core.channel", "g1.loco.g1_loco_client", "idl.default",
-                "idl.unitree_hg.msg.dds_", "utils.crc",
-                "comm.motion_switcher.motion_switcher_client", "g1.audio.g1_audio_client",
-            )
-        }
-        with patch.dict("sys.modules", modules):
-            transport = UnitreeArmTransport("fake", 0, Mock(), Mock())
-            self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
-            self.assertIs(transport._audio(), sdk.AudioClient.return_value)
-        sdk.MotionSwitcherClient.assert_called_once()
-        sdk.AudioClient.assert_called_once()
-        sdk.MotionSwitcherClient.return_value.ReleaseMode.assert_not_called()
-        sdk.MotionSwitcherClient.return_value.SelectMode.assert_not_called()
-        sdk.LocoClient.return_value.SetFsmId.assert_not_called()
-        sdk.AudioClient.return_value.TtsMaker.assert_not_called()
-        sdk.ChannelPublisher.return_value.Write.assert_not_called()
+        for enabled in (True, False):
+            with self.subTest(output_enabled=enabled):
+                sdk = Mock()
+                modules = {
+                    "unitree_sdk2py." + name: sdk for name in (
+                        "core.channel", "g1.loco.g1_loco_client", "idl.default",
+                        "idl.unitree_hg.msg.dds_", "utils.crc",
+                        "comm.motion_switcher.motion_switcher_client", "g1.audio.g1_audio_client",
+                    )
+                }
+                with patch.dict("sys.modules", modules), patch(
+                    "robot_safety.unitree_transport.MotorWriterLock"
+                ), patch("robot_safety.unitree_transport.LatestSdkReader") as reader, patch(
+                    "robot_safety.unitree_transport.LatestSdkPoller"
+                ) as poller:
+                    on_state = Mock()
+                    transport = UnitreeArmTransport("fake", 0, on_state, Mock(), output_enabled=enabled)
+                    self.assertEqual(reader.call_args[0][0], "rt/lowstate")
+                    self.assertIs(poller.call_args[0][1], on_state)
+                    self.assertEqual(poller.call_args[0][2], 0.005)
+                    poller.return_value.start.assert_called_once()
+                    self.assertIs(transport.switcher, sdk.MotionSwitcherClient.return_value)
+                    self.assertIs(transport._audio(), sdk.AudioClient.return_value)
+                if not enabled:
+                    sdk.ChannelPublisher.assert_not_called()
+                    self.assertIsNone(transport.writer_lock)
+                    transport.write_arm({}, 0.)
+                    transport.write_body({i: {} for i in range(29)}, 5)
+                    transport.release_motion()
+                    transport.restore_motion()
+                    transport.request_damping()
+                sdk.MotionSwitcherClient.assert_called_once()
+                sdk.AudioClient.assert_called_once()
+                sdk.MotionSwitcherClient.return_value.ReleaseMode.assert_not_called()
+                sdk.MotionSwitcherClient.return_value.SelectMode.assert_not_called()
+                sdk.LocoClient.return_value.SetFsmId.assert_not_called()
+                sdk.AudioClient.return_value.TtsMaker.assert_not_called()
+                sdk.ChannelPublisher.return_value.Write.assert_not_called()
+                transport.close()
 
     def test_readiness_and_stop_queries_use_separate_clients(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
@@ -806,8 +1007,10 @@ class TransportEncodingTests(unittest.TestCase):
                 )
                 self.assertEqual(len(transport.readiness_query_results), expected_calls)
 
-    def test_only_upper_body_and_weight_slots_are_written_with_crc(self):
+    def test_arm_and_body_commands_use_sdk_slots_and_crc(self):
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
+        transport.output_enabled = True
+        transport.write_lock = Lock()
 
         def make_command():
             return SimpleNamespace(
@@ -834,6 +1037,39 @@ class TransportEncodingTests(unittest.TestCase):
         self.assertEqual(message.motor_cmd[29].q, 0.2)
         self.assertTrue(all(message.motor_cmd[i].kp == 0 for i in range(12)))
         self.assertEqual(message.crc, 12345)
+
+        transport.lowcmd = transport.publisher
+        targets = {i: {"q": i / 100, "dq": 0.1, "kp": 2., "kd": 0.5, "tau": 0.2} for i in range(29)}
+        self.assertTrue(transport.write_body(targets, 5))
+        msg = written[-1]
+        self.assertEqual((msg.mode_machine, msg.mode_pr, msg.crc), (5, 0, 12345))
+        self.assertTrue(transport.repeat_body(7))
+        repeated = written[-1]
+        self.assertIs(repeated, msg)
+        self.assertEqual((repeated.mode_machine, repeated.mode_pr, repeated.crc), (7, 0, 12345))
+        self.assertEqual(repeated.motor_cmd[4].q, targets[4]["q"])
+        transport.clear_body()
+        self.assertIsNone(transport.repeat_body(7))
+        self.assertIs(written[-1], repeated)
+        for i, fields in targets.items():
+            self.assertEqual(msg.motor_cmd[i].mode, 1)
+            for field, value in fields.items():
+                self.assertEqual(getattr(msg.motor_cmd[i], field), value)
+        with self.assertRaises(ValueError):
+            transport.write_body({0: targets[0]}, 5)
+
+    def test_writer_lock_excludes_and_releases(self):
+        from robot_safety.unitree_transport import MotorWriterLock
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "writer.lock")
+            first = MotorWriterLock(path)
+            try:
+                with self.assertRaises(RuntimeError):
+                    MotorWriterLock(path)
+            finally:
+                first.close()
+            MotorWriterLock(path).close()
 
     def test_soft_reset_mutes_developer_mode_then_speaks(self):
         from robot_safety.unitree_transport import (
@@ -867,10 +1103,11 @@ class TransportEncodingTests(unittest.TestCase):
 
         transport = UnitreeArmTransport.__new__(UnitreeArmTransport)
         transport.switcher = Switcher()
+        transport.output_enabled = True
         transport.audio = Audio()
         transport.saved_motion_name = None
         transport.motion_restored = False
-        self.assertEqual(transport.release_motion(), 0)
+        self.assertEqual(transport.release_motion(announce_soft_reset=True), 0)
         transport._speech_thread.join(timeout=1.0)
         self.assertEqual(
             events,

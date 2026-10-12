@@ -1,11 +1,14 @@
-# Runnable simulation policies
+# Shared example policies
 
-`sim.sh` can run real ONNX policies with safety checks on or off, record their motion, and replay their environment. `--example` supplies a policy producer and a matching scene. Safety checks remain enabled by default.
+`submit.sh --mode sim` runs ONNX policies through `sim.sh`, records their motion,
+and supports replay. `submit.sh --mode real` uses the same example client through
+the managed hardware gate. `--example` selects a policy producer and its matching
+simulation scene. Simulation safety checks remain enabled by default.
 
 | Example | Controller | Environment |
 | --- | --- | --- |
-| `stairs` | The retained walker ONNX plus the original submission's walk, pause, cross, hop, and arm overrides | Restored three low stair treads, top landing, gap, and finish pad |
-| `walker` | The walker ONNX with a 0.6 m/s forward command and zero commanded yaw | Flat floor |
+| `stairs` | The legacy arena stair ONNX plus the original submission's walk, pause, cross, hop, and arm overrides | Restored three low stair treads, top landing, gap, and finish pad |
+| `walker` | Official NVIDIA Decoupled WBC Walk/Balance with a default 0.3 m/s forward command | Flat floor |
 | `balance` | The existing GR00T/Gear WBC lower-body balance ONNX, with arms held at their initial pose | Flat floor |
 
 All controllers send a measured-pose hold as their first command. After that, their targets go directly to the normal sim checks. They do not smooth targets to evade those checks or change safety thresholds. MuJoCo integrates the floating base. The controller never writes root positions.
@@ -31,7 +34,7 @@ From the repository root. On a Mac or Windows laptop use `./desktop_sim.sh` with
 
 Each output directory contains `report.json` and `trace.npz`. Named output directories preserve both recordings. Exit code 0 means a checked run passed or an unchecked run completed, code 1 is a safety violation, and code 2 is an execution error or missing commands. A completed unchecked run is not necessarily a successful task.
 
-The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx`. Set `HIM_BALANCE_ONNX` to select another copy. `--example stairs` and `--example walker` use the committed `examples/policies/walker/walker.onnx`, `walker.onnx.data`, and `walker.yaml`. The generated container context names its policy specification `policy.yaml`.
+The balance weights are committed at `examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx`. Set `HIM_BALANCE_ONNX` to select another copy. `--example walker` uses the official Walk/Balance pair in `examples/policies/walker/`. `--example stairs` uses the separate legacy bundle in `examples/policies/stairs/`. The generated container context names its policy specification `policy.yaml`.
 
 ## View a result
 
@@ -62,7 +65,7 @@ Drop `--local`. The script prompts for sudo, prepares the example files, builds 
 ./sim.sh replay containers/sim/output/docker-stairs-off/trace.npz
 ```
 
-The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. Both example Dockerfiles pin ONNX Runtime 1.16.3 for ROS 2 Foxy's Python 3.8 on ARM64. The previous 1.18.1 pin failed because pip could not find a matching distribution for that environment. Rerunning `sim.sh --example` refreshes the build context and rebuilds with the corrected pin. The walker graph uses IR 9 for that runtime. Builds initialize the packaged model and run a test inference before producing the image. Manual Linux Docker results and remaining checks are recorded in [VALIDATION.md](VALIDATION.md). The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
+The first build needs network access for the ROS base image, apt packages, and Python wheels. Subsequent builds reuse Docker layers. The shared Dockerfile pins ONNX Runtime 1.16.3 for ROS 2 Foxy's Python 3.8 on ARM64. Rerunning `sim.sh --example` refreshes the build context and rebuilds the image. The walker graph uses IR 9 for that runtime. Builds initialize the packaged model and run a test inference before producing the image. Validation commands and detector calibration observations are in [VALIDATION.md](VALIDATION.md). The host needs its existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
 
 On a Mac or Windows laptop, `./desktop_sim.sh --example walker --view` uses
 Docker Compose and waits for Start before streaming the container run. The same
@@ -73,11 +76,52 @@ The generated directories are `.cache/sim_examples/<name>/container` and `.cache
 
 `bridge.log` and `policy.log` accompany Docker run reports. `execution: docker_ros` distinguishes this path from `execution: local`. Docker runs use wall-clock deadlines, so their numerical trajectory can differ from local runs. The bridge publishes feedback after advancing physics to avoid giving the controller a state that is already one step old.
 
-The example containers require a network containing only `lo`. They are simulation clients and cannot be launched with `setup.sh` on the robot network. They publish only `/safety/precheck`.
+The example containers publish only `/safety/precheck`. Simulation retains the
+loopback-only network restriction. Explicit dry-run and hardware launch modes
+use the same image through `setup.sh`, as described in the
+[hardware deployment guide](../../robot_safety/HARDWARE_ADAPTER.md#same-container-in-simulation-and-hardware).
+`G1_TASK_COMMAND='[vx,vy,yaw_rate]'` overrides the task command in both the
+container and `--local` example runs. Use `G1_JOINT_PROFILE` to select the same
+effective gains in simulation and hardware.
 
-## Simulation-only policy observations
+## Build and export the shared image
 
-The existing robot topics remain available. The bridge additionally publishes `/sim/state` as `std_msgs/String` containing JSON. This provides the base pose and velocity needed by the stair controller without pretending that hardware has an odometry feed.
+From the repository root, prepare and build the walker image without launching
+any robot processes:
+
+```bash
+.venv-policy-safety/bin/python containers/examples/prepare.py walker
+docker build --platform linux/arm64 -t g1-example-walker:local \
+  .cache/sim_examples/walker/container
+docker save g1-example-walker:local -o .cache/sim_examples/walker/submission.tar
+```
+
+The archive contains the shared client, both official Walk/Balance checkpoints,
+model license, and provenance. The build uses the host's ARM64 Docker support or
+configured cross-platform emulation. It does not copy the host Unitree SDK or
+CycloneDDS installation into the image.
+
+Use `--image g1-example-walker:local` with `submit.sh` to run the built image.
+To exercise archive loading, copy the archive into `containers/upload/` as the
+only `.tar` file and run:
+
+```bash
+G1_TASK_COMMAND='[0,0,0]' ./submit.sh --mode sim --seconds 10
+```
+
+With `--example walker`, `--command` supplies a schedule through `G1_COMMAND_FILE`.
+In simulation, `--command` without `--example` selects the direct walker instead
+of loading an archive. Hardware startup and
+handoff follow the [operator guide](../../robot_safety/HARDWARE_ADAPTER.md#operator-commands).
+When using `--image` on hardware, select the matching generated profile with
+`--profile .cache/sim_examples/walker/container/project/joint_profile.json`.
+
+## Shared policy observations
+
+The policy client consumes `/safety/policy_state` as `std_msgs/String` containing
+JSON. The simulation bridge retains `/sim/state` for reporting and compatibility.
+Hardware publishes measured joints/IMU and includes base pose/velocity only when
+an explicitly configured measurement source is available and fresh.
 
 | Field | Meaning |
 | --- | --- |
@@ -89,11 +133,12 @@ The existing robot topics remain available. The bridge additionally publishes `/
 | `ctrl_low`, `ctrl_high` | Model actuator target bounds, in motor order |
 | `sim_time`, `height`, `upright` | Simulated time and pelvis state |
 
-The session already exists when the sim starts. These example clients use the ID in `/sim/state`. Other submissions can continue obtaining it from `/safety/checker/arm`.
+The client uses the session supplied in `/safety/policy_state` or arms through
+the existing readiness and `/safety/checker/arm` services.
 
-`--circle` and `--command` use a separate direct-control path. Successful runs
-report `completed`, with `control_path: direct` and explicit per-check flags.
-They do not establish that the walker passes submission validation.
+`--example` is the policy package. Its report `policy` field is `stairs`, `walker`, or `balance`, and the image tag is `g1-sim-example-<name>:local`. `--image`, or the single archive in `containers/upload`, selects a container instead. `G1_TASK_COMMAND` changes that container's task velocity. It does not change which package was built.
+
+`--circle` and `--command` use a separate direct-control path and do not start either container. The network is `examples/policies/walker`. The report `policy` field is the velocity file name without `.yaml`. Successful runs report `completed`, with `control_path: direct` and explicit per-check flags. They do not establish that the walker passes submission validation.
 
 ## Use another scene and interpret results
 
@@ -101,4 +146,4 @@ Add `--scene path/to/scene.xml` to any example command to override its prepared 
 
 `report.json` records the safety outcome and independent `motion` measurements. A fall after a safety rejection reflects the subsequent hold or damping response. It is not evidence that the rejected policy continued controlling the robot. For the original stair course, `climbed_stairs` requires foot contact on at least two treads, standing on the top landing, and no fall. `course_success` additionally requires an airborne gap crossing and an upright finish on the finish pad. The stricter gap condition requires no foot contact with any course platform while over the gap.
 
-The restored stair geometry and scripted controller come from this repository's `examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`. The retained model history is in [the walker bundle README](../../examples/policies/walker/README.md). The GR00T adapter is shared with `robot_safety/balance_policy.py`. Current measured results and remaining integration checks are in [VALIDATION.md](VALIDATION.md).
+The restored stair geometry and scripted controller come from this repository's `examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`. The retained model history is in [the stairs bundle README](../../examples/policies/stairs/README.md). The NVIDIA walker uses `NvidiaWalker` in `policy_safety/adapter.py`. The standalone balance example uses `robot_safety/balance_policy.py`. Current measured results and remaining integration checks are in [VALIDATION.md](VALIDATION.md).

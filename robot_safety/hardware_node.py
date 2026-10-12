@@ -1,4 +1,4 @@
-"""Opt-in motor gate that writes Unitree upper-body targets and requests body damping."""
+"""Opt-in motor gate for checked Unitree joint commands and stock damping."""
 
 import json
 import os
@@ -9,7 +9,7 @@ from him_safety_interfaces.msg import Abort
 from std_msgs.msg import String
 
 from . import ros_topics as topics
-from .hardware_adapter import G1ArmAdapter
+from .hardware_adapter import G1HardwareAdapter
 from .hardware_constants import NUM_JOINTS
 from .hardware_profile import (
     JOINT_DIAGNOSTICS_PERIOD_SECS,
@@ -22,17 +22,28 @@ from .ros_nodes import MotorGateNode
 from .unitree_transport import UnitreeArmTransport
 
 
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return bool(value)
+
+
 class HardwareMotorGateNode(MotorGateNode):
     """Send approved targets using explicitly supplied robot settings."""
 
     def __init__(self):
         self.adapter = None
+        self.session_open = False
         super().__init__()
         enabled = self.declare_parameter("enable_hardware_output", False).value
+        dry_run = self.declare_parameter("dry_run", False).value
+        whole_body = self.declare_parameter("whole_body_output", False).value
+        launch_gate = self.declare_parameter("launch_gate", False).value
+        stance_blend_secs = self.declare_parameter("stance_blend_secs", 5.0).value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
-        if enabled is not True or not profile_path or not interface:
+        if enabled == dry_run or not profile_path or not interface:
             raise ValueError(
                 "hardware output requires explicit enable, profile path and SDK interface"
             )
@@ -41,6 +52,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 "hardware adapter requires the identified 29-joint configuration"
             )
         profile = HardwareProfile.load(profile_path)
+        self.hardware_profile_path = profile_path
         self.status_publisher = self.create_publisher(
             String, "/safety/hardware_status", self.command_qos
         )
@@ -50,14 +62,21 @@ class HardwareMotorGateNode(MotorGateNode):
         self.final_diagnostics_logged = False
         self.create_timer(JOINT_DIAGNOSTICS_PERIOD_SECS, self.publish_joint_diagnostics)
         self.last_status = None
+        self.last_status_publish_secs = None
         self.startup_ready = False
-        self.adapter = G1ArmAdapter(profile)
-        self.adapter.transport = UnitreeArmTransport(
-            interface, domain, self.adapter.receive_state, self.adapter.receive_battery
+        self.adapter = G1HardwareAdapter(
+            profile, whole_body=whole_body,
+            launch_gate=_as_bool(launch_gate),
+            stance_blend_secs=float(stance_blend_secs),
         )
+        self.adapter.transport = UnitreeArmTransport(
+            interface, domain, self.adapter.receive_state, self.adapter.receive_battery,
+            output_enabled=enabled,
+        )
+        self.output_enabled = enabled
         self.adapter.start_workers()
         self.get_logger().warn(
-            "Hardware output enabled. Arming may command the robot. No automatic rearm."
+            f"Hardware output enabled: {enabled}. No automatic rearm."
         )
 
     def notify_startup_ready(self):
@@ -65,6 +84,7 @@ class HardwareMotorGateNode(MotorGateNode):
         adapter = self.adapter
         if (
             self.startup_ready or adapter.balance_policy is None
+            or adapter.soft_reset_policy is None or adapter.startup_policy is None
             or not adapter.feedback_fresh(time.monotonic())
             or adapter.feedback.start_button_pressed or adapter.f3_pressed
             or adapter.abort_reason or self.motor_gate.abort_reason
@@ -88,21 +108,52 @@ class HardwareMotorGateNode(MotorGateNode):
             and self.adapter is not None
             and self.adapter.abort_reason is None
             and self.adapter.last_written_ownership_weight == 1.0
+            and (not self.adapter.whole_body or self.adapter.policy_launched)
         )
         response.message = (
-            "Full ownership weight sent" if response.success else "handover incomplete"
+            "Policy handoff authorized" if response.success else "handover incomplete"
         )
         return response
 
+    def _accept_new_session(self):
+        """Drop the previous run's stop. Ready mode is checked again after this."""
+        adapter = self.adapter
+        if adapter is None:
+            return False
+        if (
+            adapter.armed
+            or adapter.ownership_taken
+            or adapter.balance_released
+            or adapter.stop_requested.is_set()
+        ):
+            return False
+        with adapter.stop_lock:
+            adapter.abort_reason = None
+            adapter.arm_rejection_reason = None
+            adapter.hold_failed = False
+            adapter.walk_stop = False
+            adapter.command = None
+            adapter.stop_requested.clear()
+        if hasattr(self, "host_boot_id"):
+            self.motor_gate = MotorCommandGate(self.host_boot_id, self.config)
+            self.abort_reason = None
+            self.final_diagnostics_logged = False
+            if getattr(self, "abort_publisher", None) is not None:
+                self.destroy_publisher(self.abort_publisher)
+                self.abort_publisher = self.create_publisher(
+                    Abort, topics.ABORT, self.abort_qos
+                )
+        else:
+            self.motor_gate.abort_reason = None
+            self.motor_gate.policy_session_id = None
+        self.session_open = True
+        return True
+
     def on_ready(self, _request, response):
         """Query stock mode before the checker starts its command watchdog."""
-        if (
-            self.adapter is None
-            or self.motor_gate.abort_reason
-            or self.motor_gate.policy_session_id is not None
-        ):
+        if self.adapter is None or not HardwareMotorGateNode._accept_new_session(self):
             response.success = False
-            response.message = "Hardware gate is unavailable or stopped"
+            response.message = "Hardware gate is unavailable or still stopping"
             return response
         query_started_secs = time.monotonic()
         self.get_logger().info(
@@ -125,11 +176,10 @@ class HardwareMotorGateNode(MotorGateNode):
         )
         if response.success:
             response.message = "ready"
-        else:
-            detail = self.adapter.arm_rejection_reason
-            return self._reject_request(
-                response, "hardware_readiness_rejected", f"Hardware readiness rejected: {detail}"
-            )
+            return response
+        detail = self.adapter.arm_rejection_reason or "unspecified readiness failure"
+        response.success = False
+        response.message = f"Hardware readiness rejected: {detail}"
         return response
 
     def on_arm(self, request, response):
@@ -169,6 +219,13 @@ class HardwareMotorGateNode(MotorGateNode):
         return response
 
     def on_abort(self, message):
+        # A restarted gate is created while the previous writer may still be
+        # delivering its last abort. That sample is the previous run.
+        if message.source != self.get_name() and not self.session_open:
+            self.get_logger().warning(
+                "Ignoring abort from before this session: " + (message.reason or "")
+            )
+            return
         if message.source != self.get_name():
             self.adapter.abort(message.reason or "external_abort")
         super().on_abort(message)
@@ -177,6 +234,8 @@ class HardwareMotorGateNode(MotorGateNode):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
             return
+        if self.adapter.trace is not None:
+            self.adapter.trace.note_gate(time.monotonic())
         self.notify_startup_ready()
         if self.adapter.damp_settled:
             with self.adapter.stop_lock:
@@ -201,9 +260,21 @@ class HardwareMotorGateNode(MotorGateNode):
         # RPC acceptance and stock FSM are evidence, not proof of physical damping.
         status = json.dumps(
             {
-                "hardware_output_enabled": True,
+                **(self.adapter.startup.status() if self.adapter.whole_body else {}),
+                "hardware_output_enabled": self.output_enabled,
+                "whole_body_output": self.adapter.whole_body,
+                "startup_policy": self.adapter.startup_policy_name,
+                "soft_reset_policy": "holosoma",
+                "automatic_soft_reset": self.adapter.automatic_soft_reset,
+                "hardware_profile_path": self.hardware_profile_path,
+                "motion_released": self.adapter.balance_released,
+                "motion_released_at_secs": self.adapter.motion_released_at_secs,
                 "armed": self.adapter.armed,
                 "handover_complete": self.adapter.last_written_ownership_weight == 1.0,
+                "launch_gate": self.adapter.launch_gate,
+                "policy_launched": self.adapter.policy_launched,
+                "left_b_count": self.adapter.left_b_count,
+                "left_b_at_secs": self.adapter.left_b_at_secs,
                 "arm_rejection_reason": self.adapter.arm_rejection_reason,
                 "abort_reason": self.adapter.abort_reason,
                 "damping_rpc_code": self.adapter.damping_rpc_code,
@@ -216,12 +287,20 @@ class HardwareMotorGateNode(MotorGateNode):
                 "physical_damping_verified": False,
             }
         )
-        if status != self.last_status:
+        now = time.monotonic()
+        changed = status != self.last_status
+        due = (
+            self.last_status_publish_secs is None
+            or now - self.last_status_publish_secs >= 0.5
+        )
+        if changed or due:
             message = String()
             message.data = status
             self.status_publisher.publish(message)
-            self.get_logger().info(status)
+            if changed:
+                self.get_logger().info(status)
             self.last_status = status
+            self.last_status_publish_secs = now
 
     def publish_joint_diagnostics(self, final=False):
         """Publish run extrema once a second, and log every joint once on abort."""
@@ -247,31 +326,19 @@ class HardwareMotorGateNode(MotorGateNode):
         message = String()
         message.data = json.dumps(payload)
         self.joint_diagnostics_publisher.publish(message)
+        self.get_logger().info(f"Joint diagnostics: {message.data}")
         for name, values in sampled.items():
+            clipping = values.get("torque_target_clipping", {})
+            if clipping.get("active"):
+                self.get_logger().warning(
+                    f"Torque target limited {name}: {json.dumps(clipping)}"
+                )
             if "position_clipping" in values:
                 self.get_logger().warning(
                     f"Joint position clipped {name}: {json.dumps(values['position_clipping'])}"
                 )
         if final:
-            for name, values in sampled.items():
-                self.get_logger().info(f"Joint extrema {name}: {json.dumps(values)}")
             self.final_diagnostics_logged = True
-        else:
-            tracked = {
-                name: values for name, values in sampled.items()
-                if values["response_error_rad"]["samples"]
-            }
-            if not tracked:
-                return
-            name = max(
-                tracked, key=lambda key: tracked[key]["response_error_rad"]["max_abs"]
-            )
-            error = sampled[name]["response_error_rad"]
-            self.get_logger().info(
-                f"Run response-error extrema: largest={name}, "
-                f"min={error['min']:.6f}, max={error['max']:.6f} rad. "
-                f"All joints: {topics.JOINT_DIAGNOSTICS}"
-            )
 
     def destroy_node(self):
         if self.adapter is not None and self.adapter.transport is not None:

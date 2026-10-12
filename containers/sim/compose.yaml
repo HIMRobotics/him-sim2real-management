@@ -29,6 +29,7 @@ services:
       G1_SIM_SCENE: ${G1_SIM_SCENE:-}
       G1_SIM_SAFETY_CHECKS: ${G1_SIM_SAFETY_CHECKS:-1}
       G1_SIM_THRASH_MODE: ${G1_SIM_THRASH_MODE:-}
+      G1_JOINT_PROFILE: ${G1_JOINT_PROFILE:-}
       G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
       G1_SIM_SECONDS: ${G1_SIM_SECONDS:-10}
       G1_SIM_REPORT: /output/report.json
@@ -52,9 +53,15 @@ services:
       - sim
     volumes:
       - ./fastdds.xml:/fastdds.xml:ro
+      - ${G1_TRIAL_CONFIG:-/dev/null}:/trial.json:ro
+      - ${G1_COMMAND_FILE:-/dev/null}:/command.yaml:ro
     environment:
       G1_SIM_NETNS: "1"
       G1_SIM_EXAMPLE: ${G1_SIM_EXAMPLE:-}
+      G1_TRIAL_CONFIG: ${G1_TRIAL_CONFIG:+/trial.json}
+      G1_COMMAND_FILE: ${G1_COMMAND_FILE:+/command.yaml}
+      G1_THRASH_MODE: ${G1_SIM_THRASH_MODE:-monitor}
+      G1_TASK_COMMAND: ${G1_TASK_COMMAND:-}
       ROBOT_INTERFACE: lo
       ROBOT_DOMAIN: "0"
       ROS_DOMAIN_ID: "97"

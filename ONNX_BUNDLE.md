@@ -2,19 +2,19 @@
 
 This repository does not load a YAML file to run a policy on the robot. Unitree RL Gym and Unitree RL Lab each have their own deploy YAML, and those files belong to those runners. They are not accepted here.
 
-The walker test container is in [examples/submissions/walker/](examples/submissions/walker/), and its model bundle is in [examples/policies/walker/](examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `g1-walker-99-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
+The walker uses the [shared policy container](containers/examples/README.md), and its model bundle is in [examples/policies/walker/](examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `nvidia-decoupled-wbc-516-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
 
-- Adapter: `packages/policy_safety/src/policy_safety/adapter.py` (`G1Walker`)
+- Adapter: `packages/policy_safety/src/policy_safety/adapter.py` (`NvidiaWalker`)
 
 ## Walker files the checker expects
 
-Keep the weights file next to the model. ONNX Runtime loads both. These files are committed in `examples/policies/walker/`.
+Keep the Walk and Balance checkpoints together. The adapter loads both. These files are committed in `examples/policies/walker/`.
 
 | File | Role |
 | --- | --- |
 | `walker.yaml` | Observation layout, joint order, defaults, scales, gains, timing |
-| `walker.onnx` | 99-input, 29-output float network |
-| `walker.onnx.data` | External weights. Required. |
+| `walker.onnx` | 516-input, 15-output NVIDIA walking network |
+| `balance.onnx` | Official companion standing network. Required. |
 
 Screen a directory that contains them with:
 
@@ -24,26 +24,30 @@ policy-safety prepare-g1 \
   --output /tmp/g1-screening-bundle
 policy-safety evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \
-  --adapter g1-walker-99-v1 \
+  --adapter nvidia-decoupled-wbc-516-v1 \
   --robot-config /tmp/g1-screening-bundle/robot.json \
   --output /tmp/g1-screening-result
 ```
 
 ## What the network expects
 
-One input named by the graph, shape `[1, 99]`, dtype float32. One output, shape `[1, 29]`, dtype float32. Normalization is inside the ONNX graph (`normalization: embedded`). The policy directory does not carry a mean or standard-deviation file.
+One float32 input of shape `[1, 516]` and one float32 output of shape `[1, 15]`.
+Normalization is explicit in the adapter. The input contains six chronological
+86-value frames, initially zero padded. Quaternion layout is `w, x, y, z`.
 
-Quaternion layout is `w, x, y, z`. The 99 values, in order:
+| Frame slice | Contents |
+| --- | --- |
+| 0:3 | Command `[vx, vy, yaw_rate]` scaled by `[2, 2, 0.5]` |
+| 3 | Height command `0.74` |
+| 4:7 | Zero torso roll, pitch, yaw command |
+| 7:10 | Body angular velocity scaled by `0.5` |
+| 10:13 | Gravity projected into the body frame |
+| 13:42 | All 29 joint positions minus padded defaults |
+| 42:71 | All 29 joint velocities scaled by `0.05` |
+| 71:86 | Previous 15 raw lower-body actions |
 
-| Slice | Count | Contents |
-| --- | ---: | --- |
-| 0:3 | 3 | Base linear velocity in the body frame, m/s |
-| 3:6 | 3 | Base angular velocity in the body frame, rad/s |
-| 6:9 | 3 | Gravity direction in the body frame. World vector is `[0, 0, -1]`. |
-| 9:38 | 29 | Joint position minus `default_position`, rad, `joints` order below |
-| 38:67 | 29 | Joint velocity, rad/s, same order |
-| 67:96 | 29 | Previous raw network output, not the decoded joint target |
-| 96:99 | 3 | Command `[vx, vy, yaw_rate]` |
+Commands with norm below `0.05` select Balance. Otherwise Walk is selected.
+Both networks share history. The upper 14 joints hold neutral targets.
 
 The decoded motor target is a position:
 
@@ -55,4 +59,4 @@ Desired velocity and feedforward torque are zero. The position PD law used in sc
 
 `prepare-g1` copies the defaults, scales, and gains from that directory's policy YAML into `robot.json`.
 
-A different network replaces those files and needs its own contract. Matching 99 and 29 is not enough: observation order, frames, normalization, scales, gains, and timing have to match the exported network.
+A different network replaces those files and needs its own contract. Matching tensor sizes is not enough: observation order, frames, normalization, scales, gains, and timing have to match the exported network.

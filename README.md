@@ -52,7 +52,7 @@ The app is a small local web page served by Python’s standard library: no Node
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | SDK, networking, empty commands, interruptions |
 | [ARENA_RECEIVING.md](ARENA_RECEIVING.md) | Receiving, verifying, interpreting, and comparing runs |
 | [VALIDATION.md](VALIDATION.md) | Tests actually run and hardware checks remaining |
-| `examples/` | Organized model bundles, command files, and a walker test submission. Its build writes `.cache/walker_submission/submission.tar`. |
+| `examples/` | Model bundles and command files for the shared policy client in `containers/examples/`. |
 | `setup.sh`, `sim.sh`, `desktop_sim.sh`, [containers/SIM_RUN.md](containers/SIM_RUN.md), [containers/INSTRUCTIONS.md](containers/INSTRUCTIONS.md) | Run an uploaded container on the robot, or against MuJoCo first. `desktop_sim.sh` is the Mac/Windows entry: local modes need no Docker, and the ROS path uses `containers/sim/compose.yaml`. |
 
 From a Mac or Linux laptop, choose **Set up the G1 over SSH** to check existing SSH access, copy the recorder, transfer a policy file with checksum verification, and open the robot recorder through a managed tunnel. An existing trusted SSH host and unlocked key/agent are required. The remote Linux Python needs the Unitree SDK. The app transfers policies but never executes them.
@@ -76,11 +76,23 @@ uv run python app.py --demo
 
 uv creates `.venv` and uses Python 3.12 by default, downloading it if needed. The project supports Python 3.9+. The app and offline tools have no third-party runtime dependencies. The default development environment includes pytest, Ruff, and mypy.
 
-Run the included tests:
+Run the recorder tests:
 
 ```bash
-uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m pytest -q tests/test_app.py tests/test_kit.py tests/test_remote.py
 ```
+
+Run the safety and simulation tests with their model dependencies installed:
+
+```bash
+uv venv --python 3.12 .venv-policy-safety
+uv pip install --python .venv-policy-safety/bin/python './packages/policy_safety[test]'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-policy-safety/bin/python -m pytest -q \
+  tests containers/sim packages/policy_safety/tests --ignore=tests/ros2 \
+  --ignore=tests/test_app.py --ignore=tests/test_kit.py --ignore=tests/test_remote.py
+```
+
+ROS integration tests use the separate [ROS test environment](robot_safety/README.md).
 
 Add dependencies with `uv add PACKAGE`, or development tools with `uv add --dev PACKAGE`. Commit both `pyproject.toml` and `uv.lock` after dependency changes. Use `uv sync --locked` to reproduce the committed environment. See the [uv project guide](https://docs.astral.sh/uv/guides/projects/) for details.
 
@@ -99,3 +111,23 @@ enables boot startup through user lingering, and keeps a gate running that
 checks for double F3 (balance and arm hold) and double Start (whole-body damping).
 It does not start a policy. See the [manual safety tests](tests/manual/README.md)
 for installation checks and arm-raise verification.
+
+## Policy submission
+
+`submit.sh --mode sim` selects simulation, and `submit.sh --mode real` selects
+hardware. Simulation delegates to `sim.sh`. Hardware launch behavior stays in
+the existing `setup.sh` supervisor and standing safety gate.
+
+```bash
+./submit.sh --mode sim --example walker --local --seconds 10 \
+  --command examples/commands/walker/forward.yaml --view
+```
+
+The walker is NVIDIA's official Decoupled WBC Walk/Balance pair. See
+[its contract and provenance](examples/policies/walker/README.md).
+`examples/commands/walker/run.py` exposes editable `forward_velocity`,
+`sideways_velocity`, and `yaw_rate` variables.
+
+For an explicitly intended hardware session, the equivalent entry point is
+`./submit.sh --mode real --example walker --command FILE`. It retains the
+left + B launch gate and double Start damping stop.
