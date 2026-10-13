@@ -122,7 +122,7 @@ def test_legacy_stairs_neural_path_and_embedded_normalization(bundle):
     adapter = G1Walker(bundle / "walker.onnx", sim.robot)
     policy_yaml = (
         Path(__file__).resolve().parents[3]
-        / "examples/policies/stairs/walker.yaml"
+        / "containers/examples/policies/stairs/walker.yaml"
     )
     config_joints = yaml.safe_load(policy_yaml.read_text())["joints"]
     q, dq, quat, vel = (

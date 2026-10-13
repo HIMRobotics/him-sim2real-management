@@ -17,7 +17,7 @@ def bundle(tmp_path_factory):
     pytest.importorskip("onnx")
     from policy_safety.bundle import prepare_g1
 
-    sample = Path(__file__).resolve().parents[3] / "examples/policies/stairs"
+    sample = Path(__file__).resolve().parents[3] / "containers/examples/policies/stairs"
     output = tmp_path_factory.mktemp("bundles") / "g1"
     prepare_g1(sample, output)
     return output

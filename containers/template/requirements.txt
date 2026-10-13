@@ -1,0 +1,4 @@
+# Installed into the image with ROS 2 Foxy's Python 3.8 on linux/arm64.
+numpy==1.24.4
+# For ONNX models. 1.16.3 is the newest wheel for Python 3.8 and loads IR <= 9.
+# onnxruntime==1.16.3

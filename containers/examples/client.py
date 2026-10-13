@@ -19,6 +19,24 @@ from std_srvs.srv import Trigger
 from trial import MovementTrial
 
 
+# Same rule as containers/sim/netns.py, which is not part of this image.
+FALLBACK_TUNNELS = frozenset({
+    "erspan0", "gre0", "gretap0", "ip6_vti0", "ip6gre0", "ip6tnl0", "ip_vti0",
+    "sit0", "tunl0",
+})
+
+
+def loopback_only():
+    def up(name):
+        try:
+            return bool(int(Path("/sys/class/net", name, "flags").read_text(), 16) & 0x1)
+        except (OSError, ValueError):
+            return True
+
+    names = {name for _, name in socket.if_nameindex()}
+    return names - {name for name in names & FALLBACK_TUNNELS if not up(name)} == {"lo"}
+
+
 class PolicyNode(Node):
     def __init__(self, policy, mode="sim"):
         super().__init__("example_policy")
@@ -147,9 +165,7 @@ def main():
     mode = os.environ.get("G1_EXECUTION_MODE", "sim")
     if mode not in ("sim", "dry-run", "hardware"):
         raise RuntimeError("invalid execution mode")
-    if mode == "sim" and (os.environ.get("G1_SIM_NETNS") != "1" or {
-        name for _, name in socket.if_nameindex()
-    } != {"lo"}):
+    if mode == "sim" and (os.environ.get("G1_SIM_NETNS") != "1" or not loopback_only()):
         raise RuntimeError(
             "example container requires the loopback-only simulator network"
         )

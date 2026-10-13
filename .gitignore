@@ -1,9 +1,7 @@
 __pycache__/
 *.pyc
-runs/*
-!runs/.keep
-exports/*
-!exports/.keep
+runs/
+exports/
 
 .app/
 .venv/
@@ -32,9 +30,9 @@ packages/*/dist/
 
 tmp
 
-# Legacy build artifacts. Shared example builds use .cache/sim_examples/.
-examples/submission.tar
-examples/.build/
+# Template build output. Example builds use .cache/sim_examples/.
+containers/template/submission.tar
+containers/template/.build/
 
 # Uploaded robot containers. Keep the drop folder, not the images.
 containers/upload/*

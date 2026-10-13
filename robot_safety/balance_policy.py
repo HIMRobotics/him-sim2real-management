@@ -26,7 +26,7 @@ def resolve_model_path():
     override = os.environ.get("HIM_BALANCE_ONNX")
     if override:
         return Path(override)
-    bundled = Path(__file__).resolve().parents[1] / "examples/policies/walker/balance.onnx"
+    bundled = Path(__file__).resolve().parents[1] / "containers/examples/policies/walker/balance.onnx"
     if bundled.is_file():
         return bundled
     beside_package = Path(__file__).resolve().parents[1] / _MODEL_RELATIVE

@@ -2,13 +2,13 @@
 
 This repository does not load a YAML file to run a policy on the robot. Unitree RL Gym and Unitree RL Lab each have their own deploy YAML, and those files belong to those runners. They are not accepted here.
 
-The walker uses the [shared policy container](containers/examples/README.md), and its model bundle is in [examples/policies/walker/](examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `nvidia-decoupled-wbc-516-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
+The walker uses the [shared policy container](containers/examples/README.md), and its model bundle is in [containers/examples/policies/walker/](containers/examples/policies/walker/). `policy-safety prepare-g1` reads the policy YAML plus the ONNX files it names. Command-only YAML files may share the directory, but exactly one policy definition is required. The contract below is `nvidia-decoupled-wbc-516-v1`. `./start.sh` and `OPEN_APP.sh` will not launch either one.
 
 - Adapter: `packages/policy_safety/src/policy_safety/adapter.py` (`NvidiaWalker`)
 
 ## Walker files the checker expects
 
-Keep the Walk and Balance checkpoints together. The adapter loads both. These files are committed in `examples/policies/walker/`.
+Keep the Walk and Balance checkpoints together. The adapter loads both. These files are committed in `containers/examples/policies/walker/`.
 
 | File | Role |
 | --- | --- |
@@ -20,7 +20,7 @@ Screen a directory that contains them with:
 
 ```bash
 policy-safety prepare-g1 \
-  --submission examples/policies/walker \
+  --submission containers/examples/policies/walker \
   --output /tmp/g1-screening-bundle
 policy-safety evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \

@@ -7,7 +7,6 @@ the system ROS 2 Foxy interpreter. They talk over stdin.
 import json
 import os
 import select
-import socket
 import subprocess
 import sys
 import time
@@ -24,6 +23,7 @@ SIM_DIR = Path(__file__).resolve().parent
 REPO = SIM_DIR.parents[1]
 sys.path.insert(0, str(REPO / "robot_safety"))
 sys.path.insert(0, str(REPO))
+from containers.sim.netns import loopback_only
 from robot_safety.motor_gate import MotorCommandGate
 
 FEEDBACK = "/safety/robot_feedback"
@@ -32,6 +32,32 @@ PRECHECK = "/safety/precheck"
 POSTCHECK = "/safety/postcheck"
 ABORT = "/safety/abort"
 ARM = "/safety/checker/arm"
+# The first call includes plant startup, which reads meshes and weights
+# through Docker Desktop's bind mount and is slow on a cold cache.
+PLANT_STARTUP_SECONDS = 30.0
+# The safety deadlines are 0.2 s. A gap this long between the bridge's own
+# 20 ms control ticks means Docker or the host stopped running the simulator,
+# for example while macOS swaps the Docker VM out.
+HOST_STALL_SECONDS = 0.1
+# Messages delayed by a stall can still trip a deadline after the loop resumes.
+HOST_STALL_REACH_SECONDS = 0.5
+
+
+def error_report(error):
+    return {
+        "version": 1,
+        "status": "error",
+        "reason": "plant_error",
+        "detail": str(error),
+        "hardware_authorization": False,
+        "execution": "docker_ros",
+        "policy": os.environ.get("G1_SIM_EXAMPLE") or None,
+    }
+
+
+def write_report(path, report):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2) + "\n")
 
 
 class PlantClient:
@@ -62,10 +88,10 @@ class PlantClient:
         os.set_blocking(self.proc.stdin.fileno(), False)
         os.set_blocking(self.proc.stdout.fileno(), False)
 
-    def call(self, request):
+    def call(self, request, timeout=None):
         if self.failed or self.proc.poll() is not None:
             raise RuntimeError("mujoco plant unavailable")
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         pending = (json.dumps(request) + "\n").encode()
         response = bytearray()
         try:
@@ -121,6 +147,9 @@ class SimBridge(Node):
         self.startup = float(os.environ.get("G1_SIM_STARTUP", "10"))
         self.exit_code = 2
         self.finished = False
+        self.last_tick = None
+        self.stalls = []
+        self.abort_at = None
         feedback_qos = QoSProfile(depth=64, reliability=ReliabilityPolicy.BEST_EFFORT)
         command_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         abort_qos = QoSProfile(
@@ -263,6 +292,10 @@ class SimBridge(Node):
     def on_control(self):
         if self.finished:
             return
+        now = time.monotonic()
+        if self.last_tick is not None and now - self.last_tick >= HOST_STALL_SECONDS:
+            self.stalls.append((self.last_tick, now))
+        self.last_tick = now
         if self.motor_gate is not None:
             self.motor_gate.cycle(time.monotonic())
             if self.motor_gate.abort_reason:
@@ -320,6 +353,7 @@ class SimBridge(Node):
     def latch(self, reason, detail=None):
         if self.abort_reason is None:
             self.abort_reason = reason
+            self.abort_at = time.monotonic()
             if self.motor_gate is not None:
                 self.motor_gate.abort(reason)
             if not self.plant.failed:
@@ -349,19 +383,15 @@ class SimBridge(Node):
             )
         else:
             self.latch("plant_error")
-            report = {
-                "version": 1,
-                "status": "error",
-                "reason": "plant_error",
-                "detail": str(error),
-                "hardware_authorization": False,
-            }
+            report = error_report(error)
         self.finished = True
         report.update(
             execution="docker_ros", policy=os.environ.get("G1_SIM_EXAMPLE") or None
         )
-        self.report_path.parent.mkdir(parents=True, exist_ok=True)
-        self.report_path.write_text(json.dumps(report, indent=2) + "\n")
+        stall = self.host_stall()
+        if stall is not None:
+            report["host_stall"] = {"longest_gap_secs": round(stall, 3)}
+        write_report(self.report_path, report)
         status = report.get("status")
         self.exit_code = {"within_limits": 0, "completed": 0, "violation": 1}.get(
             status, 2
@@ -370,6 +400,17 @@ class SimBridge(Node):
             f"sim {status} reason={report.get('reason')} commands={report.get('commands')}",
             flush=True,
         )
+        if stall is not None:
+            print(f"The simulator was stalled for {stall:.2f} s at the stop, so this "
+                  "result is inconclusive. Free memory on the host and rerun.", flush=True)
+
+    def host_stall(self):
+        """Longest stall that could have caused the stop, in seconds."""
+        if self.abort_at is None:
+            return None
+        gaps = [end - start for start, end in self.stalls
+                if start <= self.abort_at and end >= self.abort_at - HOST_STALL_REACH_SECONDS]
+        return max(gaps, default=None)
 
 
 def require_isolated_netns():
@@ -379,7 +420,7 @@ def require_isolated_netns():
             file=sys.stderr,
         )
         return False
-    if {name for _, name in socket.if_nameindex()} != {"lo"}:
+    if not loopback_only():
         print(
             "Refusing to start: the sim network must contain only lo.", file=sys.stderr
         )
@@ -410,9 +451,10 @@ def main():
     checker = None
     executor = None
     try:
-        armed = plant.call({"op": "arm"})
+        armed = plant.call({"op": "arm"}, timeout=PLANT_STARTUP_SECONDS)
         if not armed.get("ok"):
             print(armed, file=sys.stderr)
+            write_report(report, error_report(armed.get("detail") or armed.get("reason")))
             return 2
         rclpy.init(args=["--ros-args", "-p", "thrash.mode:=" + (os.environ.get("G1_SIM_THRASH_MODE") or "monitor")])
         from rclpy.executors import SingleThreadedExecutor
@@ -420,7 +462,8 @@ def main():
         from robot_safety.ros_nodes import SafetyCheckerNode
 
         checker = SafetyCheckerNode() if shared_checker else None
-        node = SimBridge(plant, seconds, report, lowstate, checker)
+        node = SimBridge(plant, float(armed.get("launch_seconds", 0.0)) + seconds,
+                         report, lowstate, checker)
         executor = SingleThreadedExecutor()
         if checker:
             executor.add_node(checker)
@@ -439,6 +482,7 @@ def main():
             node.finish(error=exc)
         else:
             print(str(exc), file=sys.stderr)
+            write_report(report, error_report(exc))
         code = 2
     finally:
         if executor is not None:

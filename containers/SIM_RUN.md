@@ -4,7 +4,7 @@
 
 The default scene is a flat floor and the 29-joint G1. Submitters can supply a MuJoCo XML scene and assets beside their image and select it with `--scene`. Safety checks are enabled by default and can be disabled with `--no-safety-checks`. The container sees the same ROS topics it sees on the robot. The recording plays in a browser.
 
-The submission rules — packaging, inputs, outputs, limits, and access — are in [README.md](README.md). Topic fields are in [INSTRUCTIONS.md](INSTRUCTIONS.md). Disabling simulation checks does not change the robot launcher or the host safety service.
+The submission rules (packaging, inputs, outputs, limits, and access) and the topic fields are in [INSTRUCTIONS.md](INSTRUCTIONS.md). Disabling simulation checks does not change the robot launcher or the host safety service.
 
 ## What it is for
 
@@ -35,23 +35,15 @@ The plant retains its additional joint-profile and physics checks. Simulation
 does not reproduce the hardware deployment's process isolation or stop dynamics.
 Unchecked and direct-circle runs retain their bypass of the ROS checker.
 
-The bridge publishes `RobotFeedback` on a 0.02 s timer and receives asynchronous `JointCommand` messages for all 29 joints. After the first accepted command, each timer callback advances MuJoCo by ten 0.002 s steps using the latest accepted command. The run duration is wall-clock time from that first acceptance. If none arrives within 30 seconds, the report is `no_command`, unless a rejected command has already latched a failure.
+The bridge publishes `RobotFeedback` on a 0.02 s timer and receives asynchronous `JointCommand` messages for all 29 joints. After the first accepted command, each timer callback advances MuJoCo by ten 0.002 s steps using the latest accepted command. For the first five seconds startup balance holds the robot, as it does on hardware before the operator presses left + B, and accepted commands are not applied. The run lasts those five seconds plus `--seconds` of wall-clock time from the first acceptance. If none arrives within 30 seconds, the report is `no_command`, unless a rejected command has already latched a failure.
 
-What the container gets:
-
-| Source | What it is |
-| --- | --- |
-| `/safety/checker/arm` | Returns `session_id`. The command must use that id. |
-| `/safety/robot_feedback` | Raw 29-joint `q` and `dq`. With the shared checker, this has no authorized observation ID. |
-| `/safety/policy_observation` | Checker-issued observation IDs for commands, as on the robot. |
-| `rt/lowstate` on `lo` | IMU and the same 29 motors. `ROBOT_INTERFACE` is `lo`. |
-
-What the container sends:
-
-| Topic | What it is |
-| --- | --- |
-| `/safety/precheck` | One 29-slot `JointCommand` per step. |
-| `/safety/abort` | Subscribe and stop. The sim publishes this when a check fails. |
+The container sees the same topics and services it would see on the robot,
+which are listed in [the rules](INSTRUCTIONS.md#the-rules). Two things differ
+in simulation: `rt/lowstate` is published on `lo` (so `ROBOT_INTERFACE` is
+`lo`), and the sim itself publishes `/safety/abort` when a check fails.
+`/safety/robot_feedback` carries raw joint state with no authorized
+observation ID, so commands must take their IDs from `/safety/policy_state` or
+`/safety/policy_observation`.
 
 A failed command revokes policy output and latches the first fault. Later
 commands stay rejected. Both local simulation and ROS aborts clear the plant's
@@ -136,12 +128,30 @@ and waist weigh 4, shoulders 3, ankles 2, elbows 1, and wrists 0.25. The shared
 score is `sqrt(sum(weight * oscillatory_RMS²) / sum(weight))`, with a provisional
 limit of 1.5 for 500 ms. See [detector settings](../robot_safety/README.md#thrash-detection-in-the-existing-checker)
 for details. These are motion-risk weights, not measured joint inertias.
+Detection defaults remain provisional, without automatic threshold adaptation
+or task exemptions.
 
-Space pauses and arrow keys step both motion and readings. **Go to start / Home**
-jumps to the first frame and pauses. **Restart replay / R** plays from the
-beginning, preserving the camera and without rerunning the simulation.
-Detection defaults remain provisional, without automatic
-threshold adaptation or task exemptions.
+### Calibration observations
+
+These are simulation observations, not hardware validation. Recorded upright
+circle walking (30 s), straight walking (20 s), and a start tilted 10° in pitch
+and yaw (20 s) produced no detections, including when the measured velocities
+were replayed at 2 ms and 20 ms intervals. Supine circle and straight-walker
+recordings triggered at about 0.73–0.74 s at both rates.
+
+A forward-pitch sweep used the straight walker with a fixed 10° yaw, 20 s per
+case, monitoring only and other stops disabled. The robot was rotated about its
+toes with the joint angles unchanged, all four toe contacts touching.
+
+| Initial pitch | First detection | Outcome |
+| --- | --- | --- |
+| 20° | None | Recovered upright |
+| 25° | None | Recovered upright |
+| 30° | 0.970 s | Fell |
+| 35° | 0.922 s | Fell |
+| 40° | 0.770 s | Fell |
+
+That is one deterministic trajectory per angle, not a universal safe tilt limit.
 
 ## Stop reasons in the viewer
 
@@ -201,21 +211,10 @@ rating are shown on the viewer and do not stop the run. Its viewer displays `PAR
 submission checks as bypassed. This metadata is also stored in the trace so a
 standalone replay retains that distinction.
 
-## How to use
+## Flags and run modes
 
-From the repo root:
-
-To run a real policy immediately on a Mac or Windows laptop, use `./desktop_sim.sh --example walker --view`. That builds the example image, opens the site, and streams the live container after Start. A new submission works the same way: put one `submission.tar` in `containers/upload/` and run `./desktop_sim.sh --view`. `--local` skips Docker and is not the submission path. On the robot Linux host, `./sim.sh --example stairs --view` is the namespace equivalent. Complete commands are in [Runnable simulation policies](examples/README.md).
-
-```bash
-./sim.sh --self-test
-./sim.sh --battery
-./sim.sh --seconds 10
-./sim.sh --counterfactuals
-./sim.sh --scene containers/upload/environment/scene.xml
-./sim.sh --scene containers/upload/environment/scene.xml --no-safety-checks
-./sim.sh stop
-```
+This section is the full reference. For a guided tour of the common commands,
+see the [containers README](README.md).
 
 `--self-test` holds the standing pose for one second and should finish `within_limits`. `./sim.sh` with no flag loads the one archive in `containers/upload/` and starts standing. `./sim.sh stop` removes the sim containers.
 
@@ -227,19 +226,19 @@ The policy package, the container, and the velocity file are three different cho
 
 | Choice | How to specify it | What runs | `policy` in the report |
 | --- | --- | --- | --- |
-| Policy package | `--example stairs`, `walker`, or `balance` | `examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
-| Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. See [build and export](examples/README.md#build-and-export-the-shared-image) for the shared walker image. `G1_TASK_COMMAND` sets the shared client's task velocity. | The selected example, when available |
-| Velocity file on the plant | `--command examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
-| Same file in the walker container | `--example walker --command examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
-| Circle shortcut | `--circle` | Same cached walker. The velocity file is `examples/commands/walker/circle.yaml`. | `circle` |
+| Policy package | `--example stairs`, `walker`, or `balance` | `containers/examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
+| Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. [The template](template/README.md) builds one. See [build and export](examples/README.md#build-and-export-the-shared-image) for the shared walker image. `G1_TASK_COMMAND` sets the shared client's task velocity. | `null` unless an example was selected |
+| Velocity file on the plant | `--command containers/examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `containers/examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
+| Same file in the walker container | `--example walker --command containers/examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
+| Circle shortcut | `--circle` | Same cached walker. The velocity file is `containers/examples/commands/walker/circle.yaml`. | `circle` |
 
-`--command` does not select a policy package or start a container. `--example` does not read `examples/commands/walker/`.
+`--command` does not select a policy package or start a container. `--example` does not read `containers/examples/commands/walker/`.
 
 Other flags:
 
 | Flag | Effect |
 | --- | --- |
-| `--seconds 10` | Length of the run after the first accepted command. |
+| `--seconds 10` | Length of the run after the five-second startup period. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
 | `--example stairs\|walker\|balance` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
 | `--local` | Run an `--example` directly against MuJoCo without Docker, ROS, or sudo. |
@@ -258,7 +257,7 @@ Other flags:
 | `replay` | Serve the last recording. Does not start a new run. |
 | `--help` | Show usage without starting Docker or requesting sudo. |
 
-`./sim.sh` asks for `sudo` so it can enter the isolated network. `replay` does not.
+`./sim.sh` asks for `sudo` so it can enter the isolated network. `replay` does not. On the robot's Linux host it also needs the existing ROS 2 Foxy installation, `colcon`, Docker, and `.venv-policy-safety`.
 
 `./sim.sh` needs Linux network namespaces, so it does not run on macOS or Windows. Use `./desktop_sim.sh` at the repo root, with the same flags. `--local`, `--self-test`, `--circle`, `--battery`, and `replay` run on the host and do not need Docker. The ROS submission path uses only Docker Compose: `containers/sim/Dockerfile` and `compose.yaml` define a loopback-only `net` service, a `sim` service on that network, and an optional `submission` service. The host viewer still serves `http://127.0.0.1:8765`. Reports stay in `containers/sim/output/`.
 
@@ -268,6 +267,8 @@ Both entry scripts use the CLI and viewer handling in `sim.sh`. `desktop_sim.sh`
 selects the Compose backend. The backend implementations are
 `containers/sim/namespace.sh` and `containers/sim/compose.sh`. Local runs with
 `--view` also wait for Start and stream live on both platforms.
+
+## Reading the report
 
 The run writes:
 
@@ -289,6 +290,18 @@ When `--output` is supplied, these files go in that directory. Docker runs can b
 | `completed` | Commands ran with safety checks disabled, or through direct circle control without submission validation. This is not a safety pass. |
 | `error` | An unchecked run failed protocol or simulation validation. |
 | `no_command` | Nothing was accepted before the startup wait ended. |
+
+The launcher's exit code follows the status: 0 for `within_limits` or
+`completed`, 1 for a safety violation, and 2 for an execution error or no
+command.
+
+Docker runs keep the robot's 0.2 s deadlines, so a host that pauses the
+Docker VM can stop a run. On a Mac short of memory, macOS swaps the VM out and
+every container freezes for a few hundred milliseconds. When the simulator's
+own 20 ms loop was stalled at least 0.1 s at the stop, the report adds
+`host_stall` with the longest gap, and the result is inconclusive rather than a
+policy fault. Free memory, or lower Docker Desktop's memory limit (the stack
+needs about 1 GB), and rerun.
 
 The same checks, without Docker, are `containers/sim/test_runner.py`:
 
@@ -336,7 +349,7 @@ Then run `./sim.sh --self-test --scene containers/upload/environment/scene.xml`,
 
 The scene can change terrain, friction, gravity, obstacles, and passive objects. It must retain the G1's 29 named hinge joints and matching affine position actuators, `pelvis`, `floating_base_joint`, the two named pelvis IMU sensors, and a `stand` keyframe. Additional passive joints/free bodies are supported. If adding joints changes the model's position layout, update the `stand` keyframe accordingly. Additional actuators and different robots are not supported by the current command interface.
 
-`standing` resets to the submitted `stand` keyframe, including its root position and orientation. Other poses require a ground geom named `safety_floor` and space to place the robot without substantial penetration. With checks enabled, the existing fall criterion still uses pelvis world height below 0.28 m or uprightness below 0.3, so choose the environment's vertical origin accordingly. Simulation timing remains 20 ms control / 2 ms physics even if the XML specifies another timestep.
+`standing` resets to the submitted `stand` keyframe, including its root position and orientation, then raises or lowers the robot until its feet just meet `safety_floor` or a platform. Start the keyframe slightly above the support. Other poses require a ground geom named `safety_floor` and space to place the robot without substantial penetration. With checks enabled, the existing fall criterion still uses pelvis world height below 0.28 m or uprightness below 0.3, so choose the environment's vertical origin accordingly. Simulation timing remains 20 ms control / 2 ms physics even if the XML specifies another timestep.
 
 ## How to visualize
 
@@ -370,6 +383,13 @@ Replay draws mesh geometry, planes, boxes, spheres, ellipsoids, cylinders, capsu
 | Scroll | Zoom |
 | Space | Pause |
 | Left / right arrow | One frame back or forward while paused |
+
+Space pauses and arrow keys step both motion and readings. **Go to start / Home**
+jumps to the first frame and pauses. **Restart replay / R** plays from the
+beginning, preserving the camera and without rerunning the simulation.
+
+When the sim runs on the robot over SSH, forward the port with
+`ssh -L 8765:127.0.0.1:8765 unitree@<robot>` and open the same URL on your laptop.
 
 Ctrl+C stops the page. `./sim.sh --view` opens the page before the run. Press Start, and playback begins at the first frame while the run is going. The camera stays where you leave it. A blue line on the floor is the pelvis path. `./sim.sh --seconds 10 --view --circle` is that page with the cached walker and no submission archive.
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from policy_safety.bundle import read_policy_yaml
 
-EXAMPLES = Path(__file__).resolve().parents[3] / "examples"
+EXAMPLES = Path(__file__).resolve().parents[3] / "containers/examples"
 WALKER = EXAMPLES / "policies/walker"
 
 

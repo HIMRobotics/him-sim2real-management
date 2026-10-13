@@ -42,10 +42,11 @@ Desktop --self-test and --circle run locally without ROS or Docker.
                    walker/thrash: belly-up walker, only thrash stops enabled.
                    walker/thrash-monitor: same experiment, readings without thrash stops.
 --image NAME       Run this container instead of the archive in containers/upload.
+                   containers/template/build.sh builds a starting submission.
 --local            Run an example directly in MuJoCo without Docker/ROS/sudo.
 --output DIR       Store this run separately for comparison and replay.
---circle           Cached walker in examples/policies/walker. No container.
-                   Command file examples/commands/walker/circle.yaml.
+--circle           Cached walker in containers/examples/policies/walker. No container.
+                   Command file containers/examples/commands/walker/circle.yaml.
                    The report policy field is circle.
 --command FILE     Walker velocity file.
                    Alone, the cached walker plays it on the plant. No container.
@@ -295,11 +296,14 @@ if [[ "$self_test" -eq 1 && "$seconds_set" -eq 0 ]]; then
   seconds=1
 fi
 if [[ "$circle" -eq 1 && -z "$command_file" ]]; then
-  command_file="$repo_dir/examples/commands/walker/circle.yaml"
+  command_file="$repo_dir/containers/examples/commands/walker/circle.yaml"
 fi
-if [[ -n "$command_file" && ! -f "$command_file" ]]; then
-  echo "Walker command file is not readable: $command_file" >&2
-  exit 2
+if [[ -n "$command_file" ]]; then
+  if [[ ! -f "$command_file" ]]; then
+    echo "Walker command file is not readable: $command_file" >&2
+    exit 2
+  fi
+  command_file="$(cd -- "$(dirname -- "$command_file")" && pwd -P)/$(basename -- "$command_file")"
 fi
 if [[ "$battery" -eq 1 && "$seconds_set" -eq 0 ]]; then
   seconds=2

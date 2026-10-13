@@ -36,4 +36,4 @@ jobs:
         env:
           G1_SIM_PYTHON: ${{ github.workspace }}/.venv-policy-safety/bin/python
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-      - run: for script in submit.sh sim.sh desktop_sim.sh containers/sim/*.sh setup.sh containers/examples/entrypoint.sh; do bash -n "$script" || exit; done
+      - run: for script in submit.sh sim.sh desktop_sim.sh containers/sim/*.sh setup.sh containers/examples/entrypoint.sh containers/template/*.sh; do bash -n "$script" || exit; done

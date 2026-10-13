@@ -4,6 +4,7 @@ import json
 import shutil
 import struct
 import sys
+import uuid
 from pathlib import Path
 
 import mujoco
@@ -22,8 +23,8 @@ PAGE = """<!DOCTYPE html>
 <title>G1 sim replay</title>
 <style>
   html, body { margin: 0; height: 100%; background: #f4f4f4; overflow: hidden; }
-  #hud { position: absolute; left: 12px; top: 12px; max-width: calc(54vw - 50px);
-    font: 14px sans-serif; color: #222; }
+  #status { position: absolute; left: 12px; top: 12px; max-width: calc(54vw - 50px); }
+  #hud { font: 14px sans-serif; color: #222; }
   #start {
     position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
     font: 600 18px sans-serif; padding: 12px 28px; border: 0; border-radius: 8px;
@@ -53,10 +54,16 @@ PAGE = """<!DOCTYPE html>
   #stop { bottom: 18px; background: #fff4eeed; border-left: 5px solid #b54a22; color: #682811; }
   #warn { bottom: 18px; background: #fff8e8; border-left: 5px solid #c48a12; color: #6a4b08; }
   #warn.raised { bottom: 108px; }
+  #startup { margin-top: 10px; background: #eef5fdf0; border-left: 5px solid #1565c0;
+    color: #0d3c73; border-radius: 6px; padding: 10px 16px;
+    font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
-<div id="hud">loading</div>
+<div id="status">
+  <div id="hud">loading</div>
+  <div id="startup" role="status" hidden></div>
+</div>
 <div id="warn" role="status" hidden></div>
 <div id="stop" role="status" hidden></div>
 <div id="playback" aria-label="Replay controls">
@@ -90,6 +97,13 @@ const hud = document.getElementById("hud");
 motion.thrash ||= [];
 motion.stop ||= [];
 motion.warning ||= [];
+motion.startup ||= [];
+function showStartup(index) {
+  const text = motion.startup[index] || "";
+  const panel = document.getElementById("startup");
+  panel.hidden = !text;
+  panel.textContent = text;
+}
 function showWarning(index) {
   const warning = motion.warning[index] || "";
   const panel = document.getElementById("warn");
@@ -230,6 +244,7 @@ function show(index) {
   showThrash(frame);
   showStop(frame);
   showWarning(frame);
+  showStartup(frame);
 }
 let trailCount = 0;
 function updateTrail() {
@@ -263,6 +278,7 @@ function remember(frames, replace) {
     motion.thrash = [];
     motion.stop = [];
     motion.warning = [];
+    motion.startup = [];
     for (const geom of motion.geoms) geom.poses = [];
   }
   for (const item of frames) {
@@ -271,6 +287,7 @@ function remember(frames, replace) {
     motion.thrash.push(item.thrash || null);
     motion.stop.push(item.stop || null);
     motion.warning.push(item.warning || "");
+    motion.startup.push(item.startup || "");
     item.poses.forEach((pose, index) => motion.geoms[index].poses.push(pose));
   }
   motion.frames = motion.time.length;
@@ -283,6 +300,14 @@ if (motion.live) {
   document.body.appendChild(start);
   let synced = false;
   start.addEventListener("click", async () => {
+    // A tab left open from an earlier run still shows that run's page.
+    try {
+      const current = await (await fetch("/frames?after=0", {cache: "no-store"})).json();
+      if (current.page_id && current.page_id !== motion.page_id) {
+        location.reload();
+        return;
+      }
+    } catch (error) {}
     start.disabled = true;
     start.textContent = "Starting";
     motion.summary = "Starting the policy";
@@ -486,8 +511,10 @@ def write_page(dest, model, geoms, frames, summary, live=False, stop=None):
         "focus": [frame["focus"] for frame in frames],
         "summary": summary,
         "live": live,
+        "page_id": uuid.uuid4().hex,
         "thrash": [frame.get("thrash") for frame in frames],
         "stop": [frame.get("stop") for frame in frames],
+        "startup": [frame.get("startup") or "" for frame in frames],
         "run_stop": describe_stop(stop),
         "joint_names": list(G1_29_JOINT_NAMES),
         "geoms": [],
@@ -526,6 +553,23 @@ def stop_from_report(report):
         return {"reason": report["reason"], "detail": report.get("detail"),
                 "time_secs": report.get("stop_time_seconds")}
     return None
+
+
+def describe_startup(startup):
+    """Banner text for startup balance and the hand-off to the policy."""
+    if not startup or startup["phase"] == "fault":
+        return ""
+    elapsed, handoff = startup["elapsed_secs"], startup["handoff_at_secs"]
+    if handoff is None:
+        left = startup["launch_secs"] - elapsed
+        if left > 0:
+            return (f"Startup balance: {elapsed:.1f} s in, {left:.1f} s left "
+                    "before the policy takes over")
+        return f"Startup balance: {elapsed:.1f} s in, waiting for the robot to settle"
+    blending = elapsed - handoff
+    if blending < startup["blend_secs"]:
+        return f"Handing over to the policy: {blending:.1f} of {startup['blend_secs']:.1f} s"
+    return f"Policy in control since {handoff:.1f} s"
 
 
 def describe_stop(stop):
@@ -625,6 +669,10 @@ def report_summary(report, safety_checks=True):
             summary += " (" + thrash["event"]["reason"] + ")"
     if report.get("reason"):
         summary += "\n" + describe_stop(stop_from_report(report))["description"]
+        if report.get("host_stall"):
+            summary += (f"\nInconclusive: the simulator was stalled for "
+                        f"{report['host_stall']['longest_gap_secs']:.2f} s at the stop. "
+                        "Free memory on the host and rerun.")
     elif report.get("status") == "no_command":
         summary += "\nNo policy commands were accepted before the run ended."
     warning = limit_warning_text(report.get("warnings"))
@@ -669,6 +717,8 @@ def export_replay(trace_path, dest):
         times = trace["time"]
         thrash = json.loads(str(trace["thrash"])) if "thrash" in trace else [None] * len(times)
         stops = json.loads(str(trace["stop"])) if "stop" in trace else [None] * len(times)
+        startups = (json.loads(str(trace["startup"])) if "startup" in trace
+                    else [None] * len(times))
         safety_checks = (
             bool(trace["safety_checks"]) if "safety_checks" in trace else True
         )
@@ -691,11 +741,12 @@ def export_replay(trace_path, dest):
         pose_frame(model, data, base, geoms, pose, float(time))
         for pose, time in zip(qpos, times)
     ]
-    if len(thrash) != len(frames) or len(stops) != len(frames):
+    if not len(thrash) == len(stops) == len(startups) == len(frames):
         raise ValueError("telemetry samples do not match trace frames")
-    for frame, telemetry, stop in zip(frames, thrash, stops):
+    for frame, telemetry, stop, startup in zip(frames, thrash, stops, startups):
         frame["thrash"] = telemetry
         frame["stop"] = describe_stop(stop)
+        frame["startup"] = describe_startup(startup)
     summary = report_summary(metadata, safety_checks)
     report_path = trace_path.parent / "report.json"
     if report_path.is_file():

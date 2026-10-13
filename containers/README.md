@@ -1,55 +1,164 @@
 # Containers
 
-A submission is one Docker image for simulation and hardware. `./setup.sh` defaults to preflight. Explicit dry-run and hardware modes start the existing host safety graph. See [hardware execution and qualification](../robot_safety/HARDWARE_ADAPTER.md#same-container-in-simulation-and-hardware).
+Everything that runs a policy container lives here: the simulator, a template
+for new submissions, and a set of working example policies. To write your own
+submission, follow [INSTRUCTIONS.md](INSTRUCTIONS.md). This page is a tour of
+the commands, mostly using the examples.
 
-The image may contain several models, and the code inside may be laid out however the author wants. The platform runs it only if it follows the rules below. It does not install dependencies for a submission, and it does not adapt a different sensor set or control API onto the robot.
+| Path | What it is |
+| --- | --- |
+| [`template/`](template/README.md) | The starting point for a new submission. It holds the robot's starting pose until you replace its policy |
+| [`examples/`](examples/README.md) | Finished reference policies with their weights baked in: the NVIDIA walker, GR00T balance, and a stair walker |
+| [`sim/`](SIM_RUN.md) | The MuJoCo simulator. It runs any image that follows the instructions |
+| `upload/` | Where `submission.tar` (and an optional `environment/` scene) goes for the simulator and the robot |
 
-## Rules
+All commands run from the repository root. On a Mac or Windows machine use
+`./desktop_sim.sh`; on the robot's Linux host use `./sim.sh`. The two take the
+same flags, so every `./desktop_sim.sh` command below also works as `./sim.sh`.
+Desktop runs need Docker Desktop to be running.
 
-| | What the submission must do | What the platform supports |
-| --- | --- | --- |
-| Packaging | One `linux/arm64` image, dependencies already installed, one `ENTRYPOINT`. Delivered as `containers/upload/submission.tar`. | Loads that archive and starts the entrypoint. Does not look for ONNX files, a Python layout, or a second container. |
-| Inputs | Read robot state from the topics below. Do not assume a camera, lidar, or odometry feed. | `/safety/policy_state` supplies timestamped joints/IMU and explicitly configured base measurements. `/safety/policy_observation` supplies checker-issued IDs. No camera images. |
-| Outputs | Publish a 29-slot `JointCommand` on `/safety/precheck` every control step. Stop when `/safety/abort` arrives. | The host checks that message and is the only writer of motor commands. |
-| Limits | Stay inside the joint profile. A command uses a fresh `observation_id` (0.2 s) and the next one arrives before the action timeout (0.2 s). | Rejects a bad frame and latches the abort. In sim, the first command must arrive within 30 s, then the run lasts `--seconds` (default 10). A rejected command clears policy output and selects simulated damping. On the robot the process runs until the operator stops it or the abort latches. No memory or CPU quota is applied. |
-| Access | Talk to sensors and motors only through those interfaces. | Reads state and takes `/safety/precheck`. Does not grant `rt/lowcmd`, `rt/arm_sdk`, or control of `g1-safety-stops`. |
+## Watch an example policy
 
-Details, joint order, and the save command are in [INSTRUCTIONS.md](INSTRUCTIONS.md).
-
-## Base image
-
-Unitree does not publish a G1 image. Start from `ros:foxy-ros-base`, platform `linux/arm64`. This robot is Ubuntu 20.04 / ROS 2 Foxy.
-
-## What the image contains
-
-- ROS 2 Foxy and `rmw_fastrtps_cpp`, so it can see the host safety graph.
-- The submission program and any models it needs.
-- One start script, set as the image `ENTRYPOINT`. That script runs when the container starts. It is not `setup.sh`. `setup.sh` stays on the robot and only launches the image.
-
-## File to upload
-
-One archive:
-
-`containers/upload/submission.tar`
-
-Build and save it on an arm64 machine, or with `docker buildx` for `linux/arm64`. Topic names, safety rules, and the save command are in [INSTRUCTIONS.md](INSTRUCTIONS.md).
-
-## Try it in MuJoCo
-
-Real stair-walker and GR00T balance examples are available with `./sim.sh --example stairs` and `./sim.sh --example balance`. Add `--local` to run without Docker/ROS/sudo, and `--view` for replay after a local run or a Start page before a Docker/ROS run. `./sim.sh --circle` walks one flat circle with the cached walker and needs no archive. See [Runnable simulation policies](examples/README.md) for safety-on/off commands and the current measured results.
-
-`./sim.sh` runs on the robot's Linux host. Mac and Windows use `./desktop_sim.sh` (`containers/sim/Dockerfile` and `compose.yaml`). `./sim.sh` runs that same archive against a simulated G1. The container is attached to a loopback-only network, so it cannot see `eth0` or write robot motors. `g1-safety-stops` stays up. Safety-enabled ROS simulation routes `/safety/precheck` through the real safety checker and shared postcheck motor gate before applying commands to MuJoCo. Use `/safety/policy_observation` for checker-issued observation IDs. Safety checks are enabled by default. Use `--no-safety-checks` to disable simulation checks, or `--safety-checks` to enable them explicitly. Thrash detection shares the robot implementation and defaults to monitoring. Use `--example walker/thrash` for the belly-up thrash-only stop test, or `walker/thrash-monitor` for readings without thrash stops. See [walker scenarios](SIM_RUN.md#shared-thrash-detection). The result is `containers/sim/output/report.json`, which records the selected modes.
+The quickest way to see the simulator working is to run the NVIDIA walker and
+watch it in the browser. The command builds the walker's image, opens a page,
+and starts the run when you press Start.
 
 ```bash
-./sim.sh --self-test
-./sim.sh
-./sim.sh --counterfactuals
-./sim.sh --scene containers/upload/environment/scene.xml
-./sim.sh --scene containers/upload/environment/scene.xml --no-safety-checks
-./sim.sh replay
-./sim.sh stop
+./desktop_sim.sh --example walker --view
+./desktop_sim.sh --example balance --view
+./desktop_sim.sh --example stairs --view     # also loads the stair course
 ```
 
-`--counterfactuals` repeats the run from standing, floor sitting, supine, prone, and both sides. Only the standing start treats a fall as a failure.
+For the first five seconds GR00T balance holds the robot, as it does on the
+real robot before the operator presses left + B. The policy takes over after
+that and runs for `--seconds`. The viewer shows how far into the startup the
+run is and when the policy takes over.
 
-The default scene is a flat floor and the G1. Submitters can upload their own MuJoCo XML scene and assets beside `submission.tar`, then select it with `--scene`. The scene retains the G1 command interface and can add terrain, obstacles, and passive objects. Scene requirements and replay controls are in [SIM_RUN.md](SIM_RUN.md). Unchecked runs report `completed`, not a safety pass.
+Each run writes `containers/sim/output/report.json` and a recording you can
+watch again with `./desktop_sim.sh replay`. To keep several runs side by side,
+give each one its own output directory and replay it by path:
+
+```bash
+./desktop_sim.sh --example stairs --seconds 20 --output containers/sim/output/stairs-on
+./desktop_sim.sh replay containers/sim/output/stairs-on/trace.npz
+```
+
+Adding `--local` runs an example directly in MuJoCo, without Docker or ROS.
+This is faster to iterate on, but it skips the container path that a real
+submission takes.
+
+```bash
+./desktop_sim.sh --example walker --local --seconds 10 --view
+```
+
+## Turn the safety checks off
+
+Safety checks are on by default, so a policy that breaks a limit is stopped
+and the report says `violation`. Running the same example with
+`--no-safety-checks` shows what the policy would have done without them. Such
+a run reports `completed`, which is not a pass.
+
+```bash
+./desktop_sim.sh --example stairs --seconds 20 --output containers/sim/output/stairs-on
+./desktop_sim.sh --example stairs --seconds 20 --no-safety-checks --output containers/sim/output/stairs-off
+```
+
+## Steer the walker
+
+The walker follows a velocity schedule. The schedules in
+[`examples/commands/walker/`](examples/commands/walker/) cover standing still,
+walking forward, walking and then stopping, and walking in a circle. Passing
+one with `--example walker` plays it through the walker's container.
+
+```bash
+./desktop_sim.sh --example walker --command containers/examples/commands/walker/forward_stop.yaml --seconds 7 --view
+./desktop_sim.sh --example walker --command containers/examples/commands/walker/circle.yaml --view
+```
+
+`--circle` is a shortcut that drives the walker's network around one flat
+circle with no container at all. It is useful for checking the viewer and the
+physics, but it bypasses the submission checks.
+
+```bash
+./desktop_sim.sh --circle --view
+```
+
+## Stress test with the battery
+
+The battery starts the robot from every pose and then pushes the pelvis with
+10, 50, and 150 N. It runs on the host without Docker and writes
+`containers/sim/output/battery/report.json`. To watch one case, pick a push and
+add `--view`.
+
+```bash
+./desktop_sim.sh --battery
+./desktop_sim.sh --battery --push heavy --view
+./desktop_sim.sh --battery --circle           # the walker gaits instead of holding still
+```
+
+`--counterfactuals` is the container version of the same idea. It reruns the
+policy from six starting poses and writes one report per pose.
+
+```bash
+./desktop_sim.sh --example walker --counterfactuals
+```
+
+## Try a different scene
+
+Any run can load another MuJoCo scene with `--scene`. On the desktop the scene
+must be inside this repository so the simulator container can see it.
+
+```bash
+./desktop_sim.sh --example walker --scene containers/upload/environment/scene.xml --view
+```
+
+[Submit a MuJoCo environment](SIM_RUN.md#submit-a-mujoco-environment) shows
+how to build one from this repository's G1 model.
+
+## Run an example the way a submission runs
+
+The examples can also be exported as a normal `submission.tar`, which is a
+good way to check the upload path end to end.
+
+```bash
+.venv-policy-safety/bin/python containers/examples/prepare.py walker
+docker build --platform linux/arm64 -t g1-example-walker:local .cache/sim_examples/walker/container
+docker save g1-example-walker:local -o containers/upload/submission.tar
+./desktop_sim.sh --view
+```
+
+To run a built image without exporting it, pass it by name:
+
+```bash
+./desktop_sim.sh --image g1-example-walker:local --view
+```
+
+Your own submission runs the same way. Every command on this page works without
+`--example` once your archive is in `containers/upload/`; the
+[test section of INSTRUCTIONS.md](INSTRUCTIONS.md#test-in-simulation) lists the
+ones that matter most.
+
+## Run an example on the robot
+
+On the robot, `./submit.sh --mode real` runs the same walker container through
+the hardware safety gate. Start with the robot supported and the standing
+schedule, then move on to its first steps. The
+[operator guide](../robot_safety/HARDWARE_ADAPTER.md#operator-commands) covers
+the handoff and how to stop.
+
+```bash
+./submit.sh --mode real --example walker --command containers/examples/commands/walker/stand.yaml
+./submit.sh --mode real --example walker --command containers/examples/commands/walker/first_steps.yaml
+```
+
+## Housekeeping
+
+```bash
+./desktop_sim.sh --self-test   # check the simulator itself; needs no submission
+./desktop_sim.sh stop          # remove any simulator containers left running
+```
+
+The `holosoma` example also exists but needs its weights from outside this
+repository; set `HIM_HOLOSOMA_ONNX` to the ONNX file before using
+`--example holosoma`. [SIM_RUN.md](SIM_RUN.md) is the full reference for every
+flag, the report fields, and the viewer controls.

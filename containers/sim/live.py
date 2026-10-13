@@ -28,11 +28,23 @@ class LiveSession:
         self.model = plant.model
         self.data = plant.data
         self.base, self.geoms = view.visible_geoms(self.model)
+        self._page = (None, None)
         self.frames = []
         self.offset = 0
         self.pending = ""
         self.inode = None
         self.lock = threading.Lock()
+
+    def page_id(self):
+        """Id of the page on disk. A tab showing another id is from an older run."""
+        page = self.directory / "motion.json"
+        try:
+            stamp = page.stat().st_mtime_ns
+        except FileNotFoundError:
+            return None
+        if stamp != self._page[0]:
+            self._page = (stamp, json.loads(page.read_text()).get("page_id"))
+        return self._page[1]
 
     def start(self):
         self.start_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +110,7 @@ class LiveSession:
             frame["thrash"] = item.get("thrash")
             frame["stop"] = view.describe_stop(item.get("stop"))
             frame["warning"] = item.get("warning") or ""
+            frame["startup"] = view.describe_startup(item.get("startup"))
             self.frames.append(frame)
         return reset
 
@@ -116,6 +129,7 @@ class LiveSession:
                 except (OSError, json.JSONDecodeError):
                     done = False
             return {
+                "page_id": self.page_id(),
                 "frames": self.frames[start:],
                 "reset": reset,
                 "done": done,
@@ -148,6 +162,7 @@ def serve(session, host, port):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -173,6 +188,8 @@ def serve(session, host, port):
             self.send_response(200)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(data)))
+            # Every run rewrites the page at the same address.
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 

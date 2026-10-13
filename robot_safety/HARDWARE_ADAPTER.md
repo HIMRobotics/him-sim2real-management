@@ -166,7 +166,7 @@ accepted ready mode, feet weight-bearing and fall-arrest support available:
 ```bash
 sudo ./submit.sh --mode real --image g1-example-walker:local \
   --profile .cache/sim_examples/walker/container/project/joint_profile.json \
-  --command examples/commands/walker/stand.yaml
+  --command containers/examples/commands/walker/stand.yaml
 ```
 
 This command enables joint output for startup Balance immediately after arming.
@@ -176,7 +176,7 @@ reload the older safety service to install this gate and select the requested
 profile. This reload belongs to the operator-run procedure.
 
 After reviewing zero-command takeover and controller stopping, use the same
-launch command with `--command examples/commands/walker/first_steps.yaml`.
+launch command with `--command containers/examples/commands/walker/first_steps.yaml`.
 It requests 2 seconds standing, 1 second at 0.05 m/s, 2 seconds at 0.10 m/s,
 1 second at 0.05 m/s, then zero velocity indefinitely. Zero velocity retains
 Balance control. Double Start requests damping. End the container with Ctrl+C
@@ -342,7 +342,7 @@ Once ready, run `./tests/manual/run_unitree_arm_test.sh --start` in another term
 The first command starts the five processes, replacing the diagnostic gate with
 the hardware gate. The second requests arming and starts the SDK arm sequence.
 Double Start latches stop and repeatedly requests whole-body damping. See
-[the manual test instructions](../tests/manual/README.md#physical-sdk-arm-test).
+[the manual test instructions](../tests/manual/README.md#run-an-arm-test-through-the-systemd-gate).
 
 ## Diagnosing an arming rejection
 
@@ -489,7 +489,7 @@ qualification for that policy. The universal gate remains enforced for stairs
 and uploaded policies, whose behavior requires separate requalification.
 
 The host Python 3.8 Balance inference warmup passed with the bundled model,
-whose SHA256 matches `examples/policies/walker/provenance.json`. The running
+whose SHA256 matches `containers/examples/policies/walker/provenance.json`. The running
 hardware service was inspected but not restarted. Docker build/run remains
 unverified because the account lacks Docker socket access. No physical joint
 commands were sent. The operator runs the build and hardware commands above.

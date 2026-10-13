@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from containers.sim import netns
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -59,12 +61,55 @@ class BridgeTests(unittest.TestCase):
         node.plant.call.return_value = {"ok": True, "reason": None, "sim_time": 0.02}
         node.publish_state = Mock()
         node.lowstate = Mock()
+        node.last_tick, node.stalls = None, []
         with patch.object(bridge.time, "monotonic", return_value=1.04):
             node.on_control()
         calls = [c.args[0]["op"] for c in node.plant.call.call_args_list]
         self.assertEqual(calls, ["step"])
         self.assertTrue(node.plant.call.call_args.args[0]["feedback"])
         self.assertEqual(node.publish_state.call_args.args[0]["sim_time"], 0.02)
+
+    def test_control_records_gaps_where_the_host_stopped_the_simulator(self):
+        bridge = load_bridge()
+        node = bridge.SimBridge.__new__(bridge.SimBridge)
+        node.finished = False
+        node.motor_gate = None
+        node.checker = None
+        node.created = node.run_started = 1.0
+        node.seconds = 10.0
+        node.accepted = node.circle = False
+        node.clock = lambda: 0.0
+        node.plant = Mock()
+        node.plant.call.return_value = {"ok": True}
+        node.publish_state = node.lowstate = Mock()
+        node.last_tick, node.stalls = None, []
+        for now in (1.00, 1.02, 1.30, 1.32):
+            with patch.object(bridge.time, "monotonic", return_value=now):
+                node.on_control()
+        self.assertEqual(node.stalls, [(1.02, 1.30)])
+
+    def test_stop_during_a_host_stall_is_flagged_inconclusive(self):
+        import tempfile
+
+        bridge = load_bridge()
+        for stalls, flagged in (([(9.8, 10.4)], True), ([(2.0, 2.6)], False)):
+            node = bridge.SimBridge.__new__(bridge.SimBridge)
+            node.finished = False
+            node.lowstate = Mock(ok=False)
+            node.checker = None
+            node.plant = Mock()
+            node.plant.call.return_value = {"status": "violation", "reason": "observation_timeout"}
+            node.stalls, node.abort_at = stalls, 10.4
+            with tempfile.TemporaryDirectory() as tmp:
+                node.report_path = Path(tmp) / "report.json"
+                node.finish()
+                report = json.loads(node.report_path.read_text())
+            self.assertEqual(node.exit_code, 1)
+            self.assertEqual(report["status"], "violation")
+            if flagged:
+                self.assertEqual(report["host_stall"], {"longest_gap_secs": 0.6})
+            else:
+                self.assertNotIn("host_stall", report)
 
     def test_plant_deadline_handles_missing_and_partial_lines(self):
         bridge = load_bridge()
@@ -118,6 +163,50 @@ class BridgeTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_plant_startup_call_gets_a_longer_deadline(self):
+        bridge = load_bridge()
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                "import sys, time; line = sys.stdin.readline(); time.sleep(0.5); print(line.strip(), flush=True)",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            bufsize=0,
+        )
+        with patch.object(bridge.subprocess, "Popen", return_value=proc):
+            client = bridge.PlantClient(sys.executable, timeout=0.2)
+        try:
+            self.assertEqual(client.call({"op": "arm"}, timeout=5), {"op": "arm"})
+        finally:
+            client.close()
+
+    def test_plant_startup_failure_writes_error_report(self):
+        import tempfile
+
+        bridge = load_bridge()
+        plant = Mock()
+        plant.call.side_effect = TimeoutError("mujoco plant response timed out")
+        lowstate = types.ModuleType("lowstate")
+        lowstate.SimLowState = Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.json"
+            env = {"G1_SIM_REPORT": str(report_path), "G1_SIM_EXAMPLE": "walker"}
+            with patch.object(bridge, "require_isolated_netns", return_value=True), \
+                    patch.object(bridge, "PlantClient", return_value=plant), \
+                    patch.dict(sys.modules, {"lowstate": lowstate}), \
+                    patch.dict(bridge.os.environ, env):
+                code = bridge.main()
+            report = json.loads(report_path.read_text())
+        self.assertEqual(code, 2)
+        self.assertEqual(plant.call.call_args.kwargs["timeout"], bridge.PLANT_STARTUP_SECONDS)
+        self.assertEqual(report["status"], "error")
+        self.assertEqual(report["reason"], "plant_error")
+        self.assertIn("timed out", report["detail"])
+        self.assertEqual(report["policy"], "walker")
+
     def test_transport_failure_writes_error_without_another_plant_call(self):
         import tempfile
 
@@ -126,6 +215,7 @@ class BridgeTests(unittest.TestCase):
         node.finished = False
         node.plant = Mock()
         node.latch = Mock()
+        node.stalls, node.abort_at = [], None
         with tempfile.TemporaryDirectory() as tmp:
             node.report_path = Path(tmp) / "report.json"
             node.finish(error=TimeoutError("plant response timed out"))
@@ -169,16 +259,34 @@ class BridgeTests(unittest.TestCase):
         bridge = load_bridge()
         with (
             patch.dict(bridge.os.environ, {"G1_SIM_NETNS": "1"}),
-            patch.object(bridge.socket, "if_nameindex", return_value=[(1, "lo")]),
+            patch.object(netns.socket, "if_nameindex", return_value=[(1, "lo")]),
         ):
             self.assertTrue(bridge.require_isolated_netns())
         with (
             patch.dict(bridge.os.environ, {"G1_SIM_NETNS": "1"}),
             patch.object(
-                bridge.socket, "if_nameindex", return_value=[(1, "lo"), (2, "wlan0")]
+                netns.socket, "if_nameindex", return_value=[(1, "lo"), (2, "wlan0")]
             ),
         ):
             self.assertFalse(bridge.require_isolated_netns())
+
+    def test_namespace_guard_ignores_only_idle_fallback_tunnels(self):
+        interfaces = [(1, "lo"), (2, "gre0"), (3, "sit0"), (4, "tunl0")]
+        with (
+            patch.object(netns.socket, "if_nameindex", return_value=interfaces),
+            patch.object(netns, "interface_up", return_value=False),
+        ):
+            self.assertTrue(netns.loopback_only())
+        with patch.object(netns.socket, "if_nameindex", return_value=interfaces):
+            with patch.object(netns, "interface_up", return_value=True):
+                self.assertFalse(netns.loopback_only())
+            with patch.object(netns.Path, "read_text", side_effect=OSError):
+                self.assertFalse(netns.loopback_only())
+        with (
+            patch.object(netns.socket, "if_nameindex", return_value=[(1, "lo"), (2, "eth0")]),
+            patch.object(netns, "interface_up", return_value=False),
+        ):
+            self.assertFalse(netns.loopback_only())
 
     def test_unchecked_completion_has_success_exit_code(self):
         import tempfile
@@ -190,6 +298,7 @@ class BridgeTests(unittest.TestCase):
         node.checker = None
         node.plant = Mock()
         node.plant.call.return_value = {"status": "completed", "commands": 3}
+        node.stalls, node.abort_at = [], None
         with tempfile.TemporaryDirectory() as tmp:
             node.report_path = Path(tmp) / "report.json"
             node.finish()
