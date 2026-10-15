@@ -29,6 +29,11 @@ jobs:
       - run: uv venv --python 3.12 .venv-policy-safety
       - run: uv pip install --python .venv-policy-safety/bin/python './packages/policy_safety[test]'
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Fetch the pinned Holosoma recovery checkpoint
+        run: |
+          curl --fail --location --retry 3 https://raw.githubusercontent.com/amazon-far/holosoma/d1e8499c10670f44c49d161b9876a4c17ac305f7/src/holosoma_inference/holosoma_inference/models/loco/g1_29dof/fastsac_g1_29dof.onnx -o /tmp/holosoma.onnx
+          echo "8346fd90778439395922a8c7256f24125ae84b8dea949128bac9e23c02bc7717  /tmp/holosoma.onnx" | sha256sum --check
+          echo "HIM_HOLOSOMA_ONNX=/tmp/holosoma.onnx" >> "$GITHUB_ENV"
       - run: python3 containers/sim/viewer_assets.py
       - run: >-
           .venv-policy-safety/bin/python -m pytest -q tests containers/sim packages/policy_safety/tests

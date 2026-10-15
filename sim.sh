@@ -36,6 +36,8 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --safety-checks     Enable safety checks (default).
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
+--scenario NAME    Local safety trial: recovery_tilt, policy_tilt, gantry_tilt, policy_crouch.
+--tilt-degrees DEG  Imposed pitch for --scenario (default 20).
 --example NAME     Policy package: stairs, walker, balance, or holosoma.
                    Builds image g1-sim-example-<name>:local.
                    The report policy field is that name. This is not a velocity file.
@@ -194,6 +196,8 @@ safety_set=0
 example=""
 example_arg=""
 local_mode=0
+scenario=""
+tilt_degrees=20
 stopping=0
 # Keep this list in step with containers/sim/plant.py POSES.
 poses=(standing seated supine prone left_side right_side)
@@ -220,6 +224,8 @@ while [[ $# -gt 0 ]]; do
     --no-safety-checks) safety_checks=0; safety_set=1; shift ;;
     --example) example_arg="${2:?--example needs a name}"; example="$example_arg"; shift 2 ;;
     --local) local_mode=1; shift ;;
+    --scenario) scenario="${2:?--scenario needs a name}"; shift 2 ;;
+    --tilt-degrees) tilt_degrees="${2:?--tilt-degrees needs an angle}"; shift 2 ;;
     --output) out_dir="${2:?--output needs a directory}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -233,6 +239,11 @@ if [[ -n "$example" ]]; then
   if [[ "$detector_mode" != default ]]; then
     export G1_SIM_THRASH_MODE="$detector_mode"
   fi
+fi
+
+if [[ -n "$scenario" && ( "$local_mode" != 1 || -z "$example" || "$safety_checks" != 1 || "$counterfactuals" == 1 || "$battery" == 1 ) ]]; then
+  echo "--scenario requires --local --example with safety checks and a single run." >&2
+  exit 2
 fi
 
 if [[ -n "$command_file" && -z "$example" ]]; then
@@ -357,6 +368,7 @@ fi
 
 if [[ "$local_mode" -eq 1 || ( "$backend" == compose && ( "$self_test" -eq 1 || "$circle" -eq 1 ) ) ]]; then
   local_args=(--seconds "$seconds")
+  [[ -z "$scenario" ]] || local_args+=(--scenario "$scenario" --tilt-degrees "$tilt_degrees")
   [[ -z "$example" ]] || local_args+=(--example "$example")
   [[ "$self_test" -eq 0 ]] || local_args+=(--self-test)
   [[ "$circle" -eq 0 ]] || local_args+=(--circle)

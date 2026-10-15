@@ -26,6 +26,10 @@ run_session() {
   export G1_SIM_SCENE="" G1_SIM_SAFETY_CHECKS="$safety_checks"
   export G1_SIM_EXAMPLE="$example" G1_SIM_OUTPUT="$out_dir" G1_SIM_LIVE=""
   export G1_COMMAND_FILE="${command_file:-}"
+  if [[ "$safety_checks" == 1 && "$circle" != 1 ]]; then
+    G1_SIM_HOLOSOMA_ONNX=$(PYTHONPATH="$repo_dir" "$python" -c 'from robot_safety.holosoma_policy import holosoma_weights; print(holosoma_weights().resolve())') || return 2
+    export G1_SIM_HOLOSOMA_ONNX
+  fi
   if [[ -n "$scene" ]]; then
     case "$scene" in
       "$repo_dir"/*) export G1_SIM_SCENE="/workspace/${scene#"$repo_dir"/}" ;;

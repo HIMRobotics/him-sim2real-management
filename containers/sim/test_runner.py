@@ -62,6 +62,7 @@ class RunnerTest(unittest.TestCase):
             with patch.dict(os.environ, {"G1_SIM_LIVE": str(live), "G1_SIM_TRACE": str(trace)}):
                 runner = Runner(record_trace=True)
                 # Isolate output diagnostics after startup has completed.
+                runner.hardware.adapter.balance_released = True
                 runner.startup.command = lambda now, stamp, state, command, **kw: command
                 state = runner.feedback(0.0)
                 runner.command(hold(runner, state, 0), 0.0)
@@ -306,6 +307,7 @@ class RunnerTest(unittest.TestCase):
     def test_clipped_ankle_is_sent_and_used_for_response(self):
         runner = Runner()
         # Isolate output diagnostics after startup has completed.
+        runner.hardware.adapter.balance_released = True
         runner.startup.command = lambda now, stamp, state, command, **kw: command
         index = runner.plant.joint_names.index("right_ankle_pitch_joint")
         runner.plant.data.qpos[runner.plant.qadr[index]] = -0.86
@@ -495,6 +497,7 @@ class RunnerTest(unittest.TestCase):
             with self.subTest(follows_target=follows_target):
                 runner = Runner()
                 # Isolate output diagnostics after startup has completed.
+                runner.hardware.adapter.balance_released = True
                 runner.startup.command = lambda now, stamp, state, command, **kw: command
                 index = 15
                 state = runner.feedback(0.0)
@@ -526,6 +529,7 @@ class RunnerTest(unittest.TestCase):
     def test_direct_command_limits_torque_target_without_stopping(self):
         runner = Runner()
         # Isolate output diagnostics after startup has completed.
+        runner.hardware.adapter.balance_released = True
         runner.startup.command = lambda now, stamp, state, command, **kw: command
         runner.control_path = "direct"
         runner.commands = 1
@@ -561,24 +565,25 @@ class RunnerTest(unittest.TestCase):
             [],
         )
 
-    def test_measured_joint_speed_warns_and_base_spin_still_stops(self):
-        runner = Runner()
-        state = runner.feedback(0.0)
-        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
-        index, name, limits = runner.rules.entries[3]
-        fast = np.zeros(29)
-        fast[index] = limits.max_velocity_rad_secs + 1
-        with patch.object(runner.plant, "step_physics", return_value=fast):
-            runner.step(0.02)
-        self.assertIsNone(runner.reason)
-        self.assertIsNotNone(runner.active)
-        noted = next(item for item in runner.position_warnings[name]["limits"]
-                     if item["reason"] == "joint_velocity_limit")
-        self.assertGreater(noted["value"], noted["limit"])
-        runner.plant.data.qvel[runner.plant.base_vadr + 3] = 7
-        with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
-            runner.step(0.04)
-        self.assertEqual(runner.reason, "base_angular_speed_limit")
+    def test_measured_joint_speed_and_base_spin_trigger_hardware_damping(self):
+        for base_spin in (False, True):
+            with self.subTest(base_spin=base_spin):
+                runner = Runner()
+                state = runner.feedback(0.0)
+                self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+                runner.step(0.0)
+                if base_spin:
+                    runner.plant.data.qvel[runner.plant.base_vadr + 3] = 7
+                    expected = "base_angular_speed_limit"
+                else:
+                    index, _, limits = runner.rules.entries[3]
+                    runner.plant.data.qvel[runner.plant.vadr[index]] = limits.max_velocity_rad_secs + 1
+                    expected = "joint_velocity_limit"
+                mujoco.mj_forward(runner.plant.model, runner.plant.data)
+                with patch.object(runner.plant, "step_physics", return_value=np.zeros(29)):
+                    runner.step(0.02)
+                self.assertIn(expected, runner.reason)
+                self.assertEqual(runner.hardware.snapshot()["phase"], "damping")
 
     def test_feedforward_torque_is_a_warning(self):
         from view import report_summary
@@ -849,7 +854,8 @@ class RunnerTest(unittest.TestCase):
         mujoco.mj_forward(runner.plant.model, runner.plant.data)
         self.assertTrue(runner.plant.fallen())
         self.assertEqual(runner.report()["pose"], "standing")
-        self.assertTrue(runner.report()["fall_check"])
+        self.assertFalse(runner.report()["fall_check"])
+        self.assertTrue(runner.report()["checks"]["standing_posture"])
 
     def test_unknown_pose_rejected(self):
         with self.assertRaises(ValueError):
@@ -974,7 +980,8 @@ class RunnerTest(unittest.TestCase):
         runner.plant.data.qpos[2] = 0.1
         mujoco.mj_forward(runner.plant.model, runner.plant.data)
         runner.step(0.01)
-        self.assertEqual(runner.reason, "fall")
+        self.assertIsNotNone(runner.reason)
+        self.assertEqual(runner.hardware.snapshot()["phase"], "damping")
 
     def test_torn_live_line_resyncs_instead_of_raising(self):
         from live import LiveSession

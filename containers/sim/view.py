@@ -557,6 +557,8 @@ def stop_from_report(report):
 
 def describe_startup(startup):
     """Banner text for startup balance and the hand-off to the policy."""
+    if startup and startup["phase"] in ("recovery", "damping"):
+        return "Holosoma recovery active" if startup["phase"] == "recovery" else "Hardware safety: damping"
     if not startup or startup["phase"] == "fault":
         return ""
     elapsed, handoff = startup["elapsed_secs"], startup["handoff_at_secs"]

@@ -351,6 +351,8 @@ class SimBridge(Node):
         self.policy_state_pub.publish(sim_message)
 
     def latch(self, reason, detail=None):
+        if self.abort_reason is not None and reason != self.abort_reason and not self.plant.failed:
+            self.plant.call({"op": "abort", "reason": reason, "detail": detail})
         if self.abort_reason is None:
             self.abort_reason = reason
             self.abort_at = time.monotonic()

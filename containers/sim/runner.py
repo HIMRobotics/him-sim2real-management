@@ -13,11 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import mujoco
 import numpy as np
+from hardware import SimHardware
 from joint_checks import (
+    TORQUE_TARGET_FRACTION,
     JointViolation,
     check_base_motion,
     checked_targets,
-    TORQUE_TARGET_FRACTION,
 )
 from metrics import MotionMetrics
 from plant import PHYSICS_DT, POSES, Plant
@@ -25,8 +26,8 @@ from policy_safety.joint_rules import JointRules
 
 from robot_safety.config import COMMAND_FIELDS, Config, ThrashConfig
 from robot_safety.core import action_error, watchdog_reason
-from robot_safety.thrash import ThrashDetector
 from robot_safety.startup_balance import StartupBalance
+from robot_safety.thrash import ThrashDetector
 
 # Stands in for the operator, who launches the policy with left + B once the
 # robot has settled in startup balance. Balance is still swaying at 2 s.
@@ -38,7 +39,7 @@ class Runner:
     """One simulated session. A failed check latches for the rest of the run."""
 
     def __init__(self, pose=None, scene=None, safety_checks=True, *, record_trace=None,
-                 thrash_config=None, config=None):
+                 thrash_config=None, config=None, control_path="submission"):
         pose = pose or os.environ.get("G1_SIM_POSE", "standing")
         if pose not in POSES:
             raise ValueError("unknown pose")
@@ -50,7 +51,9 @@ class Runner:
         self.config = config = replace(config, thrash=thrash_config)
         self.thrash_detector = ThrashDetector(config.thrash, config.joints, config.robot_timeout)
         self.external_thrash = None
-        self.control_path = "submission"
+        if control_path not in ("submission", "direct"):
+            raise ValueError("unknown control path")
+        self.control_path = control_path
         self.plant = Plant(pose, scene=scene, check_fall=self.safety_checks)
         if config.joints != len(self.plant.joint_names):
             raise ValueError("simulation config must match the G1 joint count")
@@ -90,9 +93,16 @@ class Runner:
         self.metrics = MotionMetrics(self.plant)
         self._live = None
         self._circle = None
-        self.startup = StartupBalance()
-        self.startup.prepare()
+        self.hardware = (SimHardware(self.plant, self.rules.path)
+                         if self.safety_checks and control_path == "submission" else None)
+        self.startup = self.hardware.adapter.startup if self.hardware else StartupBalance()
+        if not self.hardware:
+            self.startup.prepare()
         self._remember()
+
+    @property
+    def uses_hardware(self):
+        return self.hardware is not None and self.control_path == "submission"
 
     def arm(self):
         return self.session_id
@@ -147,13 +157,22 @@ class Runner:
             for key in COMMAND_FIELDS
         }
         self.active = self.submitted
+        if self.uses_hardware:
+            self.hardware.adapter.submit(self.submitted, self.hardware.adapter.clock()
+                                         + min(self.config.action_timeout, 0.2 - 1e-9))
         return None
 
     def step(self, time):
         self._check_deadlines(float(time))
         if self.last_command_time is not None:
             self.last_cycle_time = float(time)
-        if self.active is None:
+        if self.uses_hardware and self.commands:
+            if not self.hardware.ready:
+                self._latch("hardware_arm_rejected", self.hardware.adapter.arm_rejection_reason)
+            self.hardware.step(launch=self.sim_time >= LAUNCH_SECONDS
+                               and self.hardware.adapter.startup.ready)
+            self._sync_hardware()
+        elif self.active is None:
             q, dq = self.plant.q(), self.plant.dq()
             q_des, dq_des, kp, kd, tau = self.plant.damping_command(q, dq)
             self.plant._apply_arrays(q_des, dq_des, kp, kd, tau)
@@ -191,14 +210,18 @@ class Runner:
             ):
                 violation = ("nonfinite_simulation", None)
                 break
+            if self.uses_hardware and self.commands:
+                self.hardware.receive()
+                self._sync_hardware()
             if self.safety_checks:
-                if self.plant.fallen():
+                if self.plant.fallen() and not self.uses_hardware:
                     violation = ("fall", {"height": self.plant.state()["height"]})
                     break
                 self.rules.note_measured_velocity(dq, self.position_warnings)
                 try:
-                    check_base_motion(self.plant.data.qvel[
-                        self.plant.base_vadr + 3:self.plant.base_vadr + 6])
+                    if not self.uses_hardware:
+                        check_base_motion(self.plant.data.qvel[
+                            self.plant.base_vadr + 3:self.plant.base_vadr + 6])
                 except JointViolation as exc:
                     violation = (exc.reason, exc.details)
                     break
@@ -216,7 +239,7 @@ class Runner:
                     violation = (reason, deepcopy(self.thrash_detector.event))
                     break
         self.steps += 1
-        if violation is None and self.plant.fallen():
+        if violation is None and self.plant.fallen() and not self.uses_hardware:
             violation = ("fall", {"height": self.plant.state()["height"]})
         if violation is None and self.reason is None and self.active is not None and self.control_path == "submission":
             q_applied = self.active["q"]
@@ -237,6 +260,9 @@ class Runner:
         submission = self.control_path == "submission"
         thrash_mode = (self.external_thrash or {}).get("mode", self.thrash_detector.config.mode)
         return {
+            "hardware_adapter": self.uses_hardware,
+            "standing_posture": self.uses_hardware,
+            "automatic_recovery": self.uses_hardware,
             "command_protocol": submission,
             "command_limits": submission and self.safety_checks,
             "profile_gains": submission and self.safety_checks,
@@ -250,7 +276,7 @@ class Runner:
             "loop_timeout": self.safety_checks,
             "joint_speed": self.safety_checks,
             "base_angular_speed": self.safety_checks,
-            "fall": self.plant.check_fall,
+            "fall": self.plant.check_fall and not self.uses_hardware,
             "finite_simulation": True,
             "thrash_monitoring": thrash_mode != "off",
             "thrash_enforcement": thrash_mode == "enforce",
@@ -269,6 +295,7 @@ class Runner:
         trace = self._write_trace()
         return {
             **self.startup.status(),
+            "hardware_safety": self.hardware.snapshot() if self.uses_hardware else None,
             "version": 1,
             "status": status,
             "reason": self.reason,
@@ -288,7 +315,7 @@ class Runner:
             "safety_checks": self.safety_checks,
             "control_path": self.control_path,
             "checks": self.checks(),
-            "fall_check": self.plant.check_fall,
+            "fall_check": self.checks()["fall"],
             "trace": trace,
             "motion": self.metrics.report(),
             "thrash": self._thrash_snapshot(),
@@ -310,7 +337,8 @@ class Runner:
         """Startup balance progress for the viewer. Direct control has none."""
         if self.control_path == "direct":
             return None
-        return {"phase": self.startup.phase, "elapsed_secs": round(self.sim_time, 3),
+        phase = self.hardware.snapshot()["phase"] if self.uses_hardware and self.reason else self.startup.phase
+        return {"phase": phase, "elapsed_secs": round(self.sim_time, 3),
                 "launch_secs": LAUNCH_SECONDS, "handoff_at_secs": self.startup.handoff,
                 "blend_secs": self.startup.blend_seconds}
 
@@ -363,6 +391,9 @@ class Runner:
 
     def circle(self, time):
         """One walking step of a flat command. Limit exceedances warn and do not stop."""
+        if self.control_path != "direct":
+            self.startup = StartupBalance()
+            self.startup.prepare()
         self.control_path = "direct"
         try:
             if self._circle is None:
@@ -409,6 +440,10 @@ class Runner:
     def handle(self, request):
         op = request.get("op")
         if op == "arm":
+            if self.uses_hardware and not self.hardware.ready:
+                self._latch("hardware_arm_rejected", self.hardware.adapter.arm_rejection_reason)
+                self.hardware.transport.request_damping()
+                return {"ok": False, "reason": self.reason, "detail": self.detail}
             return {"ok": True, "session_id": self.arm(), "launch_seconds": LAUNCH_SECONDS}
         if op == "feedback":
             return {"ok": True, **self.feedback(request["time"])}
@@ -438,9 +473,7 @@ class Runner:
             self.external_thrash = request.get("thrash")
             return self.report(request.get("lowstate", False))
         if op == "abort":
-            if self.reason is None:
-                self._latch(request["reason"], request.get("detail"))
-            self.active = None
+            self._latch(request["reason"], request.get("detail"))
             return {"ok": True, "reason": self.reason}
         return {"ok": False, "reason": "unknown_op"}
 
@@ -458,7 +491,16 @@ class Runner:
         if reason:
             self._latch(reason, None)
 
+    def _sync_hardware(self):
+        self.startup = self.hardware.adapter.startup
+        self.active = self.hardware.transport.active
+        self.position_warnings.update(self.hardware.adapter.position_warnings)
+        if self.hardware.adapter.abort_reason and self.reason is None:
+            self._latch(self.hardware.adapter.abort_reason, None)
+
     def _latch(self, reason, detail):
+        if self.uses_hardware:
+            self.hardware.abort(reason)
         first = self.reason is None
         if first:
             self.reason = reason

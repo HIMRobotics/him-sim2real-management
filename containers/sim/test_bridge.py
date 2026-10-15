@@ -45,6 +45,22 @@ def load_bridge():
 
 
 class BridgeTests(unittest.TestCase):
+    def test_new_fault_reaches_recovery_after_submission_abort(self):
+        bridge = load_bridge()
+        node = bridge.SimBridge.__new__(bridge.SimBridge)
+        node.abort_reason = "action_timeout"
+        node.abort_at = 1.0
+        node.plant = Mock(failed=False)
+        node.motor_gate = Mock()
+        node.latch("action_timeout")
+        node.plant.call.assert_not_called()
+        node.latch("hardware_controller_double_start")
+        node.plant.call.assert_called_once_with({
+            "op": "abort", "reason": "hardware_controller_double_start", "detail": None,
+        })
+        self.assertEqual(node.abort_reason, "action_timeout")
+        self.assertEqual(node.abort_at, 1.0)
+
     def test_control_publishes_state_after_physics_step(self):
         bridge = load_bridge()
         node = bridge.SimBridge.__new__(bridge.SimBridge)

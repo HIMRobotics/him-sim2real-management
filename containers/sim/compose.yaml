@@ -23,7 +23,10 @@ services:
     volumes:
       - ../..:/workspace
       - ${G1_SIM_OUTPUT:-./output}:/output
+      - ${G1_SIM_HOLOSOMA_ONNX:-/dev/null}:/models/holosoma.onnx:ro
     environment:
+      HIM_HOLOSOMA_ONNX: /models/holosoma.onnx
+      G1_STARTUP_POLICY: ${G1_STARTUP_POLICY:-groot}
       G1_SIM_NETNS: "1"
       G1_SIM_POSE: ${G1_SIM_POSE:-standing}
       G1_SIM_SCENE: ${G1_SIM_SCENE:-}
