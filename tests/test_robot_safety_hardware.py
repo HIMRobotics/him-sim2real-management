@@ -491,6 +491,7 @@ class HardwareAdapterTests(unittest.TestCase):
             SimpleNamespace(
                 motor_state=[SimpleNamespace(q=0.4, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)],
                 mode_machine=5,
+                imu_state=SimpleNamespace(quaternion=(1., 0., 0., 0.), gyroscope=(0., 0., 0.)),
                 wireless_remote=[0] * 40,
             )
         )

@@ -57,20 +57,38 @@ runs the existing recovery Balance path. Recovery continues until a hard stop,
 a real fault, or service shutdown, with no scheduled transition to damping.
 Double Start retains priority and requests damping.
 
-After whole-body ownership, an automatic fault selects zero-velocity Holosoma
-soft reset when the measured body-up axis dotted with world-up is at least
-`cos(30 degrees)`. This uses the normalized IMU quaternion from feedback less
-than 200 ms old. Missing, invalid or stale telemetry does not qualify. The
-30-degree recovery threshold is separate from the startup readiness threshold.
+After policy handoff, an automatic fault selects zero-velocity Holosoma
+soft reset only when the measured body-up axis dotted with world-up is at least
+`cos(30 degrees)` and estimated pelvis height is at least **0.4884 m**.
+`hardware_constants.py` defines the **0.74 m** nominal GR00T base height and
+the **0.66** minimum fraction. Both orientation and joint telemetry must be
+finite and less than 200 ms old. Missing, invalid or stale telemetry selects damping.
+The 30-degree standing threshold is separate from the tighter startup readiness threshold.
 The original fault stays latched and submitted commands remain inhibited.
 `/safety/hardware_status` reports `automatic_soft_reset` while this path is active.
+
+`standing.py` computes vertical pelvis-to-sole distances using both measured
+six-joint leg chains and the normalized pelvis IMU quaternion. Geometry matches
+the bundled G1 model, including the sole contact shapes. The lowest sole defines
+the level-ground height estimate so a raised swing foot does not lower it.
+On the gantry, planting the feet is the operator's responsibility. Software
+does not add a contact or weight-bearing gate. The 66% cutoff is provisional,
+not a physically qualified recovery limit.
+
+Before handoff, startup balance faults damp after ownership rather than entering
+automatic recovery. During startup balance and submitted policy operation,
+fresh feedback failing either standing check immediately clears body commands
+and requests damping, without a persistence timer. Both checks also run before
+and after startup inference. Explicit double F3 can still request recovery before
+handoff, but must pass the same standing checks before releasing stock control.
 
 Double Start and service shutdown still damp. Failed writes, uncertain motion
 release, output-worker stalls and invalid hardware state also retain damping
 because recovery requires a working output path. Recovery needs a loaded policy
 and never takes ownership solely because a fault occurred before arming/release.
-Automatic recovery rechecks orientation each cycle and damps if tilt exceeds
-30 degrees, telemetry expires, or recovery inference/output fails.
+Automatic and double-F3 recovery recheck height and orientation on feedback,
+before inference and before motor output. Recovery damps if height drops below
+0.4884 m, tilt exceeds 30 degrees, telemetry expires, or inference/output fails.
 
 The recovery writer updates its output heartbeat so the stopped submission's
 old timestamp cannot trigger a false stall. Repeated notifications of the
@@ -349,8 +367,9 @@ Double Start latches stop and repeatedly requests whole-body damping. See
 A readiness or arming rejection before control is granted latches a software
 abort without sending damping or arm-release commands. The robot remains under
 its stock controller. Restart the test graph after correcting the issue.
-After whole-body ownership, automatic faults select upright recovery or damping
-as described above. Arm-only faults retain the existing hold/damping behavior.
+After whole-body ownership, startup faults damp. After policy handoff, automatic
+faults select standing recovery or damping as described above. Arm-only faults
+retain the existing hold/damping behavior.
 Explicit double Start requests damping even during the readiness check.
 
 The producer first calls `/safety/motor_gate/ready`. This read-only SDK mode query

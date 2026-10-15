@@ -12,7 +12,11 @@ from pathlib import Path
 
 import numpy as np
 
-from .hardware_constants import LOWER_BODY_INDICES, NUM_JOINTS
+from .hardware_constants import (
+    G1_STANDING_PELVIS_HEIGHT_M,
+    LOWER_BODY_INDICES,
+    NUM_JOINTS,
+)
 
 _MODEL_RELATIVE = Path(".cache") / "groot_balance" / "GR00T-WholeBodyControl-Balance.onnx"
 
@@ -46,7 +50,7 @@ ANG_VEL_SCALE = 0.5
 DOF_POS_SCALE = 1.0
 DOF_VEL_SCALE = 0.05
 ACTION_SCALE = 0.25
-HEIGHT_CMD = np.float32(0.74)
+HEIGHT_CMD = np.float32(G1_STANDING_PELVIS_HEIGHT_M)
 
 DEFAULT_ANGLES = np.array(
     [
