@@ -43,13 +43,22 @@ and feedback freshness. Systemd restarts the process on failure, subject to the
 unit's retry limits. An active service alone does not establish physical stop
 performance.
 
-After whole-body control has taken ownership, automatic faults select Holosoma
-soft reset when fresh IMU orientation is within 30 degrees of vertical. The
+After policy handoff, automatic faults select Holosoma soft reset only when
+fresh IMU orientation is within 30 degrees of vertical and estimated pelvis
+height is at least **0.4884 m**, or **66% of the 0.74 m reference** in
+`hardware_constants.py`. Height comes from measured leg joints and pelvis IMU
+orientation relative to the lowest sole, assuming level ground. Planted feet
+under the gantry are the operator's responsibility, with no software contact gate.
+The height cutoff is provisional and needs physical recovery qualification.
+
+Startup balance faults damp after ownership. Failing either standing check
+during startup balance or policy execution immediately clears commands and
+requests damping. Automatic and explicit double-F3 recovery must satisfy both
+checks continuously, including before release and before motor output. The
 submission stays stopped while recovery runs at zero commanded velocity.
-Double Start always requests damping. Missing or stale orientation, tilt beyond
-30 degrees, unavailable recovery, failed motor output, output-worker stalls and
-service shutdown use damping. Automatic recovery also falls back to damping if
-orientation leaves that range or inference/output fails.
+Double Start always requests damping. Invalid or stale telemetry, unavailable
+recovery, failed motor output, output-worker stalls and service shutdown use
+damping. Recovery also falls back to damping if inference/output fails.
 
 Startup initializes the motion-switcher and optional speech clients, loads the
 balance model, and runs one dummy inference without changing policy history or

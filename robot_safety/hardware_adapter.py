@@ -10,6 +10,7 @@ from threading import Event, Lock, RLock, Thread
 
 from .balance_policy import MODEL_PATH, BalancePolicy
 from .config import Config
+from .control_trace import ControlTrace, default_trace_path
 from .controller import (
     LeftAndBDetector,
     StartDoublePressDetector,
@@ -22,17 +23,20 @@ from .hardware_constants import (
     DAMPING_FSM_ID,
     G1_29_JOINT_NAMES,
     SDK_RPC_SEND_CODE,
+    STANDING_HEIGHT_MIN_M,
+    STANDING_UPRIGHT_MIN,
     UPPER_BODY_INDICES,
 )
 from .hardware_profile import (
+    BODY_REPEAT_SECS,
     DAMPING_RETRY_SECS,
     HARDWARE_BATTERY_TIMEOUT_SECS,
     HARDWARE_FEEDBACK_TIMEOUT_SECS,
-    BODY_REPEAT_SECS,
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
 )
+from .holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
 from .joint_checks import (
     MIN_BATTERY_PERCENT,
     MOTOR_CASING_LIMIT_C,
@@ -47,15 +51,13 @@ from .joint_checks import (
     torque_demand,
 )
 from .joint_diagnostics import JointDeltaDiagnostics
-from .holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
-from .control_trace import ControlTrace, default_trace_path
 from .sdk_latest import poll_deadline
+from .standing import standing_height
 from .startup_balance import StartupBalance
 
 # Python hands the interpreter to a waiting thread only this often. The
 # default 5 ms turns the 2 ms refresh into about 170 Hz.
 INTERPRETER_SWITCH_SECS = 0.001
-SOFT_RESET_UPRIGHT_MIN = math.cos(math.radians(30.0))
 # These stops cannot rely on the recovery output worker or explicitly request damping.
 DAMP_ONLY_REASONS = frozenset({
     "controller_double_start", "hardware_controller_double_start", "controller_stop",
@@ -64,6 +66,7 @@ DAMP_ONLY_REASONS = frozenset({
     "hardware_write_failed", "hardware_release_failed", "hardware_machine_type_changed",
     "hardware_feedback_timeout", "invalid_hardware_feedback", "missing_hardware_imu",
     "low_battery", "invalid_battery_feedback", "battery_feedback_timeout",
+    "hardware_not_standing",
 })
 
 
@@ -191,13 +194,15 @@ class G1HardwareAdapter:
                     self.gyro = tuple(float(value) for value in imu.gyroscope)
                 if self.armed and self.abort_reason is None:
                     self._abort_if_motion_exceeds_limits()
-                    if self.whole_body and self.first_output_secs is not None:
+                    if self.whole_body and self.first_output_secs is not None and not self.abort_reason:
                         self.startup.observe(self.clock(), sample.received_at_secs,
                                              sample.q, sample.dq, sample.quat, sample.gyro)
                         if launch and not stop and not soft and not self.abort_reason:
                             self.startup.authorize(self.clock())
                     elif launch and self.launch_gate and not self.whole_body:
                         self.launch_requested = True
+                if self.walk_stop and not self.hold_failed and not self._upright_for_soft_reset(sample):
+                    self.abort("hardware_not_standing", request_damping=True)
                 with self.stop_lock:
                     self.pose_snapshot = tuple(
                         sample.q[index] for index in UPPER_BODY_INDICES
@@ -406,7 +411,7 @@ class G1HardwareAdapter:
         return False
 
     def _upright_for_soft_reset(self, feedback):
-        """Require fresh orientation within 30 degrees of world-up."""
+        """Require fresh telemetry, 30-degree uprightness and standing height."""
         if feedback is None or not (
             0 <= self.clock() - feedback.received_at_secs < HARDWARE_FEEDBACK_TIMEOUT_SECS
         ):
@@ -422,7 +427,8 @@ class G1HardwareAdapter:
             return False
         # Dot product of the measured body-up axis with world-up, independent of yaw.
         upright = 1 - 2 * (quat[1] ** 2 + quat[2] ** 2) / norm
-        return upright >= SOFT_RESET_UPRIGHT_MIN - 1e-12
+        return (upright >= STANDING_UPRIGHT_MIN - 1e-12
+                and standing_height(feedback.q, quat) >= STANDING_HEIGHT_MIN_M - 1e-12)
 
     def abort(self, reason, request_damping=False):
         """Latch the submission fault and select recovery or damping."""
@@ -431,13 +437,15 @@ class G1HardwareAdapter:
             first_fault = self.abort_reason is None
             if (first_fault and reason not in DAMP_ONLY_REASONS
                     and self.whole_body and self.armed and not self.hold_failed
+                    and (self.policy_launched or reason == "hardware_controller_double_f3")
                     and (self.ownership_taken or self.balance_released)
                     and self.soft_reset_policy is not None
                     and self._upright_for_soft_reset(self.feedback)):
                 self.automatic_soft_reset = reason != "hardware_controller_double_f3"
                 self.walk_stop = True
             soft_reason = "hardware_controller_double_f3"
-            soft_balance = self.walk_stop and not self.hold_failed and (
+            soft_balance = (self.walk_stop and not self.hold_failed
+                            and self._upright_for_soft_reset(self.feedback)) and (
                 reason == soft_reason
                 or (self.abort_reason == soft_reason and reason == "policy_container_exit")
                 or (self.automatic_soft_reset and (
@@ -723,6 +731,8 @@ class G1HardwareAdapter:
             for index, limits in self._monitored_joints():
                 check_measured_velocity(G1_29_JOINT_NAMES[index], limits, self.feedback.dq[index])
             check_base_motion(self.gyro, self.quat)
+            if self.whole_body and not self._upright_for_soft_reset(self.feedback):
+                raise ValueError("hardware_not_standing")
             if self.q_applied is not None:
                 for index, limits in self._monitored_joints():
                     if index not in self.q_applied:
@@ -777,6 +787,8 @@ class G1HardwareAdapter:
         command = self.command
         entries = list(self._monitored_joints())
         if self.whole_body:
+            if not self._upright_for_soft_reset(self.feedback):
+                raise ValueError("hardware_not_standing")
             command = dict(command, kp=[v.kp for _, v in entries],
                            kd=[v.kd for _, v in entries])
             command = self.startup.command(
@@ -784,6 +796,8 @@ class G1HardwareAdapter:
                 dict(q=self.feedback.q, dq=self.feedback.dq, quat=self.quat, gyro=self.gyro),
                 command,
             )
+            if not self._upright_for_soft_reset(self.feedback):
+                raise ValueError("hardware_not_standing")
             self.policy_launched = self.startup.handoff is not None
             self._policy_q = command["q"]
             entries = [(i, replace(v, kp=float(command["kp"][i]), kd=float(command["kd"][i])))
@@ -832,6 +846,10 @@ class G1HardwareAdapter:
                 self.hold_failed = True
                 self._request_stock_damping()
             return
+        if not self._upright_for_soft_reset(self.feedback):
+            self.abort("hardware_not_standing", request_damping=True)
+            self._request_stock_damping()
+            return
         if not self.balance_released:
             self.release_pending = True
             try:
@@ -852,13 +870,12 @@ class G1HardwareAdapter:
             # A latched submission fault must not disable health checks for the
             # replacement controller. Recovery still drives the same motors.
             self.check_health()
-            if self.automatic_soft_reset and not self._upright_for_soft_reset(feedback):
-                raise ValueError("robot is not upright for automatic recovery")
+            if not self._upright_for_soft_reset(feedback):
+                raise ValueError("robot is not standing for recovery")
             if not self.soft_reset_active:
                 policy.reset()
                 self.soft_reset_active = True
-            quat, gyro = ((feedback.quat, feedback.gyro) if self.automatic_soft_reset
-                          else (self.quat, self.gyro))
+            quat, gyro = feedback.quat, feedback.gyro
             q = policy.update(feedback.q, feedback.dq, quat, gyro)
             if any(len(values) != 29 for values in (q, policy.kp, policy.kd)):
                 raise ValueError("invalid balance output shape")
@@ -885,8 +902,8 @@ class G1HardwareAdapter:
             if self.hold_failed or not self.walk_stop:
                 return
             self.check_health()
-            if self.automatic_soft_reset and not self._upright_for_soft_reset(self.feedback):
-                raise ValueError("robot is not upright for automatic recovery")
+            if not self._upright_for_soft_reset(self.feedback):
+                raise ValueError("robot is not standing for recovery")
             if not self.transport.write_body(targets, self.machine_type or 0):
                 raise RuntimeError("balance write failed")
             if self.hold_failed or not self.walk_stop:

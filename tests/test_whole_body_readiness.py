@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from tests.test_startup_hardware import rig, start
+from tests.test_startup_hardware import handoff_policy, rig, start
 
 
 @pytest.mark.parametrize('speed', [0.068722, -0.099266])
@@ -41,6 +41,7 @@ def test_runtime_physical_speed_violation_selects_recovery_or_damping(
     rig, tilt, recovery_available, expect_recovery,
 ):
     start(rig)
+    handoff_policy(rig)
     recovery = rig.adapter.soft_reset_policy
     if not recovery_available:
         rig.adapter.soft_reset_policy = None

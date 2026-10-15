@@ -1,0 +1,70 @@
+"""G1 standing geometry from measured joints and pelvis IMU orientation."""
+
+import math
+
+import numpy as np
+
+from .hardware_constants import NUM_JOINTS
+
+# Fixed transforms from packages/policy_safety/src/policy_safety/robots/g1/g1_robot.xml.
+# LowState IMU is in the pelvis frame. The torso IMU is a separate SDK topic.
+_HIP_FRAME_PITCH = 2 * math.atan2(0.0873386, 0.996179)
+_JOINT_AXES = (1, 0, 2, 1, 1, 0)
+_FOOT_POINTS = np.array([
+    [-0.05, 0.025, -0.03], [-0.05, -0.025, -0.03],
+    [0.12, 0.03, -0.03], [0.12, -0.03, -0.03],
+])
+_FOOT_RADIUS_M = 0.005
+
+
+def _rotation(axis, angle):
+    c, s = math.cos(angle), math.sin(angle)
+    if axis == 0:
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    if axis == 1:
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
+_FIXED_ROTATIONS = (
+    np.eye(3), _rotation(1, -_HIP_FRAME_PITCH), np.eye(3),
+    _rotation(1, _HIP_FRAME_PITCH), np.eye(3), np.eye(3),
+)
+_LEG_OFFSETS = tuple(np.array([
+    [0, side * 0.064452, -0.1027], [0, side * 0.052, -0.030465],
+    [0.025001, 0, -0.12412], [-0.078273, side * 0.0021489, -0.17734],
+    [0, -side * 9.4445e-05, -0.30001], [0, 0, -0.017558],
+]) for side in (1, -1))
+
+
+def pelvis_to_sole_heights(q, quat):
+    """Return vertical pelvis-to-sole distances for left and right feet."""
+    if (len(q) != NUM_JOINTS or len(quat) != 4
+            or not all(math.isfinite(v) for values in (q, quat) for v in values)):
+        raise ValueError("invalid_standing_telemetry")
+    norm = sum(v * v for v in quat)
+    if not 0.9 <= norm <= 1.1:
+        raise ValueError("invalid_standing_quaternion")
+    w, x, y, z = quat
+    # World-up expressed in the pelvis frame, independent of global position.
+    pelvis_up = np.array([
+        2 * (x * z - w * y) / norm,
+        2 * (y * z + w * x) / norm,
+        1 - 2 * (x * x + y * y) / norm,
+    ])
+    heights = []
+    for leg, offsets in enumerate(_LEG_OFFSETS):
+        up = pelvis_up
+        height = 0.0
+        for index, (offset, fixed, axis) in enumerate(zip(offsets, _FIXED_ROTATIONS, _JOINT_AXES)):
+            height -= float(up @ offset)
+            up = _rotation(axis, q[leg * 6 + index]).T @ (fixed.T @ up)
+        heights.append(height - float(np.min(_FOOT_POINTS @ up)) + _FOOT_RADIUS_M)
+    return tuple(heights)
+
+
+def standing_height(q, quat):
+    """Estimate pelvis height above the lowest sole on level ground."""
+    # Planted feet are the gantry operator's responsibility. During walking,
+    # the lowest sole avoids treating a raised swing foot as lost base height.
+    return max(pelvis_to_sole_heights(q, quat))
