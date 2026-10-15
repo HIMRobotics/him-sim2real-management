@@ -12,6 +12,71 @@ from tests.test_startup_hardware import handoff_policy, start
 from tests.test_startup_hardware import rig as rig  # noqa: PLC0414
 
 
+@pytest.mark.parametrize('recovery', [False, True])
+@pytest.mark.parametrize('failure', ['height', 'tilt'])
+def test_standing_is_part_of_health_check(rig, recovery, failure):
+    if failure == 'height':
+        rig.adapter.feedback = replace(rig.adapter.feedback, q=squat_pose())
+    else:
+        angle = math.radians(31) / 2
+        rig.adapter.feedback = replace(
+            rig.adapter.feedback, quat=(math.cos(angle), 0, math.sin(angle), 0))
+    with pytest.raises(ValueError, match='hardware_not_standing'):
+        rig.adapter.check_health(recovery=recovery)
+
+
+def test_posture_failure_takes_priority_over_measured_overload(rig):
+    start(rig)
+    handoff_policy(rig)
+    rig.adapter.feedback = replace(rig.adapter.feedback, q=squat_pose(), tau_est=(101.,) * 29)
+    rig.adapter._abort_if_motion_exceeds_limits()
+    assert rig.adapter.abort_reason == 'hardware_not_standing'
+    rig.adapter.stop_once()
+    rig.adapter.soft_reset_policy.update.assert_not_called()
+    assert rig.transport.stop_calls == 1
+
+
+@pytest.mark.parametrize('launched', [False, True])
+@pytest.mark.parametrize('sign', [-1, 1])
+def test_sustained_measured_overload_recovers_only_after_handoff(rig, launched, sign):
+    start(rig)
+    if launched:
+        handoff_policy(rig)
+    limits = rig.adapter.profile.legs[4]
+    policy = rig.adapter.soft_reset_policy
+    policy.kp[4] = 400
+    policy.update.return_value = [100.] * 29
+    rig.transport.write_body.reset_mock()
+    for _ in range(5):
+        rig.now += 0.02
+        rig.adapter.receive_state(SimpleNamespace(
+            motor_state=[SimpleNamespace(
+                q=0, dq=0, temperature=(25, 25),
+                tau_est=sign * (limits.max_torque_nm + 1) if i == 4 else 0) for i in range(29)],
+            imu_state=SimpleNamespace(quaternion=(1, 0, 0, 0), gyroscope=(0, 0, 0)),
+            mode_machine=5, wireless_remote=[0] * 40))
+        rig.adapter.step()
+        rig.adapter.stop_once()
+    assert 'joint_torque_limit' in rig.adapter.abort_reason
+    assert rig.adapter.automatic_soft_reset is launched
+    if launched:
+        assert rig.transport.stop_calls == 0
+        assert rig.transport.write_body.call_count >= 5
+        for call in rig.transport.write_body.call_args_list:
+            target = call.args[0][4]
+            assert abs(target['q'] * target['kp'] + target['tau']) <= 0.9 * limits.max_torque_nm + 1e-9
+        overload = rig.adapter.position_warnings['left_ankle_pitch']['limits'][0]
+        assert overload['torque_kind'] == 'measured recovery torque'
+        assert overload['value'] == limits.max_torque_nm + 1
+        rig.adapter.abort('hardware_controller_double_start', request_damping=True)
+        rig.adapter.stop_once()
+        assert rig.transport.stop_calls == 1
+    else:
+        policy.update.assert_not_called()
+        rig.transport.write_body.assert_not_called()
+        assert rig.transport.stop_calls == 1
+
+
 @pytest.mark.parametrize('offset, allowed', [(-1e-6, False), (0, True), (1e-6, True)])
 def test_height_boundary_controls_policy_recovery(rig, offset, allowed):
     start(rig)

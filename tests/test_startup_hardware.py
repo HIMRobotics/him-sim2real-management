@@ -493,7 +493,7 @@ def test_missing_recovery_policy_falls_back_to_damping(rig):
     assert rig.transport.stop_calls == 1
 
 
-@pytest.mark.parametrize('fault', ['battery', 'battery_stale', 'temperature', 'torque'])
+@pytest.mark.parametrize('fault', ['battery', 'battery_stale', 'temperature', 'nonfinite_torque'])
 @pytest.mark.parametrize('recovering', [False, True])
 def test_health_faults_never_drive_recovery(rig, fault, recovering):
     start(rig)
@@ -510,7 +510,7 @@ def test_health_faults_never_drive_recovery(rig, fault, recovering):
     elif fault == 'temperature':
         rig.adapter.feedback = replace(rig.adapter.feedback, temperature=((150, 150),) * 29)
     else:
-        rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=(10000.,) * 29)
+        rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=(float('nan'),) * 29)
     if not recovering:
         rig.adapter.abort('thrash_detected')
     rig.adapter.step()

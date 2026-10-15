@@ -56,6 +56,10 @@ during startup balance or policy execution immediately clears commands and
 requests damping. Automatic and explicit double-F3 recovery must satisfy both
 checks continuously, including before release and before motor output. The
 submission stays stopped while recovery runs at zero commanded velocity.
+Height and tilt are part of the shared health check. A measured torque overload
+stops the submitted policy but does not by itself make the robot unrecoverable.
+During recovery, finite measured overloads are recorded while commands remain
+torque-limited. Recovery continues only while posture and other health checks pass.
 Double Start always requests damping. Invalid or stale telemetry, unavailable
 recovery, failed motor output, output-worker stalls and service shutdown use
 damping. Recovery also falls back to damping if inference/output fails.

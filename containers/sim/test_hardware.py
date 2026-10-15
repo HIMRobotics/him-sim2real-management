@@ -19,6 +19,41 @@ from scenarios import SafetyScenario
 from test_runner import hold
 
 
+def test_measured_overload_allows_recovery_output_in_sim(tmp_path, monkeypatch):
+    from hardware import SimHardware
+
+    receive = SimHardware.receive
+    injected_at = []
+    overload_writes = []
+
+    def overloaded_receive(hardware, launch=False):
+        adapter = hardware.adapter
+        handoff = adapter.startup.handoff
+        now = adapter.clock()
+        if handoff is not None and now >= handoff + 1.5 and not injected_at:
+            injected_at.append(now)
+        if injected_at and now - injected_at[0] < 0.2:
+            # Inject telemetry only. Keep the MuJoCo dynamics unchanged.
+            actuator = hardware.plant.actuators[4]
+            original = hardware.plant.data.actuator_force[actuator]
+            hardware.plant.data.actuator_force[actuator] = adapter.profile.legs[4].max_torque_nm + 1
+            try:
+                receive(hardware, launch)
+                overload_writes.append(hardware.recovery_writes)
+            finally:
+                hardware.plant.data.actuator_force[actuator] = original
+        else:
+            receive(hardware, launch)
+
+    monkeypatch.setattr(SimHardware, 'receive', overloaded_receive)
+    report = run('holosoma', tmp_path, seconds=3)
+    assert injected_at
+    assert max(overload_writes) > 0
+    assert 'joint_torque_limit' in report['reason']
+    assert report['hardware_safety']['phase'] == 'recovery'
+    assert report['hardware_safety']['damping_at_secs'] is None
+
+
 @pytest.mark.parametrize("case,tilt,phase", [
     ("recovery_tilt", 20, "recovery"),
     ("policy_tilt", 35, "damping"),

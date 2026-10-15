@@ -94,7 +94,18 @@ The recovery writer updates its output heartbeat so the stopped submission's
 old timestamp cannot trigger a false stall. Repeated notifications of the
 latched fault and the policy client's normal exit cannot convert recovery into
 damping. A new fault during recovery still overrides it. The recovery helper
-retains its trained gains, but its targets are clipped to the physical joint and torque envelope. Battery freshness, charge, motor temperatures and measured torque are checked before inference and again before motor output. A health failure enters damping.
+retains its trained gains, but its targets are clipped to the physical joint and
+torque envelope. The shared health check includes standing height, tilt, telemetry
+freshness, battery charge and motor temperatures. It runs on feedback, before
+inference and before motor output. A failure of those checks enters damping.
+
+A finite measured torque overload stops the submitted policy and selects recovery
+when the health and standing checks permit it. Recovery records measured overloads
+as `measured recovery torque` diagnostics instead of rejecting its first command
+or damping solely because the overload persists. There is no torque-only grace
+timer. Nonfinite torque feedback still fails the health check. Recovery command
+targets retain the 90% predicted torque budget and the hard command checks.
+Gantry startup overloads continue to damp without automatic recovery.
 
 ### Initial takeover and readiness
 
@@ -155,8 +166,10 @@ command budget. The hard profile limits are unchanged.
 The limiter applies to startup Balance, handoff and submitted whole-body output.
 Checked simulation applies the same projection. `torque_target_clipping` in
 joint diagnostics records requested effort, the target correction and its count.
-Normal proposals inside the budget are unchanged. Measured torque and effort
-recomputed from the last written command still fault at the original ceiling.
+Normal proposals inside the budget are unchanged. During startup and submitted
+policy control, measured torque and effort recomputed from the last written
+command still fault at the original ceiling. That fault stops the submission,
+with recovery eligibility evaluated separately through the health pipeline.
 Nonfinite inputs, excessive feedforward torque and infeasible combinations of
 position and torque constraints still fault on hardware.
 
