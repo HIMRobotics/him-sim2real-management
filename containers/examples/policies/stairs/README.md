@@ -9,7 +9,7 @@ The ONNX graph and weights were retained from this repository's
 These weights are temporary. A yaw command of 0 still turns: walking forward at
 0.5 m/s yaws about +0.08 rad/s. A yaw command of about −0.127 rad/s cancels that
 turn in this sim. The neural contract is described in the
-[offline screening guide](../../../packages/policy_safety/README.md#what-the-first-adapter-tests).
+[offline screening guide](../../../../packages/policy_safety/README.md#what-the-first-adapter-tests).
 
 The graph uses ONNX IR 9 and opset 17 for the Python 3.8 ARM64 container's
 ONNX Runtime 1.16.3. The original IR 10 export was resaved after removing its
@@ -17,13 +17,13 @@ ONNX Runtime 1.16.3. The original IR 10 export was resaved after removing its
 tensor values, and the external weights are unchanged.
 
 The shared client and scripted stair controller live in
-[containers/examples](../../../containers/examples/README.md). Run this bundle
+[containers/examples](../../README.md). Run this bundle
 with `./submit.sh --mode sim --example stairs`. This directory contains no launch code.
 
 From the repository root, prepare an offline screening bundle with:
 
 ```bash
-policy-safety prepare-g1 --submission examples/policies/stairs --output /tmp/g1-screening-bundle
+policy-safety prepare-g1 --submission containers/examples/policies/stairs --output /tmp/g1-screening-bundle
 ```
 
 This legacy 99-input bundle is used only by `--example stairs` and legacy

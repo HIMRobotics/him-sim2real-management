@@ -9,7 +9,7 @@ import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL = ROOT / "examples/policies/walker/walker.onnx"
+DEFAULT_MODEL = ROOT / "containers/examples/policies/walker/walker.onnx"
 sys.path.insert(0, str(ROOT / "containers/examples"))
 from command import load_schedule
 
@@ -48,7 +48,7 @@ class CircleWalker:
         self.kp = np.array([joint["kp"] for joint in joints], dtype=float)
         self.kd = np.array([joint["kd"] for joint in joints], dtype=float)
         command_path = os.environ.get("G1_SIM_COMMAND") or (
-            ROOT / "examples/commands/walker/circle.yaml"
+            ROOT / "containers/examples/commands/walker/circle.yaml"
         )
         self.schedule = load_schedule(command_path)
         self.started = False

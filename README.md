@@ -118,14 +118,19 @@ for installation checks and arm-raise verification.
 hardware. Simulation delegates to `sim.sh`. Hardware launch behavior stays in
 the existing `setup.sh` supervisor and standing safety gate.
 
+New submissions start from [containers/template](containers/template/README.md),
+which builds `submission.tar` for `containers/upload/`. The contract is in
+[containers/INSTRUCTIONS.md](containers/INSTRUCTIONS.md). The reference
+policies below live in [containers/examples](containers/examples/README.md).
+
 ```bash
 ./submit.sh --mode sim --example walker --local --seconds 10 \
-  --command examples/commands/walker/forward.yaml --view
+  --command containers/examples/commands/walker/forward.yaml --view
 ```
 
 The walker is NVIDIA's official Decoupled WBC Walk/Balance pair. See
-[its contract and provenance](examples/policies/walker/README.md).
-`examples/commands/walker/run.py` exposes editable `forward_velocity`,
+[its contract and provenance](containers/examples/policies/walker/README.md).
+`containers/examples/commands/walker/run.py` exposes editable `forward_velocity`,
 `sideways_velocity`, and `yaw_rate` variables.
 
 For an explicitly intended hardware session, the equivalent entry point is

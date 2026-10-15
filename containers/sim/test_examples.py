@@ -24,7 +24,7 @@ sys.path[:0] = [
 from controllers import ExamplePolicy
 from local import run
 from plant import Plant
-from prepare import prepare
+from prepare import STANCE, prepare
 from runner import Runner
 from view import export_replay
 
@@ -42,11 +42,8 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual(demands, [])
 
     def test_walker_makes_forward_progress_with_checks_disabled(self):
-        # Allow Balance to settle for five seconds before the walking window.
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "robot_safety.startup_balance.StartupBalance.min_seconds", 5.0
-        ):
-            report = run("walker", tmp, 15, safety_checks=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run("walker", tmp, 10, safety_checks=False)
         self.assertEqual(report["status"], "completed")
         motion = report["motion"]
         self.assertGreater(
@@ -62,7 +59,7 @@ class ExampleTests(unittest.TestCase):
             root = Path(tmp)
             off = run("stairs", root / "off", 20, safety_checks=False)
             self.assertEqual(off["status"], "completed")
-            self.assertEqual(off["commands"], 1000)
+            self.assertEqual(off["commands"], 1250)
             self.assertFalse(off["motion"]["fell"])
             self.assertEqual(off["motion"]["stairs"]["distinct_treads"], 3)
             self.assertTrue(off["motion"]["stairs"]["climbed_stairs"])
@@ -86,7 +83,7 @@ class ExampleTests(unittest.TestCase):
                 "HIM_BALANCE_ONNX",
                 str(
                     ROOT
-                    / "examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"
+                    / "containers/examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"
                 ),
             )
         )
@@ -94,7 +91,7 @@ class ExampleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             off = run("balance", Path(tmp) / "off", 10, safety_checks=False)
             self.assertEqual(off["status"], "completed")
-            self.assertEqual(off["commands"], 500)
+            self.assertEqual(off["commands"], 750)
             self.assertFalse(off["motion"]["fell"])
             self.assertTrue(off["motion"]["upright_at_end"])
             on = run("balance", Path(tmp) / "on", 0.2, safety_checks=True)
@@ -168,11 +165,9 @@ class ExampleTests(unittest.TestCase):
         ]
         self.assertLessEqual(min(distances), 1e-6)
         self.assertGreater(min(distances), -0.005)
-        np.testing.assert_allclose(
-            plant.q()[:6], [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0], atol=1e-6
-        )
+        np.testing.assert_allclose(plant.q(), STANCE, atol=1e-6)
         stock = Plant(check_fall=False)
-        self.assertAlmostEqual(float(stock.data.qpos[2]), 0.79)
+        self.assertAlmostEqual(float(stock.data.qpos[2]), 0.792, places=3)
 
     def test_local_preparation_skips_container_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,7 +222,7 @@ class ExampleTests(unittest.TestCase):
                     "--example",
                     "walker",
                     "--command",
-                    str(ROOT / "examples/commands/walker/forward_stop.yaml"),
+                    str(ROOT / "containers/examples/commands/walker/forward_stop.yaml"),
                     "--local",
                     "--seconds",
                     "0.04",

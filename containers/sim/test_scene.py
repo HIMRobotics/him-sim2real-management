@@ -32,7 +32,7 @@ class SceneTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="g1 scene ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.scene = self.root / "scene.xml"
         shutil.copy2(ROBOT / "g1_robot.xml", self.root / "g1_robot.xml")
         (self.root / "third_party").symlink_to(
@@ -82,6 +82,34 @@ class SceneTest(unittest.TestCase):
         self.scene.write_text("<mujoco/>")
         with self.assertRaises((KeyError, ValueError)):
             Plant(scene=self.scene)
+
+    def test_standing_keyframe_is_set_on_the_floor_with_the_visible_sole(self):
+        import mujoco
+
+        robot_path = self.root / "g1_robot.xml"
+        authored = ET.parse(robot_path)
+        for height in ("0.76", "0.83"):
+            with self.subTest(height=height):
+                robot = ET.parse(robot_path)
+                key = robot.find("keyframe/key")
+                values = authored.find("keyframe/key").get("qpos").split()
+                key.set("qpos", " ".join(values[:2] + [height] + values[3:]))
+                robot.write(robot_path)
+                plant = Plant(scene=self.scene)
+                m, d = plant.model, plant.data
+                gaps = [mujoco.mj_geomDistance(m, d, g, plant.floor, 1.0, None)
+                        for g in plant.robot_geoms if m.geom_contype[g]]
+                self.assertAlmostEqual(min(gaps), 0.0, places=5)
+                soles = []
+                for side in ("left", "right"):
+                    geom = next(g for g in range(m.ngeom)
+                                if m.geom_bodyid[g] == m.body(f"{side}_ankle_roll_link").id
+                                and m.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH)
+                    mesh = m.geom_dataid[geom]
+                    start, count = m.mesh_vertadr[mesh], m.mesh_vertnum[mesh]
+                    vertices = m.mesh_vert[start:start + count] @ d.geom_xmat[geom].reshape(3, 3).T
+                    soles.append((vertices + d.geom_xpos[geom])[:, 2].min())
+                self.assertLess(max(abs(z) for z in soles), 0.001)
 
     def test_counterfactual_requires_named_floor(self):
         obstacle = self.root / "obstacles.xml"

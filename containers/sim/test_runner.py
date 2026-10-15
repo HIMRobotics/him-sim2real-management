@@ -3,6 +3,7 @@
 import math
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -20,7 +21,7 @@ sys.path[:0] = [
 ]
 
 from plant import POSES, Plant
-from runner import Runner
+from runner import LAUNCH_SECONDS, Runner
 
 from robot_safety.config import Config, ThrashConfig
 from robot_safety.core import Supervisor
@@ -98,6 +99,94 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(len(runner.trace_thrash), 1)
             self.assertEqual(runner.trace_thrash[0]["metrics"], {})
             runner.report()
+
+    def test_startup_progress_reaches_live_and_replay_viewers(self):
+        import json
+        import os
+
+        from live import LiveSession
+        from view import export_replay
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live, trace = root / "live.jsonl", root / "trace.npz"
+            with patch.dict(os.environ, {"G1_SIM_LIVE": str(live), "G1_SIM_TRACE": str(trace)}):
+                runner = Runner(record_trace=True)
+                for step in range(3):
+                    state = runner.feedback(step * 0.02)
+                    runner.command(hold(runner, state, step), step * 0.02)
+                    runner.step(step * 0.02)
+                runner.report()
+            samples = [json.loads(line) for line in live.read_text().splitlines()]
+            last = samples[-1]["startup"]
+            self.assertEqual(last["launch_secs"], LAUNCH_SECONDS)
+            self.assertAlmostEqual(last["elapsed_secs"], 0.06)
+            self.assertIsNone(last["handoff_at_secs"])
+            session = LiveSession(root, live, root / "start", root / "report.json", "standing", None)
+            frames = session.snapshot(0)["frames"]
+            self.assertEqual(frames[-1]["startup"],
+                             "Startup balance: 0.1 s in, 4.9 s left before the policy takes over")
+            motion = json.loads((export_replay(trace, root / "view") / "motion.json").read_text())
+            self.assertEqual(motion["startup"], [frame["startup"] for frame in frames])
+
+    def test_live_page_is_never_cached_and_names_its_run(self):
+        import json
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        import live
+        from view import export_idle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = json.loads((export_idle(root / "view") / "motion.json").read_text())["page_id"]
+            second = json.loads((export_idle(root / "view") / "motion.json").read_text())["page_id"]
+            self.assertNotEqual(first, second)
+            session = live.LiveSession(root / "view", root / "live.jsonl", root / "start",
+                                       root / "report.json", "standing", None)
+            servers = []
+
+            class Recorded(ThreadingHTTPServer):
+                def __init__(self, *args):
+                    super().__init__(*args)
+                    servers.append(self)
+
+            with patch.object(live, "ThreadingHTTPServer", Recorded):
+                threading.Thread(target=live.serve, args=(session, "127.0.0.1", 0), daemon=True).start()
+                for _ in range(200):
+                    if servers:
+                        break
+                    time.sleep(0.01)
+            server = servers[0]
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            for path in ("/", "/frames?after=0"):
+                with urllib.request.urlopen(base + path) as response:
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    body = response.read()
+            self.assertEqual(json.loads(body)["page_id"], second)
+            third = json.loads((export_idle(root / "view") / "motion.json").read_text())["page_id"]
+            with urllib.request.urlopen(base + "/frames?after=0") as response:
+                self.assertEqual(json.loads(response.read())["page_id"], third)
+
+    def test_viewer_describes_startup_handoff_and_policy_control(self):
+        from view import describe_startup
+
+        base = {"phase": "balancing", "launch_secs": 5.0, "handoff_at_secs": None, "blend_secs": 1.0}
+        cases = (
+            (dict(base, elapsed_secs=2.0), "Startup balance: 2.0 s in, 3.0 s left before the policy takes over"),
+            (dict(base, elapsed_secs=5.4), "Startup balance: 5.4 s in, waiting for the robot to settle"),
+            (dict(base, phase="handoff", elapsed_secs=5.5, handoff_at_secs=5.1),
+             "Handing over to the policy: 0.4 of 1.0 s"),
+            (dict(base, phase="running", elapsed_secs=7.0, handoff_at_secs=5.1), "Policy in control since 5.1 s"),
+            (dict(base, phase="fault", elapsed_secs=1.0), ""),
+            (None, ""),
+        )
+        for startup, text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(describe_startup(startup), text)
 
     def test_viewer_describes_velocity_torque_thrash_and_timeout_stops(self):
         from view import describe_stop, report_summary
@@ -302,13 +391,30 @@ class RunnerTest(unittest.TestCase):
         self.assertGreater(runner.plant.state()["height"], 0.5)
         self.assertFalse(report["hardware_authorization"])
 
+    def test_policy_launches_only_after_the_operator_period(self):
+        runner = Runner()
+        q = runner.plant.q().tolist()
+        for step in range(round((LAUNCH_SECONDS + 1) / 0.02)):
+            time = step * 0.02
+            state = runner.feedback(time)
+            runner.command({
+                "session_id": runner.session_id, "sequence": step,
+                "observation_id": state["observation_id"], "q": q, "dq": [0.0] * 29,
+                "kp": [40.0] * 29, "kd": [2.0] * 29, "tau": [0.0] * 29,
+            }, time)
+            runner.step(time)
+            if runner.sim_time < LAUNCH_SECONDS:
+                self.assertIsNone(runner.startup.handoff)
+        self.assertIsNotNone(runner.startup.handoff)
+        self.assertGreaterEqual(runner.startup.handoff, LAUNCH_SECONDS)
+
     def test_circle_walks_without_falling(self):
-        model = ROOT / "examples/policies/walker/walker.onnx"
+        model = ROOT / "containers/examples/policies/walker/walker.onnx"
         if not model.is_file():
             self.skipTest("cached walker weights are not on this machine")
         runner = Runner()
         start = None
-        for step in range(250):
+        for step in range(round((LAUNCH_SECONDS + 3) / 0.02)):
             result = runner.circle(step * 0.02)
             self.assertIsNone(result.get("reason"))
             position = runner.plant.state()["position"]
@@ -491,6 +597,14 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(feedforward["value"], 89.0)
         self.assertEqual(feedforward["limit"], 88.0)
         self.assertIn("Run continued", report_summary(report))
+
+    def test_summary_flags_a_stop_during_a_host_stall(self):
+        from view import report_summary
+
+        report = {"status": "violation", "reason": "observation_timeout", "stop_time_seconds": 0.16}
+        self.assertNotIn("Inconclusive", report_summary(report))
+        report["host_stall"] = {"longest_gap_secs": 0.42}
+        self.assertIn("Inconclusive: the simulator was stalled for 0.42 s", report_summary(report))
 
     def test_initial_pose_gap_does_not_reject_a_command(self):
         runner = Runner()
@@ -808,15 +922,15 @@ class RunnerTest(unittest.TestCase):
     def test_example_command_files(self):
         from circle import load_command
 
-        stand = load_command(ROOT / "examples/commands/walker/stand.yaml")
-        circle = load_command(ROOT / "examples/commands/walker/circle.yaml")
+        stand = load_command(ROOT / "containers/examples/commands/walker/stand.yaml")
+        circle = load_command(ROOT / "containers/examples/commands/walker/circle.yaml")
         self.assertTrue(np.allclose(stand, [0.0, 0.0, 0.0]))
         self.assertTrue(np.allclose(circle, [0.45, 0.0, 0.9]))
 
     def test_forward_stop_command_holds_then_zeros(self):
         from circle import load_schedule
 
-        schedule = load_schedule(ROOT / "examples/commands/walker/forward_stop.yaml")
+        schedule = load_schedule(ROOT / "containers/examples/commands/walker/forward_stop.yaml")
         self.assertTrue(np.allclose(schedule.at(0.0), [0.50, 0.0, 0.0]))
         self.assertTrue(np.allclose(schedule.at(1.99), [0.50, 0.0, 0.0]))
         for step, command in enumerate((
@@ -830,7 +944,7 @@ class RunnerTest(unittest.TestCase):
         self.assertTrue(np.allclose(schedule.at(7.0), [0.0, 0.0, 0.0]))
 
     def test_circle_battery_uses_the_walker_gait(self):
-        model = ROOT / "examples/policies/walker/walker.onnx"
+        model = ROOT / "containers/examples/policies/walker/walker.onnx"
         if not model.is_file():
             self.skipTest("cached walker weights are not on this machine")
         from battery import run_case

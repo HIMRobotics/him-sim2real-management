@@ -157,13 +157,11 @@ class Plant:
             }[pose]
         data.ctrl[self.actuators] = data.qpos[self.qadr]
         mujoco.mj_forward(self.model, data)
-        # The bundled stand keyframe already meets the floor and is left as
-        # authored, including a foot already resting on a platform. A rest
-        # pose with no support is lowered until it touches, so the first
-        # step is not a drop. Counterfactuals keep a 1 mm gap above
-        # safety_floor. Placed poses reject more than 5 mm of penetration.
-        unsupported = self.floor >= 0 and not self._support_distances(data)
-        if pose != "standing" or unsupported:
+        # A standing pose is raised or lowered onto its support, the floor or
+        # a platform, so the first step is neither a drop nor a pop out of
+        # the ground. Counterfactuals keep a 1 mm gap above safety_floor.
+        # Placed poses reject more than 5 mm of penetration.
+        if pose != "standing" or self.floor >= 0:
             self._place_on_floor(
                 data,
                 clearance=0.0 if pose == "standing" else 0.001,
@@ -193,7 +191,7 @@ class Plant:
         return distances
 
     def _place_on_floor(self, data, clearance=0.001, floor_only=True):
-        """Lower the pelvis until the robot meets the floor or a platform."""
+        """Move the pelvis until the robot just meets the floor or a platform."""
         for _ in range(500):
             mujoco.mj_forward(self.model, data)
             distances = self._support_distances(data, floor_only=floor_only)

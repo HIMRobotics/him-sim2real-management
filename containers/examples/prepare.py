@@ -14,8 +14,15 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from robot_safety.balance_policy import DEFAULT_JOINT_POSITIONS, LEG_KD, LEG_KP
+from robot_safety.balance_policy import LEG_KD, LEG_KP
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES
+
+# Every example starts in GR00T startup balance. This is the crouch it settles
+# into on flat ground on this model, mirrored left to right. Started from the
+# policies' own defaults, the knees sag 3 cm and the robot sways back a step
+# and turns.
+STANCE_LEFT_LEG = [-0.412, 0.044, 0.015, 0.741, -0.325, -0.007]
+STANCE = STANCE_LEFT_LEG + [-0.412, -0.044, -0.015, 0.741, -0.325, 0.007] + [0.0] * 17
 
 # Simulation presets reuse the existing controller and model bundle.
 SCENARIOS = {
@@ -52,13 +59,12 @@ def prepare(name, destination=None, *, container=True):
 
         copy_file(holosoma_weights(), project / "holosoma.onnx")
         policy = HolosomaLocomotionPolicy(project / "holosoma.onnx")
-        defaults = policy.default_angles.tolist()
         gains = list(zip(policy.kp.tolist(), policy.kd.tolist()))
     elif name == "balance":
         model = Path(
             os.environ.get(
                 "HIM_BALANCE_ONNX",
-                str(ROOT / "examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"),
+                str(ROOT / "containers/examples/policies/balance/GR00T-WholeBodyControl-Balance.onnx"),
             )
         )
         if not model.is_file():
@@ -66,10 +72,9 @@ def prepare(name, destination=None, *, container=True):
                 "Balance weights missing. Set HIM_BALANCE_ONNX to GR00T-WholeBodyControl-Balance.onnx."
             )
         copy_file(model, project / "balance.onnx")
-        defaults = DEFAULT_JOINT_POSITIONS.tolist()
         gains = list(zip(list(LEG_KP) + [40.] * 14, list(LEG_KD) + [1.] * 14))
     else:
-        bundle = ROOT / "examples/policies" / ("stairs" if name == "stairs" else "walker")
+        bundle = ROOT / "containers/examples/policies" / ("stairs" if name == "stairs" else "walker")
         model_names = (
             ("walker.onnx", "walker.onnx.data") if name == "stairs"
             else ("walker.onnx", "balance.onnx", "LICENSE", "provenance.json")
@@ -114,13 +119,14 @@ def prepare(name, destination=None, *, container=True):
     copy_file(robot / "THIRD_PARTY_NOTICES.md", env / "THIRD_PARTY_NOTICES.md")
     tree = ET.parse(robot / "g1_robot.xml")
     key = tree.find("keyframe/key[@name='stand']")
-    start = (
-        [0.002739233746429086, -0.004604265724722594, 0.79, 1, 0, 0, 0]
-        if name == "stairs"
-        else [0, 0, 0.80 if name == "walker" else 0.79, 1, 0, 0, 0]
-    )
-    key.set("qpos", " ".join(map(str, start + defaults)))
-    key.set("ctrl", " ".join(map(str, defaults)))
+    # Start above the support. The plant lowers the robot until the feet touch.
+    # The stair phases are scripted from the policy's own default pose.
+    if name == "stairs":
+        start, pose = [0.002739233746429086, -0.004604265724722594, 0.85, 1, 0, 0, 0], defaults
+    else:
+        start, pose = [0, 0, 0.85, 1, 0, 0, 0], STANCE
+    key.set("qpos", " ".join(map(str, start + pose)))
+    key.set("ctrl", " ".join(map(str, pose)))
     tree.write(env / "g1_robot.xml")
     if name == "stairs":
         copy_file(ROOT / "containers/examples/stairs.xml", env / "scene.xml")

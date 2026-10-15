@@ -11,7 +11,7 @@ sideways_velocity = 0.0
 yaw_rate = 0.0  # rad/s
 
 if __name__ == "__main__":
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     env = dict(
         os.environ,
         G1_TASK_COMMAND=json.dumps([forward_velocity, sideways_velocity, yaw_rate]),

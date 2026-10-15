@@ -12,7 +12,7 @@ from policy_safety.adapter import NvidiaWalker, PolicyViolation
 from policy_safety.bundle import prepare_g1
 from policy_safety.simulation import Simulation
 
-BUNDLE = Path(__file__).resolve().parents[3] / "examples/policies/walker"
+BUNDLE = Path(__file__).resolve().parents[3] / "containers/examples/policies/walker"
 
 
 def robot_config():

@@ -32,14 +32,20 @@ run_session() {
       *) echo "Compose --scene must be inside this repository so it can be mounted." >&2; return 2 ;;
     esac
   fi
+  if [[ -n "${G1_JOINT_PROFILE:-}" && "$G1_JOINT_PROFILE" != /workspace/* ]]; then
+    case "$G1_JOINT_PROFILE" in
+      "$repo_dir"/*) export G1_JOINT_PROFILE="/workspace/${G1_JOINT_PROFILE#"$repo_dir"/}" ;;
+      *) echo "Compose G1_JOINT_PROFILE must be inside this repository so it can be mounted." >&2; return 2 ;;
+    esac
+  fi
   [[ "$view" -eq 0 ]] || export G1_SIM_LIVE=/output/live.jsonl
   stop_sim
   mkdir -p "$out_dir"
   rm -f "$out_dir/ready" "$out_dir/report.json" "$out_dir/trace.npz" "$out_dir/live.jsonl"
   echo "Starting $pose (Compose, loopback-only net, no eth0)."
   "${compose[@]}" up -d net sim || return 2
-  for _ in $(seq 1 300); do
-    [[ -f "$out_dir/ready" ]] && break
+  for _ in $(seq 1 600); do
+    [[ -f "$out_dir/ready" || -f "$out_dir/report.json" ]] && break
     if [[ -n "$live_pid" ]] && ! kill -0 "$live_pid" 2>/dev/null; then
       echo "Viewer exited before the sim was ready." >&2
       cat "$out_dir/live-view.log" >&2 || true

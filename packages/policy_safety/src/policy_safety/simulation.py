@@ -190,17 +190,17 @@ class Simulation:
         elif pose != "standing":
             raise ValueError("unknown pose")
         d.ctrl[self.actuators] = d.qpos[self.qadr]
-        # Find first ground contact by lowering only during initialization.
-        if pose != "standing":
-            for _ in range(500):
-                mujoco.mj_forward(self.model, d)
-                distances = [c.dist for c in d.contact if self.floor in c.geom]
-                if distances:
-                    d.qpos[2] += -min(distances) + 0.001
-                    break
-                d.qpos[2] -= 0.005
-            else:
-                raise ValueError("could not place counterfactual on the ground")
+        # Every pose starts touching the floor, standing with no gap and
+        # counterfactuals 1 mm above it, so the first step is not a drop.
+        for _ in range(500):
+            mujoco.mj_forward(self.model, d)
+            distances = [c.dist for c in d.contact if self.floor in c.geom]
+            if distances:
+                d.qpos[2] += -min(distances) + (0.0 if pose == "standing" else 0.001)
+                break
+            d.qpos[2] -= 0.005
+        else:
+            raise ValueError(f"could not place the {pose} pose on the ground")
         mujoco.mj_forward(self.model, d)
         if any(c.dist < -0.005 for c in d.contact):
             raise ValueError(f"invalid {pose} pose: substantial initial penetration")

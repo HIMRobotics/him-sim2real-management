@@ -28,6 +28,11 @@ from robot_safety.core import action_error, watchdog_reason
 from robot_safety.thrash import ThrashDetector
 from robot_safety.startup_balance import StartupBalance
 
+# Stands in for the operator, who launches the policy with left + B once the
+# robot has settled in startup balance. Balance is still swaying at 2 s.
+# Runs add this before the requested duration.
+LAUNCH_SECONDS = 5.0
+
 
 class Runner:
     """One simulated session. A failed check latches for the rest of the run."""
@@ -75,6 +80,7 @@ class Runner:
         self.trace_time = []
         self.trace_thrash = []
         self.trace_stop = []
+        self.trace_startup = []
         self.record_trace = (
             bool(os.environ.get("G1_SIM_TRACE"))
             if record_trace is None
@@ -154,7 +160,8 @@ class Runner:
         else:
             try:
                 self.active = self.startup.command(
-                    self.sim_time, self.sim_time, self.plant.state(), self.submitted, automatic=True)
+                    self.sim_time, self.sim_time, self.plant.state(), self.submitted,
+                    automatic=self.sim_time >= LAUNCH_SECONDS)
                 self.active["q"] = self.rules.clip_positions(
                     self.active["q"], self.position_warnings)
                 if self.safety_checks:
@@ -299,14 +306,24 @@ class Runner:
         return {"reason": self.reason, "detail": deepcopy(self.detail),
                 "time_secs": self.stop_sim_time}
 
+    def _startup_snapshot(self):
+        """Startup balance progress for the viewer. Direct control has none."""
+        if self.control_path == "direct":
+            return None
+        return {"phase": self.startup.phase, "elapsed_secs": round(self.sim_time, 3),
+                "launch_secs": LAUNCH_SECONDS, "handoff_at_secs": self.startup.handoff,
+                "blend_secs": self.startup.blend_seconds}
+
     def _remember(self):
         telemetry = self._thrash_snapshot() if self.record_trace or self.live_path else None
         stop = self._stop_snapshot()
+        startup = self._startup_snapshot()
         if self.record_trace:
             self.trace_qpos.append(self.plant.data.qpos.copy())
             self.trace_time.append(self.sim_time)
             self.trace_thrash.append(telemetry)
             self.trace_stop.append(stop)
+            self.trace_startup.append(startup)
         path = self.live_path
         if not path:
             return
@@ -319,7 +336,7 @@ class Runner:
 
         warning = limit_warning_text(self.position_warnings) or None
         self._live.write(json.dumps({"t": self.sim_time, "qpos": qpos, "thrash": telemetry,
-                                    "stop": stop, "warning": warning}) + "\n")
+                                    "stop": stop, "warning": warning, "startup": startup}) + "\n")
         self._live.flush()
 
     def _write_trace(self):
@@ -340,6 +357,7 @@ class Runner:
             checks=json.dumps(self.checks()),
             thrash=json.dumps(self.trace_thrash),
             stop=json.dumps(self.trace_stop),
+            startup=json.dumps(self.trace_startup),
         )
         return str(target)
 
@@ -383,6 +401,7 @@ class Runner:
         self.trace_time = []
         self.trace_thrash = []
         self.trace_stop = []
+        self.trace_startup = []
         self.sim_time = 0.0
         self.thrash_detector.reset()
         self._remember()
@@ -390,7 +409,7 @@ class Runner:
     def handle(self, request):
         op = request.get("op")
         if op == "arm":
-            return {"ok": True, "session_id": self.arm()}
+            return {"ok": True, "session_id": self.arm(), "launch_seconds": LAUNCH_SECONDS}
         if op == "feedback":
             return {"ok": True, **self.feedback(request["time"])}
         if op == "command":

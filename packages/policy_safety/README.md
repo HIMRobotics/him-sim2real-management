@@ -37,8 +37,8 @@ If pip reports that `numpy>=1.26` is unavailable and lists versions only up to
 that error came from using Python 3.8 outside the safety environment.
 
 The preparation command reads the single policy YAML and copies the ONNX and its
-external weights. Command-only YAML files are ignored. The committed `examples/policies/walker/`
-directory can be passed directly as `--submission examples/policies/walker`. It attaches this package's G1 MuJoCo model, adds a flat scene,
+external weights. Command-only YAML files are ignored. The committed `containers/examples/policies/walker/`
+directory can be passed directly as `--submission containers/examples/policies/walker`. It attaches this package's G1 MuJoCo model, adds a flat scene,
 and writes `robot.json` from the YAML's joint defaults, scales, and gains.
 Output directories must not already exist. Preparation does not import or run
 submitted Python. The sample ONNX must be present to prepare this example. The
@@ -93,7 +93,7 @@ The sample ONNX graph already contains normalization. Outputs become joint
 position targets using explicit per-joint defaults and scales, with the sample's
 position actuator gains and 20 ms control / 2 ms physics timing. The same
 contract is defined in the
-[stairs bundle](../../examples/policies/stairs/walker.yaml). `prepare-g1` reads
+[stairs bundle](../../containers/examples/policies/stairs/walker.yaml). `prepare-g1` reads
 that YAML and writes `robot.json` for the checker. The example container uses the
 [shared policy client](../../containers/examples/README.md).
 

@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / "containers/sim"), str(ROOT / "robot_safety"),
+                str(ROOT / "packages/policy_safety/src")]
+from runner import LAUNCH_SECONDS  # noqa: E402
 
 
 @pytest.mark.parametrize("entry", ["sim.sh", "desktop_sim.sh"])
@@ -25,7 +28,8 @@ def test_local_example_without_docker_or_live_writes(tmp_path, entry, example, m
                  G1_SIM_THRASH_MODE=""),
         capture_output=True, text=True, timeout=60, check=False,
     )
-    assert result.returncode == 0, result.stderr
+    # Every run starts with the launch period. A supine robot thrashes in it.
+    assert result.returncode == (1 if mode == "enforce" else 0), result.stderr
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["execution"] == "local"
     assert report["policy"] == "walker"
@@ -138,4 +142,4 @@ def test_walker_thrash_scenario_rollout(tmp_path, scenario, enforce):
         assert report["stop_time_seconds"] < 3
     else:
         assert report["reason"] is None
-        assert report["commands"] == 150
+        assert report["commands"] == round((LAUNCH_SECONDS + 3) / 0.02)

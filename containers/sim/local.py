@@ -19,7 +19,7 @@ from command import load_schedule
 from controllers import ExamplePolicy
 from plant import CONTROL_DT, POSES
 from prepare import prepare
-from runner import Runner
+from runner import LAUNCH_SECONDS, Runner
 
 
 def _prepare_output(output):
@@ -46,7 +46,7 @@ def _finish(runner, output, extra):
 
 
 def _rollout(runner, seconds, command):
-    for step in range(math.ceil(seconds / CONTROL_DT)):
+    for step in range(math.ceil((LAUNCH_SECONDS + seconds) / CONTROL_DT)):
         time = step * CONTROL_DT
         if runner.reason is None:
             command(runner, time, step)

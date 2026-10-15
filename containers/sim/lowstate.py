@@ -15,9 +15,9 @@ class SimLowState:
         if interface != "lo":
             return
         try:
-            import socket
+            from containers.sim.netns import loopback_only
 
-            if {name for _, name in socket.if_nameindex()} != {"lo"}:
+            if not loopback_only():
                 return
             from unitree_sdk2py.core.channel import (
                 ChannelFactoryInitialize,

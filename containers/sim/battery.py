@@ -21,7 +21,7 @@ sys.path[:0] = [
 
 from plant import CONTROL_DT, POSES
 from policy_safety.config import DEFAULT_SUITE
-from runner import Runner
+from runner import LAUNCH_SECONDS, Runner
 
 
 def pushes():
@@ -62,7 +62,7 @@ def run_case(pose, push, seconds, safety_checks=True, circle=False):
     runner = Runner("standing" if circle else pose, safety_checks=safety_checks)
     runner.plant.set_push(push)
     q = None if circle else runner.plant.q().copy()
-    steps = int(np.ceil(seconds / CONTROL_DT))
+    steps = int(np.ceil(((LAUNCH_SECONDS if circle else 0.0) + seconds) / CONTROL_DT))
     for step in range(steps):
         time = step * CONTROL_DT
         if circle:
