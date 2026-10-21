@@ -59,6 +59,8 @@ class UnitreeArmTransport:
         self.output_enabled = output_enabled
         self.writer_lock = MotorWriterLock() if output_enabled else None
         self.write_lock = Lock()
+        self.diagnostics_enabled = False
+        self._body_diagnostics = {}
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
             MotionSwitcherClient,
         )
@@ -170,11 +172,13 @@ class UnitreeArmTransport:
             for index, values in targets.items()
         }
         message = self._encode_body(stored, machine)
+        waiting_since = time.monotonic() if getattr(self, "diagnostics_enabled", False) else None
         with self.write_lock:
+            acquired_at = time.monotonic() if waiting_since is not None else None
             self._body_targets = stored
             self._body_message = message
             self._body_ready = True
-            return self.lowcmd.Write(message)
+            return self._write_body_message(message, "fresh", waiting_since, acquired_at)
 
     def repeat_body(self, machine):
         """Resend the latched whole-body command with a fresh mode and CRC.
@@ -185,7 +189,9 @@ class UnitreeArmTransport:
         """
         if not self.output_enabled:
             return True
+        waiting_since = time.monotonic() if getattr(self, "diagnostics_enabled", False) else None
         with self.write_lock:
+            acquired_at = time.monotonic() if waiting_since is not None else None
             message = getattr(self, "_body_message", None)
             if not getattr(self, "_body_ready", False) or message is None:
                 return None
@@ -193,12 +199,75 @@ class UnitreeArmTransport:
             message.crc = self.crc.Crc(message)
             if not self._body_ready:
                 return None
-            return self.lowcmd.Write(message)
+            return self._write_body_message(message, "repeat", waiting_since, acquired_at)
 
     def clear_body(self):
         """Drop the latched whole-body command so the 2 ms thread stops."""
         with self.write_lock:
             self._body_ready = False
+            if getattr(self, "diagnostics_enabled", False):
+                previous = self._body_diagnostics
+                self._body_diagnostics = dict(
+                    previous, clear_count=previous.get("clear_count", 0) + 1,
+                    last_clear_s=time.monotonic(), ready=False,
+                )
+
+    def set_diagnostics_enabled(self, enabled):
+        """Enable local timing snapshots without publishing extra messages."""
+        with self.write_lock:
+            if enabled and not getattr(self, "diagnostics_enabled", False):
+                self._body_diagnostics = {}
+            self.diagnostics_enabled = bool(enabled)
+        poller = getattr(self, "state_poller", None)
+        if poller is not None:
+            poller.diagnostics_enabled = bool(enabled)
+
+    def diagnostics_snapshot(self):
+        """Copy immutable write and reader timing snapshots."""
+        poller = getattr(self, "state_poller", None)
+        return {
+            "body": dict(getattr(self, "_body_diagnostics", {})),
+            "state_poller": dict(getattr(poller, "diagnostics", {})),
+        }
+
+    def _write_body_message(self, message, kind, waiting_since, acquired_at):
+        """Write under the caller's lock, optionally recording local timing."""
+        if waiting_since is None:
+            return self.lowcmd.Write(message)
+        started = time.monotonic()
+        succeeded = False
+        try:
+            result = self.lowcmd.Write(message)
+            succeeded = bool(result)
+            return result
+        finally:
+            finished = time.monotonic()
+            previous = self._body_diagnostics
+            generation = previous.get("generation", 0) + int(kind == "fresh")
+            update = dict(
+                previous,
+                generation=generation,
+                write_count=previous.get("write_count", 0) + 1,
+                success_count=previous.get("success_count", 0) + int(succeeded),
+                fresh_count=previous.get("fresh_count", 0) + int(kind == "fresh"),
+                repeat_count=previous.get("repeat_count", 0) + int(kind == "repeat"),
+                last_write_kind=kind,
+                last_write_started_s=started,
+                last_write_finished_s=finished,
+                last_write_duration_s=finished - started,
+                last_lock_wait_s=acquired_at - waiting_since,
+                last_lock_held_s=finished - acquired_at,
+                max_lock_wait_s=max(previous.get("max_lock_wait_s", 0), acquired_at - waiting_since),
+                max_write_duration_s=max(previous.get("max_write_duration_s", 0), finished - started),
+                last_write_success=succeeded,
+                ready=self._body_ready,
+            )
+            if succeeded:
+                update["last_success_s"] = finished
+                update["last_success_generation"] = generation
+                if kind == "fresh":
+                    update["last_fresh_success_s"] = finished
+            self._body_diagnostics = update
 
     def _encode_body(self, targets, machine):
         message = self.make_command()

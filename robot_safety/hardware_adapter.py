@@ -1,11 +1,13 @@
 """Send safety-approved commands to the robot through the Unitree SDK."""
 
+import hashlib
 import math
 import os
 import sys
 import time
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
+from pathlib import Path
 from threading import Event, Lock, RLock, Thread
 
 from .balance_policy import MODEL_PATH, BalancePolicy
@@ -35,6 +37,7 @@ from .hardware_profile import (
     HARDWARE_PERIOD_SECS,
     HARDWARE_WATCHDOG_POLL_SECS,
     SHUTDOWN_WAIT_SECS,
+    STATE_POLL_SECS,
 )
 from .holosoma_policy import HolosomaLocomotionPolicy, holosoma_weights
 from .joint_checks import (
@@ -112,6 +115,8 @@ class G1HardwareAdapter:
         self._trace_record = None
         self._policy_q = None
         self._last_step_secs = None
+        self._feedback_diagnostic = None
+        self._last_diagnostic_abort = None
         self.feedback = None
         self.feedback_tick = None
         self.battery_percent = None
@@ -161,7 +166,12 @@ class G1HardwareAdapter:
 
     def receive_state(self, message):
         """Read machine type, measured joints and double Start directly from the SDK."""
+        diagnostic = self._diagnostics_enabled()
+        callback_entered = time.monotonic() if diagnostic else None
+        poller = getattr(self.transport, "state_poller", None) if diagnostic else None
+        poll_sample = getattr(poller, "diagnostics", None) if diagnostic else None
         with self.lock:
+            lock_acquired = time.monotonic() if diagnostic else None
             try:
                 sample = feedback_from_sdk(message, self.clock())
                 self.machine_type = message.mode_machine
@@ -189,6 +199,16 @@ class G1HardwareAdapter:
                     self.left_b_count += 1
                     self.left_b_at_secs = sample.received_at_secs
                 self.feedback = sample
+                if diagnostic:
+                    info = {
+                        "event": "feedback_accepted", "mono_s": time.monotonic(),
+                        "tick": tick, "received_at_s": sample.received_at_secs,
+                        "callback_entered_s": callback_entered,
+                        "callback_lock_wait_s": lock_acquired - callback_entered,
+                        "poll_sample": poll_sample,
+                    }
+                    self._feedback_diagnostic = (sample, info)
+                    self._note_diagnostic(info)
                 imu = getattr(message, "imu_state", None)
                 if imu is not None:
                     self.quat = tuple(float(value) for value in imu.quaternion)
@@ -488,6 +508,19 @@ class G1HardwareAdapter:
                 self.automatic_soft_reset = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
                 self.stop_requested.set()
+            if self._diagnostics_enabled():
+                state = (reason, soft_balance, self.hold_failed, self.automatic_soft_reset)
+                if state != self._last_diagnostic_abort:
+                    self._last_diagnostic_abort = state
+                    self._note_diagnostic({
+                        "event": "abort_decision", "mono_s": time.monotonic(),
+                        "reason": reason, "latched_reason": self.abort_reason,
+                        "first_fault": first_fault, "recoverable": recoverable,
+                        "soft_balance": soft_balance, "automatic": self.automatic_soft_reset,
+                        "walk_stop": self.walk_stop, "hold_failed": self.hold_failed,
+                        "armed": self.armed, "request_damping": request_damping,
+                        "buffer_preserved": bool(soft_balance and self.soft_reset_active),
+                    })
         if first_fault and self.trace is not None:
             try:
                 self.trace.emit_abort(reason, self.clock())
@@ -519,6 +552,7 @@ class G1HardwareAdapter:
 
     def step(self):
         """Check and publish one command from the single output worker."""
+        diagnostic_record = None
         if self.walk_stop and not self.hold_failed and self.stop_requested.is_set():
             self.stop_once()
             return
@@ -563,6 +597,14 @@ class G1HardwareAdapter:
                 )
                 infer_started = self.clock()
                 targets = self.checked_targets(now)
+                diagnostic_record = self._command_diagnostic(
+                    "submission", self.feedback, targets,
+                    self._policy_q if self._policy_q is not None else self.command["q"],
+                )
+                if diagnostic_record is not None:
+                    diagnostic_record["prepare_s"] = self.clock() - infer_started
+                    diagnostic_record["submitted"] = deepcopy(self.command)
+                    diagnostic_record["command_expires_s"] = self.command_expires_secs
                 if self.trace is not None:
                     self._trace_record = self._control_snapshot(
                         now, targets, self.clock() - infer_started
@@ -623,8 +665,10 @@ class G1HardwareAdapter:
         try:
             if self.stop_requested.is_set():
                 return
+            write_started = time.monotonic() if diagnostic_record is not None else None
             written = (self.transport.write_body(targets, self.machine_type)
                        if self.whole_body else self.transport.write_arm(targets, weight))
+            self._finish_command_diagnostic(diagnostic_record, write_started, written)
             with self.lock:
                 if not written:
                     self.abort("hardware_write_failed")
@@ -657,6 +701,58 @@ class G1HardwareAdapter:
         except Exception as error:  # noqa: BLE001 - logging must not stop the motors
             print("Control trace failed: {0}".format(error), flush=True)
             self.trace = None
+
+    def _diagnostics_enabled(self):
+        return self.trace is not None and getattr(self.trace, "diagnostic_enabled", False) is True
+
+    def _note_diagnostic(self, record):
+        """Keep optional logging failures outside the control decisions."""
+        try:
+            if self._diagnostics_enabled():
+                self.trace.note_diagnostic(record)
+        except Exception:
+            pass
+
+    def _command_diagnostic(self, phase, feedback, targets, raw_q, input_info=None):
+        """Snapshot the selected input and the command before its SDK write."""
+        if not self._diagnostics_enabled():
+            return None
+        try:
+            paired = self._feedback_diagnostic
+            if input_info is None:
+                input_info = paired[1] if paired is not None and paired[0] is feedback else None
+            return {
+                "event": "control_command", "phase": phase,
+                "mono_s": time.monotonic(), "adapter_s": self.clock(),
+                "automatic": self.automatic_soft_reset,
+                "latched_reason": self.abort_reason,
+                "startup_phase": self.startup.phase,
+                "input": input_info,
+                "feedback_received_at_s": feedback.received_at_secs,
+                "feedback_age_s": self.clock() - feedback.received_at_secs,
+                "q": list(feedback.q), "dq": list(feedback.dq),
+                "quat": list(feedback.quat), "gyro": list(feedback.gyro),
+                "tau_est": list(feedback.tau_est),
+                "raw_q": [float(value) for value in raw_q],
+                "applied": {str(i): dict(values) for i, values in targets.items()},
+            }
+        except Exception:
+            return None
+
+    def _finish_command_diagnostic(self, record, started, written):
+        if record is None:
+            return
+        try:
+            record["write_started_s"] = started
+            record["write_finished_s"] = time.monotonic()
+            record["write_ok"] = bool(written)
+            record["latest_feedback_tick_at_write"] = self.feedback_tick
+            snapshot = getattr(self.transport, "diagnostics_snapshot", None)
+            if snapshot is not None:
+                record["transport"] = snapshot()
+            self._note_diagnostic(record)
+        except Exception:
+            pass
 
     def _control_snapshot(self, now, targets, infer_secs):
         """Numbers from one checked command. Called with the feedback lock held."""
@@ -855,6 +951,8 @@ class G1HardwareAdapter:
     def _publish_balance(self):
         """Run zero-velocity Holosoma recovery on all 29 joints."""
         policy = self.soft_reset_policy
+        diagnostic_record = None
+        cycle_started = time.monotonic() if self._diagnostics_enabled() else None
         if policy is None:
             if self.balance_released or self.ownership_taken:
                 self.hold_failed = True
@@ -881,6 +979,8 @@ class G1HardwareAdapter:
             self.balance_released = True
         try:
             feedback = self.feedback
+            paired = self._feedback_diagnostic
+            input_info = paired[1] if paired is not None and paired[0] is feedback else None
             if feedback is None or not self.feedback_fresh(self.clock()):
                 raise ValueError("stale balance feedback")
             # A latched submission fault must not disable health checks for the
@@ -889,8 +989,26 @@ class G1HardwareAdapter:
             if not self.soft_reset_active:
                 policy.reset()
                 self.soft_reset_active = True
+                self._note_diagnostic({
+                    "event": "recovery_enter", "mono_s": time.monotonic(),
+                    "automatic": self.automatic_soft_reset,
+                    "latched_reason": self.abort_reason,
+                })
             quat, gyro = feedback.quat, feedback.gyro
+            infer_started = time.monotonic() if self._diagnostics_enabled() else None
+            inference_record = self._command_diagnostic("recovery", feedback, {}, [], input_info)
+            if inference_record is not None:
+                inference_record["event"] = "recovery_inference_start"
+                inference_record["infer_started_s"] = infer_started
+                self._note_diagnostic(inference_record)
             q = policy.update(feedback.q, feedback.dq, quat, gyro)
+            infer_finished = time.monotonic() if infer_started is not None else None
+            if infer_started is not None:
+                self._note_diagnostic({
+                    "event": "recovery_inference_end", "mono_s": infer_finished,
+                    "infer_started_s": infer_started,
+                    "infer_s": infer_finished - infer_started,
+                })
             if any(len(values) != 29 for values in (q, policy.kp, policy.kd)):
                 raise ValueError("invalid balance output shape")
             if not all(math.isfinite(value) for values in (q, policy.kp, policy.kd) for value in values):
@@ -913,16 +1031,38 @@ class G1HardwareAdapter:
                 warnings=self.position_warnings,
                 torque_target_fraction=TORQUE_TARGET_FRACTION,
             )
+            diagnostic_record = self._command_diagnostic("recovery", feedback, targets, q, input_info)
+            if diagnostic_record is not None:
+                diagnostic_record.update({
+                    "cycle_started_s": cycle_started,
+                    "infer_started_s": infer_started, "infer_finished_s": infer_finished,
+                    "infer_s": infer_finished - infer_started,
+                    "actor_obs": getattr(policy, "diagnostic_observation", None),
+                })
             if self.hold_failed or not self.walk_stop:
+                if diagnostic_record is not None:
+                    diagnostic_record["event"] = "control_skipped"
+                    diagnostic_record["reason"] = "recovery_stopped_before_write"
+                    self._note_diagnostic(diagnostic_record)
                 return
             self.check_health(recovery=True)
-            if not self.transport.write_body(targets, self.machine_type or 0):
+            write_started = time.monotonic() if diagnostic_record is not None else None
+            written = self.transport.write_body(targets, self.machine_type or 0)
+            self._finish_command_diagnostic(diagnostic_record, write_started, written)
+            if not written:
                 raise RuntimeError("balance write failed")
             if self.hold_failed or not self.walk_stop:
                 self.transport.clear_body()
+                self._note_diagnostic({
+                    "event": "recovery_stopped_after_write", "mono_s": time.monotonic(),
+                })
                 return
             self.last_worker_cycle_secs = self.clock()
         except Exception as exc:  # noqa: BLE001 - Balance failures enter damping.
+            self._note_diagnostic({
+                "event": "recovery_error", "mono_s": time.monotonic(),
+                "error": str(exc), "command": diagnostic_record,
+            })
             self.abort_reason = "balance_output_error: " + str(exc)
             with self.stop_lock:
                 self.hold_failed = True
@@ -1084,6 +1224,30 @@ class G1HardwareAdapter:
         self._ensure_startup_policy()
         self.trace = ControlTrace(default_trace_path())
         self.trace.open()
+        if self.trace.diagnostic_enabled:
+            enable = getattr(self.transport, "set_diagnostics_enabled", None)
+            if enable is not None:
+                enable(True)
+            if self.soft_reset_policy is not None:
+                self.soft_reset_policy.diagnostic_enabled = True
+            metadata = {
+                "event": "diagnostic_start", "mono_s": time.monotonic(),
+                "policy_path": getattr(self.soft_reset_policy, "path", None),
+                "state_period_s": STATE_POLL_SECS, "output_period_s": HARDWARE_PERIOD_SECS,
+                "repeat_period_s": BODY_REPEAT_SECS,
+                "profile": asdict(self.profile), "python": sys.version,
+                "pid": os.getpid(), "source_sha256": {},
+            }
+            try:
+                metadata["policy_sha256"] = hashlib.sha256(
+                    Path(metadata["policy_path"]).read_bytes()).hexdigest()
+                for name in ("hardware_adapter.py", "holosoma_policy.py", "sdk_latest.py",
+                             "unitree_transport.py", "joint_checks.py", "control_trace.py"):
+                    source = Path(__file__).with_name(name)
+                    metadata["source_sha256"][name] = hashlib.sha256(source.read_bytes()).hexdigest()
+            except (OSError, TypeError) as error:
+                metadata["metadata_error"] = str(error)
+            self._note_diagnostic(metadata)
         sys.setswitchinterval(INTERPRETER_SWITCH_SECS)
 
         def output_loop():

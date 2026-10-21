@@ -1,0 +1,110 @@
+Walking-to-recovery telemetry
+============================
+
+The existing capture_telemetry.py recorder now collects passive DDS samples,
+ROS status/abort events, and the instrumented harness trace in one directory.
+capture_walking_recovery.sh only supplies the environment and capture options.
+It does not arm the robot, start walking, send motor commands, or restart services.
+
+ONE-TIME ACTIVATION BEFORE THE TEST
+
+The running service must load the updated Python files. A separate recorder
+cannot see which feedback sample the policy used or its targets before limits.
+The following restart affects the safety controller. Run it only with the robot
+stopped and supported, before starting your walking test.
+
+  cd /home/unitree/him-sim2real-management
+  systemctl --user set-environment HIM_DIAGNOSTIC_TRACE=/home/unitree/him-sim2real-management/.cache/control-diagnostics.jsonl
+  systemctl --user restart g1-safety-stops.service
+  systemctl --user status g1-safety-stops.service --no-pager
+
+The existing service launcher rebuilds the ROS package before starting the gate.
+This environment setting lasts for this user-manager session. The tracing option
+is disabled by default. The trace writes an idle heartbeat about once per second.
+
+CAPTURE
+
+  cd /home/unitree/him-sim2real-management
+  bash tools/capture_walking_recovery.sh
+
+Wait for CAPTURING before the test. Then run the submitted walking policy and
+perform the planned supported disturbance using your established stop procedure.
+Do not use manual soft reset as the trigger for this automatic-takeover test.
+An external push does not necessarily trigger a harness fault: the trace records
+whether a fault and automatic recovery actually occurred.
+
+Record several seconds of ordinary walking before the disturbance and allow
+several seconds afterward to capture recovery or the stop transition. Ctrl+C
+ends recording and saves. Wait for decoding/saving to finish before closing the
+terminal. Maximum duration is 60 seconds because raw DDS messages are buffered
+in memory to keep decoding off the live capture loop.
+
+Results go to .cache/topic-profile/live-<UTC timestamp>/ by default. You can pass
+--seconds 30 or --output /path/to/a/new/directory to the wrapper. It refuses the
+instrumented test if the detailed trace is missing/stale or ROS status is absent.
+This checks observability, not physical readiness or successful policy control.
+
+ANALYZE AFTERWARD
+
+  /usr/bin/python3 tools/analyze_recovery_telemetry.py /path/to/capture-directory --plot
+
+The analyzer reads saved files only. It reports missing evidence explicitly and
+does not treat publication spacing as command-to-motor latency. Retain the whole
+capture directory, including JSONL traces and metadata, for investigation.
+
+WHAT IS RECORDED
+
+- samples.jsonl: serialized DDS samples decoded after capture, for lowstate and
+  lowcmd. Includes measured q/dq/torque, temperatures, IMU, desired positions,
+  velocities, feedforward torques, gains, publisher handles, source timestamps,
+  local receipt timestamps, and state ticks. Commands are actual observed bus
+  messages, including resends and publisher changes.
+- diagnostic-trace.jsonl: feedback decode timing and callback lock wait, exact
+  selected feedback snapshot, submitted targets, raw Holosoma targets, applied
+  targets/gains, the 100-element actor observation (including previous actions),
+  inference start/end, successful-write timing, resend/clear counters, fault
+  decisions, and recovery entry/errors. Inference-start events survive a later
+  watchdog stop before a command can be written.
+- diagnostic-metadata.json: model path/hash, active hardware profile, source-file
+  hashes, process ID, Python version, and configured sampling/output periods.
+- ros-events.jsonl: hardware status and abort message receipts. Status includes
+  policy launch, automatic recovery, ownership, faults, and damping state.
+- control-trace.jsonl: existing sparse control trace for comparison.
+- context.json, summary.json and ros-observer.json: capture boundaries, boot ID,
+  observer errors, per-publisher intervals, copied-file coverage and limitations.
+
+TIMING AND INTERPRETATION
+
+Production harness and recorder monotonic timestamps share this host's clock.
+The chosen input's poll_sample.take_started_s/take_finished_s delimit DDS take
+and decoding. callback_entered_s precedes the adapter lock. callback_lock_wait_s
+therefore exposes time excluded by the existing feedback freshness timestamp.
+The trace preserves that selected input even if newer feedback arrives during
+inference. feedback_age_s itself is sampled after inference/projection. Use
+infer_started_s and write_started_s/write_finished_s to compute separate ages.
+
+DDS source clocks are not established as synchronized with this host. Do not
+subtract source timestamps from host time and call the result network latency.
+There are no echoed command IDs or motor-side execution timestamps. This capture
+can diagnose local stale inputs, scheduling/lock/write delays, target rewrites,
+and missing resends. It cannot directly measure command-to-motor actuation delay
+or guarantee a unique physical cause from one run.
+
+ROS receipts can lag actual transitions and retained aborts may describe an old
+fault. Prefer in-process abort_decision/recovery_enter events for exact local
+ordering. In-process generation numbers are not transmitted command IDs.
+
+Logging is optional and asynchronous. A bounded queue drops diagnostic records
+instead of waiting for disk, with loss/error counts in heartbeats. There is still
+allocation/GIL overhead. Detailed traces rotate at 128 MiB with one backup. The
+capture copies at most 64 MiB per trace and labels truncation/rotation. It allows
+a 1.1-second flush grace after DDS capture, so trace files can extend past the DDS
+end timestamp. File-copy coverage and heartbeat loss counts must be checked.
+
+DISABLE AFTER TESTING
+
+  systemctl --user unset-environment HIM_DIAGNOSTIC_TRACE
+
+The running process keeps tracing until its next normal restart. Restart only
+when the robot is stopped and supported. No automatic restart is performed by
+the capture or analysis tools.

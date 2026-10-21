@@ -123,6 +123,8 @@ class HolosomaLocomotionPolicy:
         self.standing = False
         self.lin = np.zeros(2)
         self.ang = 0.0
+        self.diagnostic_enabled = False
+        self.diagnostic_observation = None
 
     def entry_target(self):
         """Crouch reached before the network is enabled. Unitree joint order."""
@@ -147,6 +149,8 @@ class HolosomaLocomotionPolicy:
         self.ang = float(velocity[2])
         self._advance_phase()
         obs = self.observation(q, dq, quat, gyro)
+        if self.diagnostic_enabled:
+            self.diagnostic_observation = obs.tolist()
         raw = np.clip(np.asarray(
             self.session.run(None, {"actor_obs": obs.reshape(1, OBS_DIM)})[0],
             dtype=float,

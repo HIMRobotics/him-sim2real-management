@@ -73,6 +73,8 @@ class LatestSdkPoller:
         self.period = period
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name="lowstate_poll", daemon=True)
+        self.diagnostics_enabled = False
+        self.diagnostics = {}
 
     def start(self):
         self.thread.start()
@@ -85,13 +87,34 @@ class LatestSdkPoller:
     def _run(self):
         next_tick = time.monotonic()
         while not self.stopped.is_set():
+            diagnostic = self.diagnostics_enabled
+            if diagnostic:
+                take_started = time.monotonic()
             try:
                 sample = self.reader.take_latest()
             except Exception as error:  # noqa: BLE001 - feedback timeout handles silence
                 print("{0} read failed: {1}".format(self.reader.topic, error), flush=True)
                 sample = None
+            if diagnostic:
+                take_finished = time.monotonic()
+                info = getattr(sample, "sample_info", None)
+                self.diagnostics = {
+                    "tick": getattr(sample, "tick", None),
+                    "source_timestamp_ns": getattr(info, "source_timestamp", None),
+                    "take_started_s": take_started,
+                    "take_finished_s": take_finished,
+                    "take_duration_s": take_finished - take_started,
+                    "has_sample": sample is not None,
+                }
             if sample is not None:
                 self.handler(sample)
+                if diagnostic:
+                    finished = time.monotonic()
+                    self.diagnostics = dict(
+                        self.diagnostics,
+                        handler_finished_s=finished,
+                        handler_duration_s=finished - take_finished,
+                    )
             delay, next_tick = poll_deadline(next_tick + self.period, time.monotonic(), self.period)
             if self.stopped.wait(delay):
                 return
