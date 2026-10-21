@@ -167,7 +167,7 @@ def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
     startup.policy.update.return_value = np.full(15, 0.4)
     middle = startup.command(10.25, 10.25, sample, submitted())
     np.testing.assert_allclose(middle['q'][:15], 0.3)
-    assert np.all((middle['q'][15:] < 0.2) & (middle['q'][15:] > 0.1))
+    np.testing.assert_allclose(middle['q'][15:], 0.2)
     np.testing.assert_array_equal(middle['kp'], first['kp'])
     finish = startup.command(10.5, 10.5, sample, submitted())
     np.testing.assert_allclose(finish['q'][:15], 0.4)
@@ -175,16 +175,27 @@ def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
     assert startup.phase == 'balancing'
 
 
-def test_arms_ease_from_measured_pose_to_balance_arm_pose():
+def test_startup_holds_initial_arms_until_authorized_handoff():
     startup = gate()
     sample = state()
-    sample['q'] = [0.0] * 15 + [1.28] * 14
-    arms = [startup.command(round(now, 8), round(now, 8), sample, submitted())['q'][15:]
-            for now in np.arange(0.0, startup.arm_seconds + 0.5, 0.02)]
-    np.testing.assert_allclose(arms[0], 1.28)
-    assert all(np.all(later <= earlier + 1e-12) for earlier, later in zip(arms, arms[1:]))
-    assert np.max(np.abs(np.diff(arms, axis=0))) / 0.02 < 1.0
-    np.testing.assert_allclose(arms[-1], startup.arm_target)
+    initial_arms = np.array([0.28, 0.1, 0, 0.98, 0, 0, 0,
+                             0.28, -0.1, 0, 0.98, 0, 0, 0])
+    sample['q'][15:] = initial_arms.tolist()
+    for now in np.arange(0.0, 5.001, 0.02):
+        now = round(float(now), 8)
+        command = startup.command(now, now, sample, submitted())
+        np.testing.assert_allclose(command['q'][15:], initial_arms)
+        np.testing.assert_array_equal(command['dq'][15:], 0)
+        np.testing.assert_array_equal(command['tau'][15:], 0)
+        # Later feedback must not redefine the held arm targets.
+        sample['q'][15:] = (initial_arms + 0.02).tolist()
+    assert startup.ready
+    assert startup.handoff is None
+    assert startup.authorize(5.0)
+    command = startup.command(5.0, 5.0, sample, submitted())
+    np.testing.assert_allclose(command['q'][15:], initial_arms)
+    command = startup.command(6.0, 6.0, sample, submitted())
+    np.testing.assert_allclose(command['q'][15:], submitted()['q'][15:])
 
 
 def test_entry_does_not_count_as_a_stable_window():

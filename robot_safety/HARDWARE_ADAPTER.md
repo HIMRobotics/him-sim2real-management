@@ -33,6 +33,9 @@ qualification. Stillness does not establish weight-bearing under a gantry.
 Hardware continues Balance while waiting for a new left + B press after
 `handoff_ready: true`. Early/held presses cannot queue a launch. Instability
 revokes readiness. Failure to establish stability within 30 seconds faults.
+GR00T startup balance holds the measured starting arm pose while controlling
+the lower body. Arm targets transition to the submitted policy only after
+the operator authorizes handoff.
 Once stable, Balance continues while waiting for authorization without an
 operator-wait timeout. Losing stability starts a new 30-second recovery deadline.
 Health, command and telemetry deadlines remain active throughout. Targets,
