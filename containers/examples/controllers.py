@@ -10,7 +10,7 @@ from policy_safety.adapter import ADAPTERS
 from robot_safety.balance_policy import LEG_KD, LEG_KP, BalancePolicy
 from robot_safety.holosoma_policy import HolosomaLocomotionPolicy
 
-NAMES = ("stairs", "walker", "balance", "holosoma")
+NAMES = ("walker", "balance", "holosoma")
 
 
 def session(path):
@@ -31,8 +31,6 @@ class ExamplePolicy:
             raise ValueError("unknown example policy")
         self.name = name
         self.sequence = 0
-        self.phase = "walk"
-        self.phase_time = 0.0
         self.arm_pose = None
         project = Path(project)
         if name == "balance":
@@ -65,32 +63,10 @@ class ExamplePolicy:
             self.policy.reset()
 
     def velocity_command(self, state):
-        """Command forward walking or the stair submission's scripted phases."""
+        """Command the task velocity, or slow forward walking without a task."""
         if "task_command" in state:
             return np.asarray(state["task_command"], dtype=np.float32)
-        if self.name == "walker":
-            return np.array([0.3, 0.0, 0.0], dtype=np.float32)
-        x, y, z = state["position"]
-        if self.phase == "walk":
-            if x >= 1.55 and abs(y) < 0.35 and z > 0.60 and state["upright"] > 0.75:
-                self.phase, self.phase_time = "stabilize", 0.0
-            vx = 0.55
-        elif self.phase == "stabilize":
-            vx = 0.05
-            self.phase_time += 0.02
-            if self.phase_time > 0.80:
-                self.phase, self.phase_time = "cross", 0.0
-        elif self.phase == "cross":
-            vx = 0.90
-            self.phase_time += 0.02
-            if x >= 2.35 or self.phase_time > 8.0:
-                self.phase, self.phase_time = "finish_hold", 0.0
-        else:
-            vx = 0.0
-        return np.array(
-            [vx, np.clip(-1.2 * y, -0.5, 0.5), np.clip(-1.8 * y, -0.8, 0.8)],
-            dtype=np.float32,
-        )
+        return np.array([0.3, 0.0, 0.0], dtype=np.float32)
 
     def command(self, state):
         q = np.asarray(state["q"], dtype=float)
@@ -115,29 +91,11 @@ class ExamplePolicy:
                 q,
                 state["dq"],
                 state["quat"],
-                ([0.0, 0.0, 0.0, *state["gyro"]]
-                 if self.name == "walker" else state["base_velocity"]),
+                [0.0, 0.0, 0.0, *state["gyro"]],
                 (self.velocity_command(state) if state.get("control_ready", True)
                  else np.zeros(3, dtype=np.float32)),
             )
             target = self.policy.decode(self.policy.infer(observation))
-            if self.name == "stairs":
-                if state.get("control_ready", True) and self.phase == "cross" and 1.88 <= state["position"][0] < 2.05:
-                    phase = self.phase_time % 0.8
-                    if phase < 0.25:
-                        target[[0, 6]], target[[3, 9]], target[[4, 10]] = (
-                            -0.55,
-                            1.05,
-                            -0.48,
-                        )
-                    elif phase < 0.45:
-                        target[[0, 6]], target[[3, 9]], target[[4, 10]] = (
-                            0.15,
-                            0.10,
-                            0.05,
-                        )
-                target[15:] = self.policy.default[15:]
-                target = np.clip(target, state["ctrl_low"], state["ctrl_high"])
         frame = {
             "session_id": state["session_id"],
             "sequence": self.sequence,

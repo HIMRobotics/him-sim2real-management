@@ -167,12 +167,24 @@ def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
     startup.policy.update.return_value = np.full(15, 0.4)
     middle = startup.command(10.25, 10.25, sample, submitted())
     np.testing.assert_allclose(middle['q'][:15], 0.3)
-    np.testing.assert_allclose(middle['q'][15:], 0.2)
+    assert np.all((middle['q'][15:] < 0.2) & (middle['q'][15:] > 0.1))
     np.testing.assert_array_equal(middle['kp'], first['kp'])
     finish = startup.command(10.5, 10.5, sample, submitted())
     np.testing.assert_allclose(finish['q'][:15], 0.4)
     assert not startup.ready
     assert startup.phase == 'balancing'
+
+
+def test_arms_ease_from_measured_pose_to_balance_arm_pose():
+    startup = gate()
+    sample = state()
+    sample['q'] = [0.0] * 15 + [1.28] * 14
+    arms = [startup.command(round(now, 8), round(now, 8), sample, submitted())['q'][15:]
+            for now in np.arange(0.0, startup.arm_seconds + 0.5, 0.02)]
+    np.testing.assert_allclose(arms[0], 1.28)
+    assert all(np.all(later <= earlier + 1e-12) for earlier, later in zip(arms, arms[1:]))
+    assert np.max(np.abs(np.diff(arms, axis=0))) / 0.02 < 1.0
+    np.testing.assert_allclose(arms[-1], startup.arm_target)
 
 
 def test_entry_does_not_count_as_a_stable_window():

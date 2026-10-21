@@ -13,7 +13,7 @@ pytest.importorskip("onnxruntime")
 pytest.importorskip("onnx")
 
 
-from policy_safety.adapter import G1Walker, inverse_rotate
+from policy_safety.adapter import NvidiaWalker
 from policy_safety.cli import run_worker
 from policy_safety.config import (
     plan_scenarios,
@@ -32,24 +32,29 @@ class Session:
 
     def get_inputs(self):
         return [
-            SimpleNamespace(name="observation", type="tensor(float)", shape=["N", 99])
+            SimpleNamespace(name="observation", type="tensor(float)", shape=["N", 516])
         ]
 
     def get_outputs(self):
-        return [SimpleNamespace(name="action", type="tensor(float)", shape=["N", 29])]
+        return [SimpleNamespace(name="action", type="tensor(float)", shape=["N", 15])]
 
     def run(self, names, inputs):
         self.observation = inputs["observation"].copy()
         if isinstance(self.value, Exception):
             raise self.value
-        return [np.full((1, 29), self.value, dtype=np.float32)]
+        return [np.full((1, 15), self.value, dtype=np.float32)]
+
+
+def walker(robot, session):
+    """One fake session answers for both the walk and the balance network."""
+    return NvidiaWalker(None, robot, session, session)
 
 
 @pytest.fixture
 def setup(bundle):
     sim = Simulation(bundle / "robot.json")
     sim.reset(0)
-    adapter = G1Walker(None, sim.robot, Session())
+    adapter = walker(sim.robot, Session())
     profile = profile_config(
         Path(__file__).parents[1] / "src/policy_safety/profiles/provisional.json"
     )
@@ -87,74 +92,6 @@ def test_torque_scale_changes_motor_gains_and_restores(setup, tmp_path):
     )
     assert result["status"] == "error"
     np.testing.assert_array_equal(sim.model.actuator_gainprm[sim.actuators, 0], kp)
-
-
-def test_observation_coordinates_history_and_scaling(setup):
-    _sim, adapter, _ = setup
-    quat = np.array([np.sqrt(0.5), 0, 0, np.sqrt(0.5)])
-    velocity = np.array([1, 0, 0, 0.1, 0.2, 0.3])
-    adapter.previous_action[:] = 0.4
-    obs = adapter.observation(
-        adapter.default + 0.1, np.ones(29), quat, velocity, [0.3, 0, 0]
-    )
-    np.testing.assert_allclose(obs[0, :3], [0, -1, 0], atol=1e-6)
-    np.testing.assert_allclose(obs[0, 3:6], velocity[3:])
-    np.testing.assert_allclose(obs[0, 6:9], [0, 0, -1], atol=1e-6)
-    np.testing.assert_allclose(obs[0, 9:38], 0.1, atol=1e-6)
-    np.testing.assert_allclose(obs[0, 38:67], 1)
-    np.testing.assert_allclose(obs[0, 67:96], 0.4)
-    np.testing.assert_allclose(obs[0, 96:], [0.3, 0, 0])
-    np.testing.assert_allclose(
-        adapter.decode(np.ones(29)), adapter.default + adapter.scales
-    )
-    state = adapter.snapshot()
-    adapter.reset()
-    adapter.restore(state)
-    np.testing.assert_array_equal(adapter.previous_action, state)
-
-
-def test_legacy_stairs_neural_path_and_embedded_normalization(bundle):
-    import onnx
-    import yaml
-
-    sim = Simulation(bundle / "robot.json")
-    sim.reset(0)
-    adapter = G1Walker(bundle / "walker.onnx", sim.robot)
-    policy_yaml = (
-        Path(__file__).resolve().parents[3]
-        / "containers/examples/policies/stairs/walker.yaml"
-    )
-    config_joints = yaml.safe_load(policy_yaml.read_text())["joints"]
-    q, dq, quat, vel = (
-        sim.data.qpos[sim.qadr],
-        sim.data.qvel[sim.vadr],
-        sim.data.qpos[3:7],
-        sim.data.qvel[:6],
-    )
-    # Independent layout matching the supplied policy's neural path.
-    expected = np.concatenate(
-        [
-            inverse_rotate(quat, vel[:3]),
-            vel[3:6],
-            inverse_rotate(quat, [0, 0, -1]),
-            q.astype(np.float32)
-            - np.array(
-                [joint["default_position"] for joint in config_joints],
-                dtype=np.float32,
-            ),
-            dq,
-            np.zeros(29),
-            [0.3, 0, 0],
-        ]
-    ).astype(np.float32)[None]
-    obs = sim.observation(adapter, [0.3, 0, 0])
-    np.testing.assert_array_equal(obs, expected)
-    raw = adapter.session.run(None, {adapter.input_name: expected})[0][0]
-    np.testing.assert_array_equal(adapter.infer(obs), raw)
-    graph = onnx.load(str(bundle / "walker.onnx"), load_external_data=False)
-    assert [node.op_type for node in graph.graph.node[:2]] == ["Sub", "Div"]
-    assert sim.dt == 0.02 and sim.physics_dt == 0.002
-    assert list(sim.model.actuator_trnid[sim.actuators, 0]) == list(sim.joints)
 
 
 def test_checkpoint_replays_identically(setup, tmp_path):
@@ -319,7 +256,7 @@ def test_initial_and_changing_pose_targets_complete_screening(setup, tmp_path):
             self.value = -self.value
             return result
 
-    adapter.session = OscillatingSession(0.05)
+    adapter.session = adapter.balance_session = OscillatingSession(0.05)
     result, _ = run_scenario(sim, adapter, profile, scenario(), tmp_path / "rate.npz")
     assert result["status"] == "completed"
     assert result["first_violation"] is None
@@ -528,8 +465,8 @@ def test_evaluation_enforces_profile_and_reports_sampled_coverage(
 
     monkeypatch.setitem(
         ADAPTERS,
-        "g1-walker-99-v1",
-        lambda path, robot: G1Walker(path, robot, Session(0.01)),
+        NvidiaWalker.contract,
+        lambda path, robot: walker(robot, Session(0.01)),
     )
     suite = tmp_path / "suite.json"
     suite.write_text(
@@ -554,7 +491,7 @@ def test_evaluation_enforces_profile_and_reports_sampled_coverage(
             "output": str(output),
             "robot_config": str(bundle / "robot.json"),
             "model": str(bundle / "walker.onnx"),
-            "adapter": "g1-walker-99-v1",
+            "adapter": NvidiaWalker.contract,
             "suite": str(suite),
             "joint_profile": str(joint_path),
             "profile": str(
@@ -583,8 +520,8 @@ def test_nominal_violation_still_runs_its_continuation(bundle, tmp_path, monkeyp
 
     monkeypatch.setitem(
         ADAPTERS,
-        "g1-walker-99-v1",
-        lambda path, robot: G1Walker(path, robot, Session(1000)),
+        NvidiaWalker.contract,
+        lambda path, robot: walker(robot, Session(1000)),
     )
     suite_path = tmp_path / "suite.json"
     suite_path.write_text(
@@ -609,7 +546,7 @@ def test_nominal_violation_still_runs_its_continuation(bundle, tmp_path, monkeyp
             "robot_config": str(bundle / "robot.json"),
             "model": str(bundle / "walker.onnx"),
             "suite": str(suite_path),
-            "adapter": "g1-walker-99-v1",
+            "adapter": NvidiaWalker.contract,
             "profile": str(
                 Path(__file__).parents[1]
                 / "src/policy_safety/profiles/provisional.json"
@@ -638,8 +575,8 @@ def test_tensor_shape_mismatch_rejected(setup):
         def get_outputs(self):
             return [SimpleNamespace(name="action", type="tensor(float)", shape=[1, 12])]
 
-    with pytest.raises(ValueError, match="unexpected walker tensor"):
-        G1Walker(None, sim.robot, WrongSession())
+    with pytest.raises(ValueError, match="unexpected NVIDIA tensor"):
+        walker(sim.robot, WrongSession())
 
 
 def test_calibrated_profile_requires_all_limits(tmp_path):
@@ -654,15 +591,26 @@ def test_calibrated_profile_requires_all_limits(tmp_path):
         profile_config(path)
 
 
-def test_external_weights_are_fingerprinted_and_confined(bundle, tmp_path):
+def test_external_weights_are_fingerprinted_and_confined(tmp_path):
     import onnx
+    from onnx import helper, numpy_helper
     from policy_safety.bundle import model_files
 
-    assert {p.name for p in model_files(bundle / "walker.onnx")} == {
-        "walker.onnx",
-        "walker.onnx.data",
+    weight = numpy_helper.from_array(np.ones((4, 4), dtype=np.float32), "weight")
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["input", "weight"], ["output"])], "external",
+        [helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1, 4])],
+        [weight],
+    )
+    onnx.save_model(helper.make_model(graph), str(tmp_path / "model.onnx"),
+                    save_as_external_data=True, location="model.onnx.data",
+                    size_threshold=0)
+    assert {p.name for p in model_files(tmp_path / "model.onnx")} == {
+        "model.onnx",
+        "model.onnx.data",
     }
-    graph = onnx.load(str(bundle / "walker.onnx"), load_external_data=False)
+    graph = onnx.load(str(tmp_path / "model.onnx"), load_external_data=False)
     for tensor in graph.graph.initializer:
         if tensor.data_location == onnx.TensorProto.EXTERNAL:
             for item in tensor.external_data:

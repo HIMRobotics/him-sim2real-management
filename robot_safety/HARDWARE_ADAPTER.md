@@ -514,12 +514,6 @@ stability. The 12-second first-steps command simulation also completed without
 faults or a fall. Reports/traces are in `.cache/startup-validation/`.
 These results do not qualify physical takeover or stopping.
 
-Known regression: the legacy stairs example reaches the three treads but falls
-later in its 20-second unchecked rollout with startup Balance. Its existing
-course-completion test remains failing. Do not use the walker validation as
-qualification for that policy. The universal gate remains enforced for stairs
-and uploaded policies, whose behavior requires separate requalification.
-
 The host Python 3.8 Balance inference warmup passed with the bundled model,
 whose SHA256 matches `containers/examples/policies/walker/provenance.json`. The running
 hardware service was inspected but not restarted. Docker build/run remains

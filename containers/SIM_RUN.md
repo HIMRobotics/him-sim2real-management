@@ -226,7 +226,7 @@ The policy package, the container, and the velocity file are three different cho
 
 | Choice | How to specify it | What runs | `policy` in the report |
 | --- | --- | --- | --- |
-| Policy package | `--example stairs`, `walker`, or `balance` | `containers/examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
+| Policy package | `--example walker`, `balance`, or `holosoma` | `containers/examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `walker`, `balance`, or `holosoma` |
 | Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. [The template](template/README.md) builds one. See [build and export](examples/README.md#build-and-export-the-shared-image) for the shared walker image. `G1_TASK_COMMAND` sets the shared client's task velocity. | `null` unless an example was selected |
 | Velocity file on the plant | `--command containers/examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `containers/examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
 | Same file in the walker container | `--example walker --command containers/examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
@@ -240,7 +240,7 @@ Other flags:
 | --- | --- |
 | `--seconds 10` | Length of the run after the five-second startup period. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
-| `--example stairs\|walker\|balance` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
+| `--example walker\|balance\|holosoma` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
 | `--local` | Run an `--example` directly against MuJoCo without Docker, ROS, or sudo. |
 | `--output DIR` | Save a run separately so safety-on/off results can both be replayed. |
 | `--scene path/to/scene.xml` | Load a complete MuJoCo G1 scene from the host filesystem. Relative paths use the caller's working directory. |

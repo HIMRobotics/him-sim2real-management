@@ -8,7 +8,7 @@ the commands, mostly using the examples.
 | Path | What it is |
 | --- | --- |
 | [`template/`](template/README.md) | The starting point for a new submission. It holds the robot's starting pose until you replace its policy |
-| [`examples/`](examples/README.md) | Finished reference policies with their weights baked in: the NVIDIA walker, GR00T balance, and a stair walker |
+| [`examples/`](examples/README.md) | Finished reference policies with their weights baked in: the NVIDIA walker, GR00T balance, and Holosoma |
 | [`sim/`](SIM_RUN.md) | The MuJoCo simulator. It runs any image that follows the instructions |
 | `upload/` | Where `submission.tar` (and an optional `environment/` scene) goes for the simulator and the robot |
 
@@ -26,7 +26,7 @@ and starts the run when you press Start.
 ```bash
 ./desktop_sim.sh --example walker --view
 ./desktop_sim.sh --example balance --view
-./desktop_sim.sh --example stairs --view     # also loads the stair course
+./desktop_sim.sh --example holosoma --view
 ```
 
 For the first five seconds GR00T balance holds the robot, as it does on the
@@ -39,8 +39,8 @@ watch again with `./desktop_sim.sh replay`. To keep several runs side by side,
 give each one its own output directory and replay it by path:
 
 ```bash
-./desktop_sim.sh --example stairs --seconds 20 --output containers/sim/output/stairs-on
-./desktop_sim.sh replay containers/sim/output/stairs-on/trace.npz
+./desktop_sim.sh --example walker --seconds 20 --output containers/sim/output/walker-on
+./desktop_sim.sh replay containers/sim/output/walker-on/trace.npz
 ```
 
 Adding `--local` runs an example directly in MuJoCo, without Docker or ROS.
@@ -101,8 +101,8 @@ and the report says `violation`. Running the same example with
 a run reports `completed`, which is not a pass.
 
 ```bash
-./desktop_sim.sh --example stairs --seconds 20 --output containers/sim/output/stairs-on
-./desktop_sim.sh --example stairs --seconds 20 --no-safety-checks --output containers/sim/output/stairs-off
+./desktop_sim.sh --example walker --seconds 20 --output containers/sim/output/walker-on
+./desktop_sim.sh --example walker --seconds 20 --no-safety-checks --output containers/sim/output/walker-off
 ```
 
 ## Steer the walker

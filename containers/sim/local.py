@@ -174,7 +174,7 @@ def circle(output, seconds=10.0, safety_checks=True, scene=None, pose="standing"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--example", choices=("stairs", "walker", "balance", "holosoma"))
+    mode.add_argument("--example", choices=("walker", "balance", "holosoma"))
     mode.add_argument("--self-test", action="store_true")
     mode.add_argument("--circle", action="store_true")
     parser.add_argument("--output", type=Path, required=True)

@@ -38,7 +38,7 @@ Desktop --self-test and --circle run locally without ROS or Docker.
                     Message format and finite-value validation still apply.
 --scenario NAME    Local safety trial: recovery_tilt, policy_tilt, gantry_tilt, policy_crouch.
 --tilt-degrees DEG  Imposed pitch for --scenario (default 20).
---example NAME     Policy package: stairs, walker, balance, or holosoma.
+--example NAME     Policy package: walker, balance, or holosoma.
                    Builds image g1-sim-example-<name>:local.
                    The report policy field is that name. This is not a velocity file.
                    walker/thrash: belly-up walker, only thrash stops enabled.
@@ -278,7 +278,7 @@ if [[ "$battery" -eq 1 && "$circle" -eq 1 && "$pose" != "standing" ]]; then
   exit 2
 fi
 if [[ "$local_mode" -eq 1 && -z "$example" ]]; then
-  echo "--local requires --example stairs, walker, balance, or holosoma." >&2
+  echo "--local requires --example walker, balance, or holosoma." >&2
   exit 2
 fi
 mkdir -p "$out_dir"

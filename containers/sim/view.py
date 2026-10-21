@@ -683,12 +683,6 @@ def report_summary(report, safety_checks=True):
     motion = report.get("motion", {})
     if "fell" in motion:
         summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")
-    if "stairs" in motion:
-        stairs = motion["stairs"]
-        summary += (
-            f" | Stair treads: {stairs['distinct_treads']}/3"
-            f" | Finish upright: {stairs['finished_upright']}"
-        )
     return summary
 
 

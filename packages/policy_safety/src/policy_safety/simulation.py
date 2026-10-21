@@ -63,9 +63,7 @@ class Simulation:
         self.robot = read_json(self.path)
         robot = self.robot
         self.assets = validate_assets(self.path.parent, robot)
-        if robot["version"] != 1 or robot["contract"] not in (
-            "g1-walker-99-v1", "nvidia-decoupled-wbc-516-v1"
-        ):
+        if robot["version"] != 1 or robot["contract"] != "nvidia-decoupled-wbc-516-v1":
             raise ValueError("unsupported robot contract")
         for name in ("control_seconds", "physics_seconds", "standing_height"):
             positive(robot[name], name)

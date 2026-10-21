@@ -12,7 +12,6 @@ The commands for running them are in the [containers README](../README.md).
 | --- | --- | --- |
 | `walker` | NVIDIA Decoupled WBC Walk/Balance, walking forward at 0.3 m/s by default | Flat floor |
 | `balance` | The GR00T lower-body balance network, with the arms held at their starting pose | Flat floor |
-| `stairs` | The legacy arena stair network plus the original submission's scripted walk, pause, cross, hop, and arm overrides | Three low treads, a landing, a gap, and a finish pad |
 | `holosoma` | Holosoma FastSAC locomotion. Its weights are not in this repository; set `HIM_HOLOSOMA_ONNX` | Flat floor |
 
 Every controller sends a hold at the measured pose as its first command. After
@@ -23,7 +22,6 @@ change to the safety thresholds.
 | --- | --- |
 | [`policies/walker/`](policies/walker/) | NVIDIA Walk and Balance checkpoints, their YAML contract, license, and provenance |
 | [`policies/balance/`](policies/balance/) | The GR00T balance checkpoint |
-| [`policies/stairs/`](policies/stairs/) | The legacy stair checkpoint |
 | [`commands/walker/`](commands/walker/) | Velocity schedules for the walker: stand, forward, forward then stop, circle, first steps |
 | `client.py`, `controllers.py`, `command.py`, `trial.py` | The shared ROS client and the per-example controllers |
 | `prepare.py`, `Dockerfile`, `entrypoint.sh` | Build-context generation and the image definition |
@@ -77,19 +75,8 @@ measurement source is configured.
 | `ctrl_low`, `ctrl_high` | Actuator target bounds, in motor order |
 | `sim_time`, `height`, `upright` | Simulation time and pelvis state |
 
-## Stair course results
-
-For the stair course, the report's `motion` section adds two measures.
-`climbed_stairs` means the feet touched at least two treads, the robot stood on
-the landing, and it did not fall. `course_success` also requires crossing the
-gap with no foot touching any platform and finishing upright on the finish pad.
-The stair controller's phases use the original course coordinates, so a
-different stair scene may need controller changes too.
-
 ## Provenance
 
-The stair course and its scripted controller come from this repository's
-`examples/sample_submissions/unitree_g1_stairs` before commit `d541eb4`; the
-model's history is in [its README](policies/stairs/README.md). The walker runs
+The walker runs
 through `NvidiaWalker` in `policy_safety/adapter.py`, and the balance example
 through `robot_safety/balance_policy.py`.

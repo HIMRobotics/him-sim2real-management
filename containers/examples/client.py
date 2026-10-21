@@ -108,9 +108,7 @@ class PolicyNode(Node):
         state = json.loads(message.data)
         if self.mode != "sim" and state.get("host_boot_id") != Path("/proc/sys/kernel/random/boot_id").read_text().strip():
             raise RuntimeError("policy state came from another host clock")
-        if self.policy.name == "stairs" and "base_velocity" not in state:
-            raise RuntimeError("policy requires measured base velocity")
-        if (self.trial or (self.policy.name == "stairs" and self.task_command is None)) and "position" not in state:
+        if self.trial and "position" not in state:
             raise RuntimeError("task requires measured base position")
         if self.session_id is None and self.mode == "sim":
             self.session_id = state["session_id"]

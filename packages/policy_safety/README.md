@@ -18,11 +18,11 @@ uv pip install --python .venv-policy-safety/bin/python ./packages/policy_safety
 source .venv-policy-safety/bin/activate
 python --version
 policy-safety prepare-g1 \
-  --submission /path/to/g1-walker-bundle \
+  --submission containers/examples/policies/walker \
   --output /tmp/g1-screening-bundle
 policy-safety evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \
-  --adapter g1-walker-99-v1 \
+  --adapter nvidia-decoupled-wbc-516-v1 \
   --robot-config /tmp/g1-screening-bundle/robot.json \
   --output /tmp/g1-screening-result
 ```
@@ -63,7 +63,7 @@ source .venv-policy-safety/bin/activate
 python -m pip install /path/to/him_policy_safety-0.1.0-py3-none-any.whl
 policy-safety evaluate \
   --model /path/to/g1-screening-bundle/walker.onnx \
-  --adapter g1-walker-99-v1 \
+  --adapter nvidia-decoupled-wbc-516-v1 \
   --robot-config /path/to/g1-screening-bundle/robot.json \
   --output ./screening-result
 ```
@@ -79,37 +79,36 @@ safety environment activated as above:
 ```bash
 python tools/check_policy_safety.py evaluate \
   --model /tmp/g1-screening-bundle/walker.onnx \
-  --adapter g1-walker-99-v1 \
+  --adapter nvidia-decoupled-wbc-516-v1 \
   --robot-config /tmp/g1-screening-bundle/robot.json \
   --output /tmp/g1-screening-result-2
 ```
 
-## What the first adapter tests
+## What the adapter tests
 
-`g1-walker-99-v1` implements the sample's neural observation contract: local base
-linear velocity, local angular velocity, projected gravity, joint offsets, joint
-velocities, previous network action, and commanded forward/lateral/yaw velocity.
-The sample ONNX graph already contains normalization. Outputs become joint
-position targets using explicit per-joint defaults and scales, with the sample's
-position actuator gains and 20 ms control / 2 ms physics timing. The same
-contract is defined in the
-[stairs bundle](../../containers/examples/policies/stairs/walker.yaml). `prepare-g1` reads
-that YAML and writes `robot.json` for the checker. The example container uses the
-[shared policy client](../../containers/examples/README.md).
+`nvidia-decoupled-wbc-516-v1` implements the NVIDIA Decoupled WBC contract
+defined in the [walker bundle](../../containers/examples/policies/walker/walker.yaml).
+Each observation stacks six 86-value frames: scaled velocity command, height
+command, scaled local angular velocity, projected gravity, joint offsets, scaled
+joint velocities, and the previous 15-value action. The Balance network runs
+whenever the commanded velocity is near zero, and the Walk network otherwise.
+Both output 15 leg and waist targets as default plus 0.25 times the action; the
+14 arm joints hold neutral targets. Timing is 20 ms control / 2 ms physics.
+`prepare-g1` reads that YAML and writes `robot.json` for the checker. The full
+layout is in [ONNX_BUNDLE.md](../../ONNX_BUNDLE.md), and the example container
+uses the [shared policy client](../../containers/examples/README.md).
 
-This tests all 29 network outputs. It excludes the submission's scripted phase
-machine, hop modifications, and arm overrides. Consequently, its results do not
-describe the complete stairs submission. Decoded positions are clipped to the
-intersection of model and joint-profile bounds. Reports retain the raw proposal,
-clipped command and per-joint warnings. Torque checks use the clipped
-command. Position clipping is always enabled and has no command-line toggle.
+Decoded positions are clipped to the intersection of model and joint-profile
+bounds. Reports retain the raw proposal, clipped command and per-joint warnings.
+Torque checks use the clipped command. Position clipping is always enabled and
+has no command-line toggle.
 
 Other ONNX exports need a trusted adapter matching their own contract. Matching
-tensor dimensions is insufficient. Follow the `G1Walker` adapter contract, register it
+tensor dimensions is insufficient. Follow the `NvidiaWalker` adapter contract, register it
 in `ADAPTERS`, and extend robot backend validation when adding support. Adapters must save/restore all history and recurrent state and declare
 observation frames, normalization, action semantics, gains, and timing. Arbitrary
 submitted Python adapters are not auto-loaded. The initial simulator backend is
-specific to the G1 walker contract and position actuators.
+specific to the G1 29-joint model and position actuators.
 
 ## Scenarios and limits
 
@@ -282,7 +281,7 @@ the weak-motor and high-gain standing runs. Pass command names (`stand`,
 ```bash
 policy-safety render \
   --model /tmp/g1-screening-bundle/walker.onnx \
-  --adapter g1-walker-99-v1 \
+  --adapter nvidia-decoupled-wbc-516-v1 \
   --robot-config /tmp/g1-screening-bundle/robot.json \
   --output tmp/vids \
   --scenarios stand,forward,forward-pelvis-push-small,forward-pelvis-push-medium,forward-pelvis-push-heavy,stand-95,stand-105,seated

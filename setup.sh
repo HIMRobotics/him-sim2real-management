@@ -89,7 +89,7 @@ if [[ -n "$command_file" && ! -f "$command_file" ]]; then
   exit 2
 fi
 if [[ -n "$example" ]]; then
-  case "$example" in walker|stairs|balance|holosoma) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
+  case "$example" in walker|balance|holosoma) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
 fi
 if [[ -z "$runtime" ]]; then
   if command -v docker >/dev/null 2>&1; then runtime=docker

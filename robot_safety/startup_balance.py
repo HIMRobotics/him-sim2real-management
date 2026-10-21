@@ -19,6 +19,10 @@ class StartupBalance:
     max_joint_speed = 0.6
     entry_seconds = 0.5
     blend_seconds = 1.0
+    # Gear WBC holds the arms at zero: elbows about 90 degrees, forearms level and forward.
+    arm_target = np.zeros(14)
+    # Readiness requires joint speed under max_joint_speed, so the hold waits for this ramp.
+    arm_seconds = 2.0
 
     def __init__(self, policy=None):
         self.policy = policy
@@ -74,6 +78,12 @@ class StartupBalance:
             raise ValueError("startup_balance_nonfinite_output")
         self.entry_goal_seconds = seconds
         self.entry_goal = pose
+
+    def _arm_command(self, now):
+        """Ease the arms from the measured pose to the balance arm pose."""
+        alpha = min(1.0, max(0.0, (now - self.entry_started) / self.arm_seconds))
+        alpha = alpha * alpha * (3 - 2 * alpha)
+        return (1 - alpha) * self.arm_pose + alpha * self.arm_target
 
     def prepare(self):
         """Load and validate inference before output ownership changes."""
@@ -188,7 +198,7 @@ class StartupBalance:
                     }
                 else:
                     self.raw_balance = {
-                        "q": np.concatenate((produced, self.arm_pose)), "dq": np.zeros(29),
+                        "q": np.concatenate((produced, self._arm_command(now))), "dq": np.zeros(29),
                         "kp": np.concatenate((LEG_KP, np.full(14, 40.0))),
                         "kd": np.concatenate((LEG_KD, np.full(14, 1.0))), "tau": np.zeros(29),
                     }

@@ -37,7 +37,7 @@ Your submission passes when `containers/sim/output/report.json` reports
 [run on the robot](#run-it-on-the-robot).
 
 The [`examples/`](examples/README.md) directory contains finished reference
-policies (the NVIDIA walker, GR00T balance, and a stair walker) that are useful
+policies (the NVIDIA walker, GR00T balance, and Holosoma) that are useful
 for comparison. They are not a good starting point, because their weights are
 baked into a shared image that bundles several policies together.
 
