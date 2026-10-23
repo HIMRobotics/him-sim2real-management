@@ -70,7 +70,6 @@ class PolicyNode(Node):
         )
         self.create_subscription(Abort, "/safety/abort", self.on_abort, abort_qos)
         self.abort_pub = self.create_publisher(Abort, "/safety/abort", abort_qos)
-        self.create_timer(0.02, self.publish_command)
 
     def arm(self):
         """Use the existing readiness and session services."""
@@ -116,6 +115,9 @@ class PolicyNode(Node):
             raise RuntimeError("policy session changed")
         self.state = state
         self.last_received = time.monotonic()
+        # Answer each state as it arrives so the command lands on the next
+        # control tick; a separate timer drifts against the robot's and skips ticks.
+        self.publish_command()
 
     def publish_command(self):
         if self.done or not self.session_id or self.state is None:

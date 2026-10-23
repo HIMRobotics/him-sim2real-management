@@ -41,7 +41,6 @@ class SubmissionNode(Node):
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Abort, "/safety/abort", self.on_abort, abort_qos)
         self.abort_pub = self.create_publisher(Abort, "/safety/abort", abort_qos)
-        self.create_timer(0.02, self.publish_command)
 
     def call(self, service, kind, request, timeout=5.0):
         client = self.create_client(kind, service)
@@ -60,7 +59,7 @@ class SubmissionNode(Node):
 
     def arm(self):
         # The checker's action watchdog starts here: the next command must
-        # arrive within 0.2 s, which the 20 ms timer provides.
+        # arrive within 0.2 s, which answering each 20 ms state provides.
         if self.mode != "sim":
             self.call("/safety/controller_stop/ready", Trigger, Trigger.Request())
             self.call("/safety/motor_gate/ready", Trigger, Trigger.Request(), timeout=10.0)
@@ -73,9 +72,12 @@ class SubmissionNode(Node):
         print("Armed session " + session, flush=True)
 
     def on_state(self, message):
+        # Answer each state as it arrives so the command lands on the next
+        # control tick; a separate timer drifts against the robot's and skips ticks.
         if not self.done:
             self.state = json.loads(message.data)
             self.last_received = time.monotonic()
+            self.publish_command()
 
     def publish_command(self):
         if self.done or not self.session_id or self.state is None:
