@@ -33,6 +33,8 @@ tmp
 # Template build output. Example builds use .cache/sim_examples/.
 containers/template/submission.tar
 containers/template/.build/
+dance/submission/submission.tar
+dance/submission/.build/
 
 # Uploaded robot containers. Keep the drop folder, not the images.
 containers/upload/*
