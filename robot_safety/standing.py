@@ -10,11 +10,20 @@ from .hardware_constants import NUM_JOINTS
 # LowState IMU is in the pelvis frame. The torso IMU is a separate SDK topic.
 _HIP_FRAME_PITCH = 2 * math.atan2(0.0873386, 0.996179)
 _JOINT_AXES = (1, 0, 2, 1, 1, 0)
-_FOOT_POINTS = np.array([
-    [-0.05, 0.025, -0.03], [-0.05, -0.025, -0.03],
-    [0.12, 0.03, -0.03], [0.12, -0.03, -0.03],
-])
-_FOOT_RADIUS_M = 0.005
+# Endpoints of the 7 sole capsules per foot. A capsule's lowest point is at an
+# endpoint, so these points plus the radius bound the sole exactly.
+_SOLE_SEGMENTS = [
+    [(0.1, -0.026), (0.05, -0.026)], [(-0.044, -0.018), (0.123, -0.018)],
+    [(-0.052, -0.01), (0.13, -0.01)], [(-0.054, 0.0), (0.132, 0.0)],
+    [(-0.052, 0.01), (0.13, 0.01)], [(-0.044, 0.018), (0.123, 0.018)],
+    [(0.1, 0.026), (0.05, 0.026)],
+]
+# The upstream left sole's outer back endpoint sits 1 mm further out.
+_FOOT_POINTS = tuple(
+    np.array([[x, y, -0.025] for segment in segments for x, y in segment])
+    for segments in ([[(0.1, -0.026), (0.05, -0.027)]] + _SOLE_SEGMENTS[1:], _SOLE_SEGMENTS)
+)
+_FOOT_RADIUS_M = 0.01
 
 
 def _rotation(axis, angle):
@@ -59,7 +68,7 @@ def pelvis_to_sole_heights(q, quat):
         for index, (offset, fixed, axis) in enumerate(zip(offsets, _FIXED_ROTATIONS, _JOINT_AXES)):
             height -= float(up @ offset)
             up = _rotation(axis, q[leg * 6 + index]).T @ (fixed.T @ up)
-        heights.append(height - float(np.min(_FOOT_POINTS @ up)) + _FOOT_RADIUS_M)
+        heights.append(height - float(np.min(_FOOT_POINTS[leg] @ up)) + _FOOT_RADIUS_M)
     return tuple(heights)
 
 

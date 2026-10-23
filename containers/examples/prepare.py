@@ -21,8 +21,8 @@ from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 # into on flat ground on this model, mirrored left to right. Started from the
 # policies' own defaults, the knees sag 3 cm and the robot sways back a step
 # and turns.
-STANCE_LEFT_LEG = [-0.412, 0.044, 0.015, 0.741, -0.325, -0.007]
-STANCE = STANCE_LEFT_LEG + [-0.412, -0.044, -0.015, 0.741, -0.325, 0.007] + [0.0] * 17
+STANCE_LEFT_LEG = [-0.395, 0.014, 0.006, 0.738, -0.362, -0.008]
+STANCE = STANCE_LEFT_LEG + [-0.395, -0.014, -0.006, 0.738, -0.362, 0.008] + [0.0] * 17
 
 EXAMPLES = ("walker", "balance", "holosoma")
 

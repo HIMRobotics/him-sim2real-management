@@ -37,3 +37,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 Menagerie repository itself is Apache-2.0; robot assets retain the Unitree notice above.
+
+## Unitree G1 collision geometry (unitree_rl_mjlab)
+
+- Source: https://github.com/unitreerobotics/unitree_rl_mjlab, file
+  `src/assets/robots/unitree_g1/xmls/g1.xml`
+- Exact git commit: 1425b15f73bd4095f0df53709d7c389c3eb9e790
+- License: Apache-2.0
+- Used in `g1_robot.xml`: the collision geoms (7 capsules per sole, primitive
+  limb, pelvis, torso and head shapes) and the contact exclusions. Kinematics,
+  inertias, joint ranges and visual meshes remain the Menagerie model's, which
+  match that file exactly.

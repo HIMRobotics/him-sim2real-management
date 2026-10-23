@@ -89,8 +89,12 @@ def test_geometry_matches_mujoco_for_asymmetric_joints_and_orientation():
             body_id = model.body(side + '_ankle_roll_link').id
             feet = [i for i in range(model.ngeom)
                     if model.geom_bodyid[i] == body_id
-                    and model.geom_type[i] == mujoco.mjtGeom.mjGEOM_SPHERE]
-            sole_z = min(data.geom_xpos[i, 2] - model.geom_size[i, 0] for i in feet)
+                    and model.geom_type[i] == mujoco.mjtGeom.mjGEOM_CAPSULE]
+            assert len(feet) == 7
+            sole_z = min(
+                data.geom_xpos[i, 2] + sign * model.geom_size[i, 1]
+                * data.geom_xmat[i].reshape(3, 3)[2, 2] - model.geom_size[i, 0]
+                for i in feet for sign in (-1, 1))
             expected.append(data.body('pelvis').xpos[2] - sole_z)
         assert pelvis_to_sole_heights(q, quat) == pytest.approx(expected, abs=1e-9)
         assert pelvis_to_sole_heights(q, -quat * 1.01) == pytest.approx(expected, abs=1e-9)
