@@ -20,6 +20,7 @@ from .hardware_profile import (
 from .motor_gate import MotorCommandGate
 from .ros_nodes import MotorGateNode
 from .unitree_transport import UnitreeArmTransport
+from .timing_profile import profiled
 
 
 def _as_bool(value):
@@ -75,6 +76,7 @@ class HardwareMotorGateNode(MotorGateNode):
         )
         self.output_enabled = enabled
         self.adapter.start_workers()
+        self.timing_profiler = self.adapter.timing_profiler
         self.get_logger().warn(
             f"Hardware output enabled: {enabled}. No automatic rearm."
         )
@@ -230,6 +232,7 @@ class HardwareMotorGateNode(MotorGateNode):
             self.adapter.abort(message.reason or "external_abort")
         super().on_abort(message)
 
+    @profiled("ros.publish_output")
     def publish_output(self):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:

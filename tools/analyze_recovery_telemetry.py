@@ -95,6 +95,63 @@ def add_transition(transitions, stamp, phase):
             transitions.append((stamp, phase))
 
 
+def summarize_timing(path, start=None, end=None):
+    """Summarize complete timing windows without double-counting nested stages."""
+    errors = Counter()
+    groups = {}
+    records = boundary_records = profiler_errors = 0
+    edges = None
+    for row in rows(Path(path), errors):
+        if row.get("event") != "timing_profile":
+            continue
+        left, right = row.get("window_start_s"), row.get("mono_s")
+        if not finite(left) or not finite(right):
+            errors["timing_window"] += 1
+            continue
+        if (start is not None and left < start) or (end is not None and right > end):
+            boundary_records += 1
+            continue
+        records += 1
+        profiler_errors = max(profiler_errors, row.get("profiler_errors", 0))
+        edges = row.get("wall_histogram_edges_s")
+        identity = str(row.get("pid")) + ":" + str(row.get("tid"))
+        group = groups.setdefault(identity, {"thread": row.get("thread"), "windows": 0,
+                                            "window_seconds": 0.0, "stages": {}})
+        group["windows"] += 1
+        group["window_seconds"] += right - left
+        for name, stage in row.get("stages", {}).items():
+            total = group["stages"].setdefault(name, {})
+            for key, value in stage.items():
+                if key == "slowest_finished_s":
+                    continue
+                if key == "wall_histogram":
+                    old = total.setdefault(key, [0] * len(value))
+                    total[key] = [a + b for a, b in zip(old, value)]
+                elif key.endswith("_max") or key == "wall_max_s":
+                    total[key] = max(total.get(key, 0), value)
+                else:
+                    total[key] = total.get(key, 0) + value
+    for group in groups.values():
+        for stage in group["stages"].values():
+            count = stage.get("count", 0)
+            if count:
+                stage["mean_wall_ms"] = 1000 * stage["wall_s"] / count
+                stage["mean_calling_thread_cpu_ms"] = 1000 * stage["cpu_s"] / count
+                stage["mean_non_cpu_elapsed_ms"] = 1000 * max(0, stage["wall_s"] - stage["cpu_s"]) / count
+                stage["calls_per_window_second"] = count / group["window_seconds"] if group["window_seconds"] else None
+    return {"records": records, "excluded_boundary_records": boundary_records,
+            "profiler_errors_max": profiler_errors, "parse_errors": dict(errors),
+            "wall_histogram_edges_s": edges, "threads": groups,
+            "notes": [
+                "Stages include nested work. Do not sum parent and child durations.",
+                "CPU time belongs to the calling thread, not all ONNX/native helper threads.",
+                "Wall minus CPU is not a direct GIL measurement. It includes locks, sleep, I/O and scheduling.",
+                "Only complete reporting windows within capture bounds are included. Calls are assigned at completion.",
+                "Active threads report about once per second. A blocked call appears only after returning.",
+                "Histograms have an overflow bin. Timer interruption counts include shutdown wake-ups.",
+            ]}
+
+
 def analyze(directory, plot=False):
     directory = Path(directory)
     errors = Counter()
@@ -303,6 +360,12 @@ def analyze(directory, plot=False):
             result['plot'] = 'diagnostic-timeline.png'
         except ImportError:
             result['plot_unavailable'] = 'matplotlib is not installed'
+    timing = summarize_timing(
+        directory / 'diagnostic-trace.jsonl',
+        capture_summary.get('start_monotonic_ns', 0) / 1e9 or start,
+        capture_summary.get('end_monotonic_ns', 0) / 1e9 or end)
+    (directory / 'timing-summary.json').write_text(json.dumps(timing, indent=2) + '\n')
+    result['timing_summary'] = 'timing-summary.json'
     (directory / 'diagnostic-summary.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
 

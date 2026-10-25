@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .timing_profile import profiled, scope
 from .hardware_constants import G1_29_JOINT_NAMES
 
 ACTION_SCALE = 0.25
@@ -141,6 +142,7 @@ class HolosomaLocomotionPolicy:
         self.update(self.default_angles, np.zeros(29), [1.0, 0.0, 0.0, 0.0], np.zeros(3))
         self.reset()
 
+    @profiled("holosoma_policy.update")
     def update(self, q, dq, quat, gyro, velocity=None):
         if velocity is None:
             velocity = np.zeros(3)
@@ -151,8 +153,10 @@ class HolosomaLocomotionPolicy:
         obs = self.observation(q, dq, quat, gyro)
         if self.diagnostic_enabled:
             self.diagnostic_observation = obs.tolist()
+        with scope(self, "onnx_session_run"):
+            prediction = self.session.run(None, {"actor_obs": obs.reshape(1, OBS_DIM)})[0]
         raw = np.clip(np.asarray(
-            self.session.run(None, {"actor_obs": obs.reshape(1, OBS_DIM)})[0],
+            prediction,
             dtype=float,
         ).reshape(29), -100.0, 100.0)
         if not np.isfinite(raw).all():
@@ -163,6 +167,7 @@ class HolosomaLocomotionPolicy:
             raise ValueError("holosoma_nonfinite_target")
         return target
 
+    @profiled("holosoma_policy.observation")
     def observation(self, q, dq, quat, gyro):
         q = self._model(np.asarray(q, dtype=float).reshape(29))
         dq = self._model(np.asarray(dq, dtype=float).reshape(29))

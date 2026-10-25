@@ -21,6 +21,7 @@ from .controller import (
     decode_left_pressed,
 )
 from .feedback import feedback_from_sdk
+from .timing_profile import profiled, scope, timed_lock, timed_wait
 from .hardware_constants import (
     DAMPING_FSM_ID,
     G1_29_JOINT_NAMES,
@@ -164,16 +165,18 @@ class G1HardwareAdapter:
             window, HARDWARE_FEEDBACK_TIMEOUT_SECS
         )
 
+    @profiled("hardware_adapter.receive_state")
     def receive_state(self, message):
         """Read machine type, measured joints and double Start directly from the SDK."""
         diagnostic = self._diagnostics_enabled()
         callback_entered = time.monotonic() if diagnostic else None
         poller = getattr(self.transport, "state_poller", None) if diagnostic else None
         poll_sample = getattr(poller, "diagnostics", None) if diagnostic else None
-        with self.lock:
+        with timed_lock(self, self.lock, "hardware_adapter.lock"):
             lock_acquired = time.monotonic() if diagnostic else None
             try:
-                sample = feedback_from_sdk(message, self.clock())
+                with scope(self, "feedback_conversion"):
+                    sample = feedback_from_sdk(message, self.clock())
                 self.machine_type = message.mode_machine
                 stop = self.button_detector.update(
                     sample.start_button_pressed, sample.received_at_secs
@@ -227,7 +230,7 @@ class G1HardwareAdapter:
                         self.check_health(recovery=True)
                     except ValueError as error:
                         self.abort(str(error), request_damping=True)
-                with self.stop_lock:
+                with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                     self.pose_snapshot = tuple(
                         sample.q[index] for index in UPPER_BODY_INDICES
                     )
@@ -263,22 +266,23 @@ class G1HardwareAdapter:
             if not math.isfinite(charge) or not 0 <= charge <= 100:
                 raise ValueError("invalid_battery_feedback")
         except (AttributeError, TypeError, ValueError):
-            with self.stop_lock:
+            with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                 armed = self.armed
             self.abort("invalid_battery_feedback", request_damping=armed)
             return
-        with self.stop_lock:
+        with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
             armed = self.armed
-        with self.battery_lock:
+        with timed_lock(self, self.battery_lock, "hardware_adapter.battery_lock"):
             self.battery_percent, self.battery_time = charge, self.clock()
         if armed and charge < MIN_BATTERY_PERCENT:
             self.abort("low_battery", request_damping=True)
 
+    @profiled("hardware_adapter.check_health")
     def check_health(self, *, recovery=False):
         """Check health and standing posture, recording overloads during recovery."""
         if self.whole_body and (self.feedback is None or not self.feedback.quat or not self.feedback.gyro):
             raise ValueError("missing_hardware_imu")
-        with self.battery_lock:
+        with timed_lock(self, self.battery_lock, "hardware_adapter.battery_lock"):
             battery_time = self.battery_time
             battery_percent = self.battery_percent
         if (battery_time is None
@@ -308,9 +312,10 @@ class G1HardwareAdapter:
             if not 0.9 <= norm <= 1.1:
                 raise ValueError("invalid_hardware_feedback")
             upright = 1 - 2 * (quat[1] ** 2 + quat[2] ** 2) / norm
-            if (upright < STANDING_UPRIGHT_MIN - 1e-12
-                    or standing_height(feedback.q, quat) < STANDING_HEIGHT_MIN_M - 1e-12):
-                raise ValueError("hardware_not_standing")
+            with scope(self, "standing_posture_check"):
+                if (upright < STANDING_UPRIGHT_MIN - 1e-12
+                        or standing_height(feedback.q, quat) < STANDING_HEIGHT_MIN_M - 1e-12):
+                    raise ValueError("hardware_not_standing")
         if self.feedback.tau_est:
             for index, limits in self._monitored_joints():
                 torque = self.feedback.tau_est[index]
@@ -338,7 +343,7 @@ class G1HardwareAdapter:
         if self.armed or self.abort_reason:
             return self.reject_arm("already armed or stopped")
         code, fsm_id = self.transport.read_ready_fsm()
-        with self.lock:
+        with timed_lock(self, self.lock, "hardware_adapter.lock"):
             if self.abort_reason:
                 return self.reject_arm(f"already stopped: {self.abort_reason}")
             if code != 0:
@@ -358,7 +363,7 @@ class G1HardwareAdapter:
 
     def arm(self):
         """Require confirmed stock mode, fresh telemetry and physical limits."""
-        with self.lock:
+        with timed_lock(self, self.lock, "hardware_adapter.lock"):
             now = self.clock()
             if self.abort_reason:
                 return self.reject_arm(f"already stopped: {self.abort_reason}")
@@ -422,7 +427,7 @@ class G1HardwareAdapter:
                 if not self._ensure_startup_policy():
                     return self.reject_arm("startup_balance_model_unavailable")
             # Serialize granting control with an abort arriving from another thread.
-            with self.stop_lock:
+            with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                 if self.abort_reason:
                     return self.reject_arm(f"already stopped: {self.abort_reason}")
                 self._reset_session()
@@ -467,11 +472,16 @@ class G1HardwareAdapter:
             return False
         return True
 
+    @profiled("hardware_adapter.abort")
     def abort(self, reason, request_damping=False):
         """Latch the submission fault and select recovery or damping."""
         # Keep stop requests independent of a blocked SDK write.
-        with self.stop_lock:
+        with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
             first_fault = self.abort_reason is None
+            if getattr(self, "timing_profiler", None) is not None:
+                self.timing_profiler.record("abort_notifications", 0.0, 0.0,
+                                            first=int(first_fault),
+                                            repeated_reason=int(reason == self.abort_reason))
             recoverable = (reason not in DAMP_ONLY_REASONS and not self.hold_failed
                            and (self.whole_body or self.walk_stop) and self._recovery_health_ok())
             if (first_fault and reason not in DAMP_ONLY_REASONS
@@ -508,7 +518,7 @@ class G1HardwareAdapter:
                 self.automatic_soft_reset = False
             if self.armed or request_damping or self.walk_stop or self.hold_failed:
                 self.stop_requested.set()
-            if self._diagnostics_enabled():
+            if self.trace is not None and getattr(self.trace, "diagnostic_enabled", False):
                 state = (reason, soft_balance, self.hold_failed, self.automatic_soft_reset)
                 if state != self._last_diagnostic_abort:
                     self._last_diagnostic_abort = state
@@ -530,7 +540,7 @@ class G1HardwareAdapter:
 
     def submit(self, command, expires_at_secs):
         """Copy gate-approved targets without renewing their original deadline."""
-        with self.lock:
+        with timed_lock(self, self.lock, "hardware_adapter.lock"):
             if self.abort_reason or not self.armed:
                 return
             now = self.clock()
@@ -550,13 +560,14 @@ class G1HardwareAdapter:
             self.command_expires_secs = expires_at_secs
             self.last_submission_secs = now
 
+    @profiled("hardware_adapter.step")
     def step(self):
         """Check and publish one command from the single output worker."""
         diagnostic_record = None
         if self.walk_stop and not self.hold_failed and self.stop_requested.is_set():
             self.stop_once()
             return
-        with self.lock:
+        with timed_lock(self, self.lock, "hardware_adapter.lock"):
             if not self.armed or self.abort_reason or self.stop_requested.is_set():
                 return
             now = self.clock()
@@ -640,12 +651,12 @@ class G1HardwareAdapter:
                     return
                 self.balance_released = True
                 self.motion_released_at_secs = self.clock()
-                with self.lock:
+                with timed_lock(self, self.lock, "hardware_adapter.lock"):
                     if self.abort_reason or self.stop_requested.is_set():
                         self.abort(self.abort_reason or "hardware_stop_during_release")
                         return
                     self.startup_policy.reset()
-                    with self.stop_lock:
+                    with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                         if not self.abort_reason and not self.stop_requested.is_set():
                             self.startup = StartupBalance(self.startup_policy)
             except Exception:  # noqa: BLE001 - An uncertain release requires restoration.
@@ -654,7 +665,7 @@ class G1HardwareAdapter:
                 return
             finally:
                 self.release_pending = False
-                with self.lock:
+                with timed_lock(self, self.lock, "hardware_adapter.lock"):
                     # ReleaseMode blocks longer than the publish gap. The next
                     # cycle starts from when the RPC returns.
                     self.last_worker_cycle_secs = self.clock()
@@ -669,7 +680,7 @@ class G1HardwareAdapter:
             written = (self.transport.write_body(targets, self.machine_type)
                        if self.whole_body else self.transport.write_arm(targets, weight))
             self._finish_command_diagnostic(diagnostic_record, write_started, written)
-            with self.lock:
+            with timed_lock(self, self.lock, "hardware_adapter.lock"):
                 if not written:
                     self.abort("hardware_write_failed")
                     return
@@ -683,7 +694,7 @@ class G1HardwareAdapter:
                     self.applied_gains = {i: (v["kp"], v["kd"]) for i, v in targets.items()}
                     self.command_time = self.clock()
                 if weight > 0:
-                    with self.stop_lock:
+                    with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                         self.ownership_taken = True
                 if self.first_output_secs is None:
                     self.first_output_secs = now
@@ -703,16 +714,20 @@ class G1HardwareAdapter:
             self.trace = None
 
     def _diagnostics_enabled(self):
-        return self.trace is not None and getattr(self.trace, "diagnostic_enabled", False) is True
+        return (self.trace is not None
+                and getattr(self.trace, "diagnostic_enabled", False) is True
+                and getattr(self.trace, "diagnostic_detail", True))
 
+    @profiled("hardware_adapter._note_diagnostic")
     def _note_diagnostic(self, record):
         """Keep optional logging failures outside the control decisions."""
         try:
-            if self._diagnostics_enabled():
+            if self.trace is not None and self.trace.diagnostic_enabled:
                 self.trace.note_diagnostic(record)
         except Exception:
             pass
 
+    @profiled("hardware_adapter._command_diagnostic")
     def _command_diagnostic(self, phase, feedback, targets, raw_q, input_info=None):
         """Snapshot the selected input and the command before its SDK write."""
         if not self._diagnostics_enabled():
@@ -739,6 +754,7 @@ class G1HardwareAdapter:
         except Exception:
             return None
 
+    @profiled("hardware_adapter._finish_command_diagnostic")
     def _finish_command_diagnostic(self, record, started, written):
         if record is None:
             return
@@ -781,7 +797,7 @@ class G1HardwareAdapter:
                 speed_joint, speed = name, speed_value
             if self.q_applied is not None and index in self.q_applied:
                 command_delta = max(command_delta, abs(written - self.q_applied[index]))
-        with self.battery_lock:
+        with timed_lock(self, self.battery_lock, "hardware_adapter.battery_lock"):
             battery_time = self.battery_time
         gyro = tuple(self.gyro)
         return {
@@ -895,6 +911,7 @@ class G1HardwareAdapter:
         blended["tau"] = [0.0] * count
         return blended
 
+    @profiled("hardware_adapter.checked_targets")
     def checked_targets(self, now):
         """Check proposals with the profile gains used by the arm controller."""
         command = self.command
@@ -929,7 +946,7 @@ class G1HardwareAdapter:
         # SDK calls stay off the arm-write lock so a stuck motion write cannot delay the stop.
         if self.release_pending:
             return
-        with self.stop_lock:
+        with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
             if not self.stop_requested.is_set():
                 return
             hard = self.hold_failed
@@ -944,10 +961,11 @@ class G1HardwareAdapter:
         if not owned:
             return
         if not self._publish_pose_hold():
-            with self.stop_lock:
+            with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                 self.hold_failed = True
             self._request_stock_damping()
 
+    @profiled("hardware_adapter._publish_balance")
     def _publish_balance(self):
         """Run zero-velocity Holosoma recovery on all 29 joints."""
         policy = self.soft_reset_policy
@@ -1024,13 +1042,14 @@ class G1HardwareAdapter:
                     limits, kp=float(policy.kp[index]), kd=float(policy.kd[index])))
                 for index, limits in self._monitored_joints()
             )
-            targets = checked_targets(
-                {"q": q, "dq": [0.0] * 29, "tau": [0.0] * 29},
-                entries, feedback.q, feedback.dq, initial=False,
-                initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
-                warnings=self.position_warnings,
-                torque_target_fraction=TORQUE_TARGET_FRACTION,
-            )
+            with scope(self, "recovery_target_checks"):
+                targets = checked_targets(
+                    {"q": q, "dq": [0.0] * 29, "tau": [0.0] * 29},
+                    entries, feedback.q, feedback.dq, initial=False,
+                    initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
+                    warnings=self.position_warnings,
+                    torque_target_fraction=TORQUE_TARGET_FRACTION,
+                )
             diagnostic_record = self._command_diagnostic("recovery", feedback, targets, q, input_info)
             if diagnostic_record is not None:
                 diagnostic_record.update({
@@ -1064,7 +1083,7 @@ class G1HardwareAdapter:
                 "error": str(exc), "command": diagnostic_record,
             })
             self.abort_reason = "balance_output_error: " + str(exc)
-            with self.stop_lock:
+            with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                 self.hold_failed = True
                 self.walk_stop = False
                 self.automatic_soft_reset = False
@@ -1129,7 +1148,7 @@ class G1HardwareAdapter:
 
     def _publish_pose_hold(self):
         """Command the pose captured at the stop, using profile gains and full ownership."""
-        with self.stop_lock:
+        with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
             now = self.clock()
             snapshot = self.pose_snapshot
             snapshot_secs = self.pose_snapshot_secs
@@ -1201,7 +1220,7 @@ class G1HardwareAdapter:
 
     def _release_after_confirmed_damp(self):
         """Stop resending damp so a later stand from the remote is left alone."""
-        with self.stop_lock:
+        with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
             self.soft_reset_active = False
             self.automatic_soft_reset = False
             self.hold_failed = False
@@ -1224,25 +1243,34 @@ class G1HardwareAdapter:
         self._ensure_startup_policy()
         self.trace = ControlTrace(default_trace_path())
         self.trace.open()
+        self.timing_profiler = self.trace.timing_profiler
+        for component in (self.transport, self.soft_reset_policy, self.balance_policy,
+                          getattr(self.transport, "state_poller", None),
+                          getattr(self.transport, "state_reader", None)):
+            if component is not None:
+                component.timing_profiler = self.timing_profiler
         if self.trace.diagnostic_enabled:
             enable = getattr(self.transport, "set_diagnostics_enabled", None)
             if enable is not None:
-                enable(True)
+                enable(self.trace.diagnostic_detail)
             if self.soft_reset_policy is not None:
-                self.soft_reset_policy.diagnostic_enabled = True
+                self.soft_reset_policy.diagnostic_enabled = self.trace.diagnostic_detail
             metadata = {
                 "event": "diagnostic_start", "mono_s": time.monotonic(),
                 "policy_path": getattr(self.soft_reset_policy, "path", None),
                 "state_period_s": STATE_POLL_SECS, "output_period_s": HARDWARE_PERIOD_SECS,
                 "repeat_period_s": BODY_REPEAT_SECS,
                 "profile": asdict(self.profile), "python": sys.version,
+                "timing_profile_version": 1 if self.timing_profiler is not None else None,
+                "diagnostic_detail": self.trace.diagnostic_detail,
                 "pid": os.getpid(), "source_sha256": {},
             }
             try:
                 metadata["policy_sha256"] = hashlib.sha256(
                     Path(metadata["policy_path"]).read_bytes()).hexdigest()
                 for name in ("hardware_adapter.py", "holosoma_policy.py", "sdk_latest.py",
-                             "unitree_transport.py", "joint_checks.py", "control_trace.py"):
+                             "unitree_transport.py", "joint_checks.py", "control_trace.py",
+                             "timing_profile.py", "hardware_node.py"):
                     source = Path(__file__).with_name(name)
                     metadata["source_sha256"][name] = hashlib.sha256(source.read_bytes()).hexdigest()
             except (OSError, TypeError) as error:
@@ -1255,10 +1283,11 @@ class G1HardwareAdapter:
             # period after each step stretches 20 ms by the step time.
             next_tick = time.monotonic()
             while True:
+                deadline = next_tick + HARDWARE_PERIOD_SECS
                 delay, next_tick = poll_deadline(
-                    next_tick + HARDWARE_PERIOD_SECS, time.monotonic(), HARDWARE_PERIOD_SECS
+                    deadline, time.monotonic(), HARDWARE_PERIOD_SECS
                 )
-                if self.shutdown_requested.wait(delay):
+                if timed_wait(self, self.shutdown_requested, delay, deadline, "output_timer"):
                     return
                 self.step()
 
@@ -1270,13 +1299,15 @@ class G1HardwareAdapter:
             while not self.shutdown_requested.is_set():
                 self._repeat_body_once()
                 now = time.monotonic()
-                delay, next_tick = whole_body_repeat_wait(next_tick + BODY_REPEAT_SECS, now)
-                if self.shutdown_requested.wait(delay):
+                deadline = next_tick + BODY_REPEAT_SECS
+                delay, next_tick = whole_body_repeat_wait(deadline, now)
+                if timed_wait(self, self.shutdown_requested, delay, deadline, "resend_timer"):
                     return
 
         def stop_loop():
             last_request_secs = None
-            while not self.shutdown_requested.wait(HARDWARE_WATCHDOG_POLL_SECS):
+            while not timed_wait(self, self.shutdown_requested, HARDWARE_WATCHDOG_POLL_SECS,
+                                 time.monotonic() + HARDWARE_WATCHDOG_POLL_SECS, "watchdog_timer"):
                 now = self.clock()
                 last_progress = self.last_worker_cycle_secs
                 if last_progress is None:
@@ -1290,7 +1321,7 @@ class G1HardwareAdapter:
                     self.abort("hardware_output_worker_stalled")
                 if not self.stop_requested.is_set():
                     continue
-                with self.stop_lock:
+                with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
                     hard = self.hold_failed
                     walk = self.walk_stop and not hard
                     holding = self.ownership_taken and not hard and not walk
@@ -1312,10 +1343,10 @@ class G1HardwareAdapter:
                     last_request_secs = self.clock()
 
         self.workers = [
-            Thread(target=output_loop, daemon=True),
-            Thread(target=stop_loop, daemon=True),
+            Thread(target=output_loop, name="policy_output", daemon=True),
+            Thread(target=stop_loop, name="stop_watchdog", daemon=True),
         ]
-        self.workers.append(Thread(target=body_repeat_loop, daemon=True))
+        self.workers.append(Thread(target=body_repeat_loop, name="command_resend", daemon=True))
         if self.whole_body:
             print(
                 "Whole-body rt/lowcmd refreshes every 2 ms. "
@@ -1325,6 +1356,7 @@ class G1HardwareAdapter:
         for worker in self.workers:
             worker.start()
 
+    @profiled("hardware_adapter._repeat_body_once")
     def _repeat_body_once(self):
         """Publish the latched whole-body command, or nothing once it is cleared."""
         transport = self.transport
@@ -1346,7 +1378,7 @@ class G1HardwareAdapter:
     def close(self):
         """Damp on exit only after this process has taken arm ownership."""
         self.abort("hardware_shutdown")
-        with self.stop_lock:
+        with timed_lock(self, self.stop_lock, "hardware_adapter.stop_lock"):
             soft = self.walk_stop and not self.hold_failed and not self.balance_released
             exiting_a_hold = (self.ownership_taken and not soft) or self.balance_released
             if exiting_a_hold:

@@ -9,6 +9,8 @@ Samples here stay serialized in DDS until ``take_latest`` decodes one.
 import threading
 import time
 
+from .timing_profile import profiled, scope, timed_wait
+
 
 def _new_reader(topic, message_type, depth):
     from cyclonedds.qos import Policy, Qos
@@ -40,6 +42,7 @@ class LatestSdkReader:
         self.depth = depth
         self.reader = reader if reader is not None else _new_reader(topic, message_type, depth)
 
+    @profiled("sdk_latest.take_latest")
     def take_latest(self):
         """Decode the newest waiting sample, or return None."""
         invalid = _invalid_sample_type()
@@ -107,7 +110,8 @@ class LatestSdkPoller:
                     "has_sample": sample is not None,
                 }
             if sample is not None:
-                self.handler(sample)
+                with scope(self, "feedback_handler"):
+                    self.handler(sample)
                 if diagnostic:
                     finished = time.monotonic()
                     self.diagnostics = dict(
@@ -115,6 +119,7 @@ class LatestSdkPoller:
                         handler_finished_s=finished,
                         handler_duration_s=finished - take_finished,
                     )
-            delay, next_tick = poll_deadline(next_tick + self.period, time.monotonic(), self.period)
-            if self.stopped.wait(delay):
+            deadline = next_tick + self.period
+            delay, next_tick = poll_deadline(deadline, time.monotonic(), self.period)
+            if timed_wait(self, self.stopped, delay, deadline, "feedback_timer"):
                 return

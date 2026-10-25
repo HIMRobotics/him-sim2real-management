@@ -14,7 +14,7 @@ The following restart affects the safety controller. Run it only with the robot
 stopped and supported, before starting your walking test.
 
   cd /home/unitree/him-sim2real-management
-  systemctl --user set-environment HIM_DIAGNOSTIC_TRACE=/home/unitree/him-sim2real-management/.cache/control-diagnostics.jsonl
+  systemctl --user set-environment HIM_DIAGNOSTIC_TRACE="$PWD/.cache/control-diagnostics.jsonl" HIM_TIMING_PROFILE=1 HIM_DIAGNOSTIC_DETAIL=full
   systemctl --user restart g1-safety-stops.service
   systemctl --user status g1-safety-stops.service --no-pager
 
@@ -25,7 +25,86 @@ is disabled by default. The trace writes an idle heartbeat about once per second
 CAPTURE
 
   cd /home/unitree/him-sim2real-management
-  bash tools/capture_walking_recovery.sh
+  bash tools/capture_walking_recovery.sh --timing-profile
+
+--timing-profile includes --cpu-profile and requires the updated controller's
+timing records. It verifies the running controller's source hashes and fresh
+timing events before CAPTURING. A fresh ordinary trace alone is insufficient.
+Run the existing walker command in another terminal, then press left D-pad + B
+only after CAPTURING appears:
+
+  ./submit.sh --mode real --example walker --command containers/examples/commands/walker/forward.yaml
+
+For CPU contention investigation, add --cpu-profile. This automatically selects
+the hardware gate PID from fresh diagnostic metadata and samples /proc thread
+CPU time, context switches, scheduling counters and wait channels at 5 Hz. Host
+CPU totals, competing process totals, frequency and thermal sensors are sampled
+at 1 Hz in a separate observer process. No debugger attaches to the controller.
+
+  bash tools/capture_walking_recovery.sh --cpu-profile
+
+For run-queue wait accounting, check /proc/sys/kernel/sched_schedstats. If it is
+0, enable accounting before the test with:
+
+  sudo sysctl -w kernel.sched_schedstats=1
+
+Restore it to 0 after profiling if it was originally 0. With accounting disabled,
+CPU/context-switch measurements remain available but zero wait counters do not
+prove absence of scheduler contention. This does not directly measure the GIL.
+
+CPU files are cpu-samples.jsonl, cpu-observer.json and cpu-observer.stderr in the
+same capture directory. Counters are cumulative. Compare deltas between records
+with the same PID/TID and start_ticks. Divide CPU ticks by clock_ticks_per_second
+and elapsed time for CPU utilization (one fully occupied core is 100%). schedstat
+contains [runtime_ns, runqueue_wait_ns, timeslices]. Sleeping on a futex is not
+specific evidence of the GIL. The observer reports its own collection duration.
+
+SPECIFIC FUNCTION AND WAIT MEASUREMENTS
+
+HIM_TIMING_PROFILE=1 adds timing_profile events to diagnostic-trace.jsonl.
+Each active worker aggregates locally and reports about once per second, with
+its native thread ID for comparison with cpu-samples.jsonl. The measurements are:
+
+- Wall time and calling-thread CPU time for feedback reading/conversion, health
+  checks, standing-posture checks, recovery, observation construction, ONNX run,
+  target checks, fresh commands, resends, command CRC and the DDS write call.
+- Health-check counts grouped by their enclosing operation, and counts of first
+  faults versus repeated notifications of the already-latched reason.
+- Acquisition wait and holding durations for adapter state, stop, battery,
+  transport writer and sparse-trace locks.
+- Requested sleep, elapsed wait, lateness relative to the original deadline,
+  and wake-up lateness for feedback, output, resend and watchdog workers.
+- Preparing/queueing command diagnostics, JSON encoding, file writes and flushes.
+
+Each stage reports counts, total wall/CPU time, maximum elapsed duration and a
+duration histogram with boundaries 1, 2, 5, 10, 20, 40 and 80 ms. Stages include
+their children. Do not sum parent and child times. Wall minus thread CPU includes
+lock waits, I/O, scheduling and possible GIL waits, not specifically GIL time.
+Native helper-thread CPU is excluded from the calling-thread measurement.
+Lock acquisition timing also includes any delay in resuming Python afterward.
+
+The recorder automatically saves timing-summary.json after --timing-profile.
+The existing analyzer also generates it. Complete reporting windows within the
+DDS capture are included, with boundary windows excluded and counted. Calls are
+assigned to the window in which they finish. A stuck call cannot report its own
+duration until it returns. Retain raw timing events to inspect shorter periods.
+This instrumentation measures the existing timers without changing their rules.
+
+OPTIONAL REDUCED-LOGGING COMPARISON
+
+Use full logging for the next capture. If logging appears costly, a separate run
+can retain the same timing aggregates and CPU sampling while suppressing detailed
+per-feedback/per-command snapshots and actor observations:
+
+  systemctl --user set-environment HIM_DIAGNOSTIC_DETAIL=minimal
+  systemctl --user restart g1-safety-stops.service
+
+Restart only before the test with the robot stopped and supported. Capture with
+the same --timing-profile command. Restore HIM_DIAGNOSTIC_DETAIL=full before the
+next normal detailed test. Minimal mode still records passive DDS data, ROS,
+recovery/fault events, sparse control logs and timing aggregates. It cannot provide
+the exact selected policy input/raw output evidence of full mode. Compare similar
+controller states. These are separate runs, not a live logging toggle.
 
 Wait for CAPTURING before the test. Then run the submitted walking policy and
 perform the planned supported disturbance using your established stop procedure.
@@ -103,7 +182,7 @@ end timestamp. File-copy coverage and heartbeat loss counts must be checked.
 
 DISABLE AFTER TESTING
 
-  systemctl --user unset-environment HIM_DIAGNOSTIC_TRACE
+  systemctl --user unset-environment HIM_DIAGNOSTIC_TRACE HIM_TIMING_PROFILE HIM_DIAGNOSTIC_DETAIL
 
 The running process keeps tracing until its next normal restart. Restart only
 when the robot is stopped and supported. No automatic restart is performed by

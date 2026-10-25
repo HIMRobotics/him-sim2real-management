@@ -131,7 +131,8 @@ def prepare(name, destination=None, *, container=True):
     context = root / "container"
     for filename in ("controllers.py", "client.py", "trial.py", "command.py", "Dockerfile", "entrypoint.sh"):
         copy_file(ROOT / "containers/examples" / filename, context / filename)
-    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py", "holosoma_policy.py"):
+    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py",
+                     "holosoma_policy.py", "timing_profile.py"):
         copy_file(ROOT / "robot_safety" / filename, context / "robot_safety" / filename)
     for filename in ("__init__.py", "adapter.py", "config.py"):
         copy_file(

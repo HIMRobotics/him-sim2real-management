@@ -11,6 +11,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 TRACE_BYTE_LIMIT = 64 * 1024 * 1024
 
 
@@ -128,6 +131,45 @@ def copy_diagnostic_metadata(path, destination):
     return {"error": "Diagnostic startup metadata unavailable"}
 
 
+def timing_preflight(path, metadata_path, max_age):
+    """Require current controller code and a recent per-thread timing record."""
+    import hashlib
+
+    metadata = json.loads(metadata_path.read_text())
+    if metadata.get("timing_profile_version") != 1:
+        raise ValueError("Controller timing profiling is not enabled. Set HIM_TIMING_PROFILE=1 "
+                         "and restart the updated service while the robot is stopped and supported.")
+    sources = Path(__file__).resolve().parents[1] / "robot_safety"
+    for name in ("timing_profile.py", "hardware_adapter.py", "hardware_node.py",
+                 "control_trace.py", "holosoma_policy.py", "unitree_transport.py", "sdk_latest.py"):
+        expected = hashlib.sha256((sources / name).read_bytes()).hexdigest()
+        if metadata.get("source_sha256", {}).get(name) != expected:
+            raise ValueError("Running controller has different profiling code: " + name
+                             + ". Restart the updated service before this test.")
+    with path.open("rb") as stream:
+        stream.seek(max(0, path.stat().st_size - 1024 * 1024))
+        lines = stream.read().splitlines()
+    now = time.monotonic()
+    live = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (row.get("event") == "timing_profile" and row.get("version") == 1
+                and row.get("pid") == metadata.get("pid")
+                and 0 <= now - row.get("mono_s", 0) <= max_age):
+            live.append(row)
+    if not live:
+        raise ValueError("No recent timing records from the controller. Wait a few seconds "
+                         "after startup and retry before beginning the test.")
+    return {"version": 1, "pid": metadata["pid"],
+            "diagnostic_detail": metadata.get("diagnostic_detail"),
+            "recent_thread_ids": sorted({row["tid"] for row in live})}
+
+
 def ros_worker(output, seconds):
     """Record status and abort receipts in an isolated ROS observer process."""
     metadata = {"ready": False, "counts": {}, "error": None}
@@ -238,6 +280,51 @@ def start_ros_observer(args, output):
                        + str(output / "ros-observer.json"))
 
 
+def start_cpu_observer(args, output):
+    """Start resource sampling against the traced controller PID."""
+    if not args.cpu_profile:
+        return None
+    from tools.cpu_telemetry import proc_stat
+
+    pid = args.cpu_pid
+    if pid is None:
+        metadata = output / 'diagnostic-metadata.json'
+        if not metadata.exists():
+            raise RuntimeError('CPU capture needs live diagnostic metadata or --cpu-pid PID')
+        pid = int(json.loads(metadata.read_text())['pid'])
+        command = Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ')
+        if b'hardware_gate' not in command:
+            raise RuntimeError('Diagnostic PID is not the live hardware gate, refusing CPU capture')
+    proc_stat(Path(f'/proc/{pid}/stat').read_text())
+    command = [sys.executable, str(Path(__file__).resolve()), '--cpu-worker',
+               '--output', str(output.resolve()), '--cpu-pid', str(pid),
+               '--cpu-hz', str(args.cpu_hz), '--seconds', str(args.seconds + 15)]
+    with (output / 'cpu-observer.stderr').open('w') as stderr:
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr)
+    deadline = time.monotonic() + 5
+    error = 'CPU observer did not become ready'
+    while time.monotonic() < deadline:
+        path = output / 'cpu-observer.json'
+        if path.exists():
+            try:
+                status = json.loads(path.read_text())
+            except ValueError:
+                continue
+            if status.get('error'):
+                error = status['error']
+                break
+            if status.get('ready'):
+                print(f'CPU profiling PID {pid} at {args.cpu_hz:g} Hz.', flush=True)
+                if status.get('sched_schedstats') != '1':
+                    print('Scheduler wait accounting is disabled/unavailable. CPU and context-switch counters remain available.', flush=True)
+                return process
+        if process.poll() is not None:
+            break
+        time.sleep(.05)
+    stop_ros_observer(process)
+    raise RuntimeError(error + '. See ' + str(output / 'cpu-observer.stderr'))
+
+
 def stop_ros_observer(process):
     """Stop the observer without signalling the robot processes."""
     if process is None or process.poll() is not None:
@@ -276,7 +363,23 @@ def main():
     parser.add_argument("--require-diagnostics", action="store_true", help="Refuse capture without a fresh detailed trace")
     parser.add_argument("--diagnostic-max-age", type=float, default=5, help="Maximum diagnostic trace age in seconds")
     parser.add_argument("--ros-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument('--cpu-profile', action='store_true', help='Also sample controller threads and host CPU resources')
+    parser.add_argument('--cpu-pid', type=int, help='Override controller PID, normally taken from live diagnostic metadata')
+    parser.add_argument('--cpu-hz', type=float, default=5, help='Thread counter sample rate, 1 to 10 Hz (host counters 1 Hz)')
+    parser.add_argument('--cpu-worker', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--timing-profile', action='store_true',
+                        help='Require current detailed timing instrumentation and include CPU sampling')
     args = parser.parse_args()
+    if args.timing_profile:
+        args.cpu_profile = True
+        args.require_diagnostics = True
+    if not 1 <= args.cpu_hz <= 10:
+        parser.error('--cpu-hz must be between 1 and 10')
+    if args.cpu_worker:
+        if args.output is None or args.cpu_pid is None or args.cpu_pid <= 0 or not 1 <= args.seconds <= 75:
+            parser.error('Invalid internal CPU observer arguments')
+        from tools.cpu_telemetry import cpu_worker
+        sys.exit(cpu_worker(args.output, args.cpu_pid, args.seconds, args.cpu_hz))
     if args.ros_worker:
         if args.output is None or not 1 <= args.seconds <= 75:
             parser.error("Invalid internal observer arguments")
@@ -321,6 +424,16 @@ def main():
     cursors = {"control": trace_cursor(args.control_trace),
                "diagnostic": trace_cursor(args.diagnostic_trace)}
     diagnostic_metadata = copy_diagnostic_metadata(args.diagnostic_trace, out / "diagnostic-metadata.json")
+    timing_ready = None
+    try:
+        if args.timing_profile:
+            timing_ready = timing_preflight(args.diagnostic_trace, out / "diagnostic-metadata.json",
+                                            args.diagnostic_max_age)
+            print("Controller timing profiling verified, CPU sampling included.", flush=True)
+        cpu_process = start_cpu_observer(args, out)
+    except (OSError, RuntimeError, ValueError, KeyError) as error:
+        stop_ros_observer(ros_process)
+        parser.error(str(error))
     for reader, _ in readers.values():
         ddspy_take(reader._ref, 256)
     preflight = None
@@ -330,6 +443,7 @@ def main():
                          "diagnostics": diagnostic_preflight(args.diagnostic_trace, args.diagnostic_max_age)}
         except (RuntimeError, ValueError) as error:
             stop_ros_observer(ros_process)
+            stop_ros_observer(cpu_process)
             parser.error(str(error))
         (out / "preflight.json").write_text(json.dumps(preflight, indent=2) + "\n")
     records = []
@@ -373,6 +487,7 @@ def main():
     end = time.monotonic_ns()
     end_wall = time.time_ns()
     capture_cpu = time.process_time() - start_cpu
+    stop_ros_observer(cpu_process)
     stop_ros_observer(ros_process)
     trace_flush_grace = 1.1 if any(cursors.values()) else 0
     if trace_flush_grace:
@@ -424,6 +539,7 @@ def main():
         "trace_flush_grace_s": trace_flush_grace, "trace_copy_end_monotonic_ns": trace_copy_end,
         "trace_window_note": "Appended traces include observer setup and post-capture flush grace. Filter their timestamps against start/end_monotonic_ns for the DDS capture window.",
         "diagnostic_metadata": diagnostic_metadata,
+        "timing_preflight": timing_ready,
         "preflight": preflight,
         "capture_cpu_s": capture_cpu, "interrupted": interrupted, "operator_label": args.label,
         "method": "Independent DDS readers, history depth 256, raw serialized take at about 1 ms. Decode after capture. No publishers. Receive times are userspace take completion, not NIC arrival. Source clocks may be unsynchronized.",
@@ -431,6 +547,10 @@ def main():
     }
     if args.ros_domain is not None:
         summary["ros_observer"] = json.loads((out / "ros-observer.json").read_text())
+    if args.cpu_profile:
+        summary['cpu_observer'] = json.loads((out / 'cpu-observer.json').read_text())
+        if summary['cpu_observer'].get('error'):
+            print('CPU observer warning: ' + summary['cpu_observer']['error'], flush=True)
     for topic in readers:
         group = [r for r in rows if r["topic"] == topic]
         source = [r["source_timestamp_ns"] for r in group]
@@ -475,6 +595,14 @@ def main():
                 } for name, index in (("left", 3), ("right", 9))
             }
         summary["topics"][topic] = result
+    if args.timing_profile:
+        from tools.analyze_recovery_telemetry import summarize_timing
+
+        timing = summarize_timing(out / "diagnostic-trace.jsonl", start / 1e9, end / 1e9)
+        (out / "timing-summary.json").write_text(json.dumps(timing, indent=2) + "\n")
+        summary["timing_summary"] = "timing-summary.json"
+        if not timing["records"]:
+            print("WARNING: No timing records survived in the saved capture.", flush=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2), flush=True)
 

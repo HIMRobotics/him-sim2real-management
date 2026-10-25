@@ -11,6 +11,8 @@ from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 
+from .timing_profile import TimingProfiler, scope, timed_lock
+
 TRACE_PERIOD_SECS = 0.2
 
 
@@ -47,6 +49,11 @@ class ControlTrace:
         self.step_period_max = None
         self.diagnostic_path = diagnostic_path or os.environ.get("HIM_DIAGNOSTIC_TRACE")
         self.diagnostic_enabled = bool(self.diagnostic_path)
+        self.diagnostic_detail = os.environ.get("HIM_DIAGNOSTIC_DETAIL", "full") != "minimal"
+        self.timing_profiler = (
+            TimingProfiler(self.note_diagnostic)
+            if self.diagnostic_enabled and os.environ.get("HIM_TIMING_PROFILE") == "1" else None
+        )
         self.diagnostic_dropped = 0
         self.diagnostic_errors = 0
         self._diagnostics = Queue(maxsize=4096)
@@ -66,6 +73,7 @@ class ControlTrace:
                 handle = path.open("w", encoding="utf-8")
             except (OSError, ValueError) as error:
                 self.diagnostic_enabled = False
+                self.timing_profiler = None
                 self.diagnostic_errors += 1
                 print("Optional diagnostics unavailable: {0}".format(error), flush=True)
                 return
@@ -105,7 +113,8 @@ class ControlTrace:
                     next_heartbeat = now + 1.0
                 for record in records:
                     try:
-                        encoded = json.dumps(record, separators=(",", ":"), allow_nan=False)
+                        with scope(self, "diagnostic_json_encode"):
+                            encoded = json.dumps(record, separators=(",", ":"), allow_nan=False)
                     except (ValueError, TypeError):
                         self.diagnostic_errors += 1
                         continue
@@ -116,9 +125,11 @@ class ControlTrace:
                         path = Path(self.diagnostic_path)
                         path.replace(Path(str(path) + ".1"))
                         handle = path.open("w", encoding="utf-8")
-                    handle.write(encoded + "\n")
+                    with scope(self, "diagnostic_file_write"):
+                        handle.write(encoded + "\n")
                 if records:
-                    handle.flush()
+                    with scope(self, "diagnostic_file_flush"):
+                        handle.flush()
         except OSError:
             self.diagnostic_errors += 1
             self.diagnostic_enabled = False
@@ -127,7 +138,7 @@ class ControlTrace:
 
     def note_repeat(self, now):
         """Count one resend. This stays off the policy tick."""
-        with self.lock:
+        with timed_lock(self, self.lock, "control_trace.lock"):
             if self.repeat_last is not None:
                 self.repeat_gap_max = max(self.repeat_gap_max, now - self.repeat_last)
             self.repeat_last = now
@@ -137,13 +148,13 @@ class ControlTrace:
 
     def note_gate(self, now):
         """Record how long the ROS motor-gate timer waited."""
-        with self.lock:
+        with timed_lock(self, self.lock, "control_trace.lock"):
             if self.gate_last is not None:
                 self.gate_gap = now - self.gate_last
             self.gate_last = now
 
     def note_step(self, record):
-        with self.lock:
+        with timed_lock(self, self.lock, "control_trace.lock"):
             period = record.get("step_period_s")
             if period is not None:
                 self.step_period_max = (
@@ -153,7 +164,7 @@ class ControlTrace:
             self._emit(record, force=False)
 
     def emit_abort(self, reason, now):
-        with self.lock:
+        with timed_lock(self, self.lock, "control_trace.lock"):
             record = dict(self.last or {})
             record["abort"] = reason
             record["now"] = now
@@ -164,7 +175,7 @@ class ControlTrace:
         self._diagnostic_stop.set()
         if self._diagnostic_worker is not None:
             self._diagnostic_worker.join(timeout=2.0)
-        with self.lock:
+        with timed_lock(self, self.lock, "control_trace.lock"):
             handle = self.file
             self.file = None
         if handle is not None:

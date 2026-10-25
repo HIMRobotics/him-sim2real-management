@@ -4,6 +4,7 @@ import json
 import time
 from threading import Lock, Thread
 
+from .timing_profile import profiled, scope, timed_lock
 from .hardware_constants import (
     ARM_SDK_TOPIC,
     ARM_WEIGHT_INDEX,
@@ -123,8 +124,9 @@ class UnitreeArmTransport:
             for field, value in values.items():
                 setattr(motor, field, value)
         message.motor_cmd[ARM_WEIGHT_INDEX].q = weight
-        message.crc = self.crc.Crc(message)
-        with self.write_lock:
+        with scope(self, "command_crc"):
+            message.crc = self.crc.Crc(message)
+        with timed_lock(self, self.write_lock, "unitree_transport.write_lock"):
             return self.publisher.Write(message)
 
     def release_motion(self, *, announce_soft_reset=False):
@@ -161,6 +163,7 @@ class UnitreeArmTransport:
             self.motion_restored = True
         return code
 
+    @profiled("unitree_transport.write_body")
     def write_body(self, targets, machine):
         """Encode a complete, already checked 29-joint command."""
         if set(targets) != set(range(NUM_JOINTS)):
@@ -173,13 +176,14 @@ class UnitreeArmTransport:
         }
         message = self._encode_body(stored, machine)
         waiting_since = time.monotonic() if getattr(self, "diagnostics_enabled", False) else None
-        with self.write_lock:
+        with timed_lock(self, self.write_lock, "unitree_transport.write_lock"):
             acquired_at = time.monotonic() if waiting_since is not None else None
             self._body_targets = stored
             self._body_message = message
             self._body_ready = True
             return self._write_body_message(message, "fresh", waiting_since, acquired_at)
 
+    @profiled("unitree_transport.repeat_body")
     def repeat_body(self, machine):
         """Resend the latched whole-body command with a fresh mode and CRC.
 
@@ -190,20 +194,21 @@ class UnitreeArmTransport:
         if not self.output_enabled:
             return True
         waiting_since = time.monotonic() if getattr(self, "diagnostics_enabled", False) else None
-        with self.write_lock:
+        with timed_lock(self, self.write_lock, "unitree_transport.write_lock"):
             acquired_at = time.monotonic() if waiting_since is not None else None
             message = getattr(self, "_body_message", None)
             if not getattr(self, "_body_ready", False) or message is None:
                 return None
             message.mode_machine = machine
-            message.crc = self.crc.Crc(message)
+            with scope(self, "command_crc"):
+                message.crc = self.crc.Crc(message)
             if not self._body_ready:
                 return None
             return self._write_body_message(message, "repeat", waiting_since, acquired_at)
 
     def clear_body(self):
         """Drop the latched whole-body command so the 2 ms thread stops."""
-        with self.write_lock:
+        with timed_lock(self, self.write_lock, "unitree_transport.write_lock"):
             self._body_ready = False
             if getattr(self, "diagnostics_enabled", False):
                 previous = self._body_diagnostics
@@ -214,7 +219,7 @@ class UnitreeArmTransport:
 
     def set_diagnostics_enabled(self, enabled):
         """Enable local timing snapshots without publishing extra messages."""
-        with self.write_lock:
+        with timed_lock(self, self.write_lock, "unitree_transport.write_lock"):
             if enabled and not getattr(self, "diagnostics_enabled", False):
                 self._body_diagnostics = {}
             self.diagnostics_enabled = bool(enabled)
@@ -230,14 +235,19 @@ class UnitreeArmTransport:
             "state_poller": dict(getattr(poller, "diagnostics", {})),
         }
 
+    @profiled("dds_command_write")
+    def _publish_lowcmd(self, message):
+        return self.lowcmd.Write(message)
+
+    @profiled("unitree_transport._write_body_message")
     def _write_body_message(self, message, kind, waiting_since, acquired_at):
         """Write under the caller's lock, optionally recording local timing."""
         if waiting_since is None:
-            return self.lowcmd.Write(message)
+            return self._publish_lowcmd(message)
         started = time.monotonic()
         succeeded = False
         try:
-            result = self.lowcmd.Write(message)
+            result = self._publish_lowcmd(message)
             succeeded = bool(result)
             return result
         finally:
@@ -269,6 +279,7 @@ class UnitreeArmTransport:
                     update["last_fresh_success_s"] = finished
             self._body_diagnostics = update
 
+    @profiled("unitree_transport._encode_body")
     def _encode_body(self, targets, machine):
         message = self.make_command()
         message.mode_pr = 0
@@ -278,7 +289,8 @@ class UnitreeArmTransport:
             motor.mode = 1
             for field in ("q", "dq", "kp", "kd", "tau"):
                 setattr(motor, field, float(values[field]))
-        message.crc = self.crc.Crc(message)
+        with scope(self, "command_crc"):
+            message.crc = self.crc.Crc(message)
         return message
 
     def _set_motion_silent(self, silent):
