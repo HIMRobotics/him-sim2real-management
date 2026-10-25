@@ -185,12 +185,7 @@ class UnitreeArmTransport:
 
     @profiled("unitree_transport.repeat_body")
     def repeat_body(self, machine):
-        """Resend the latched whole-body command with a fresh mode and CRC.
-
-        Returns None when no command is latched. Joint targets stay the ones
-        write_body checked. This does not rebuild the motor command or run
-        another safety check, so the 2 ms thread stays off the policy tick.
-        """
+        """Resend the checked packet, refreshing its CRC only if the mode changes."""
         if not self.output_enabled:
             return True
         waiting_since = time.monotonic() if getattr(self, "diagnostics_enabled", False) else None
@@ -199,17 +194,18 @@ class UnitreeArmTransport:
             message = getattr(self, "_body_message", None)
             if not getattr(self, "_body_ready", False) or message is None:
                 return None
-            message.mode_machine = machine
-            with scope(self, "command_crc"):
-                message.crc = self.crc.Crc(message)
-            if not self._body_ready:
-                return None
+            if message.mode_machine != machine:
+                message.mode_machine = machine
+                with scope(self, "command_crc"):
+                    message.crc = self.crc.Crc(message)
             return self._write_body_message(message, "repeat", waiting_since, acquired_at)
 
     def clear_body(self):
         """Drop the latched whole-body command so the 2 ms thread stops."""
         with timed_lock(self, self.write_lock, "unitree_transport.write_lock"):
             self._body_ready = False
+            self._body_message = None
+            self._body_targets = None
             if getattr(self, "diagnostics_enabled", False):
                 previous = self._body_diagnostics
                 self._body_diagnostics = dict(

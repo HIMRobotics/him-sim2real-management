@@ -121,7 +121,6 @@ def test_profiled_transport_still_resends_and_clears_the_same_command():
     instance.clear_body()
     assert instance.repeat_body(5) is None
     instance.timing_profiler.flush()
-    assert any('command_crc' in name for name in records[0]['stages'])
     assert any('dds_command_write' in name for name in records[0]['stages'])
 
 
