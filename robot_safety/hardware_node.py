@@ -254,7 +254,10 @@ class HardwareMotorGateNode(MotorGateNode):
             self.motor_gate.abort(self.adapter.abort_reason)
         command = self.motor_gate.cycle(time.monotonic())
         if self.motor_gate.abort_reason:
-            self.adapter.abort(self.motor_gate.abort_reason)
+            # Forward new faults, not the same latched fault on every timer tick.
+            # Feedback and recovery workers continue checking current health.
+            if self.adapter.abort_reason != self.motor_gate.abort_reason:
+                self.adapter.abort(self.motor_gate.abort_reason)
             self.latch_abort(self.motor_gate.abort_reason)
         elif command["kind"] == "policy":
             self.adapter.submit(command, self.motor_gate.time_command_expires_secs)
