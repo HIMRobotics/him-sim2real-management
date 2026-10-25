@@ -126,7 +126,7 @@ start_live_view() {
   rm -f "$out_dir/view/start" "$out_dir/live.jsonl" "${viewer_report:-$out_dir/report.json}"
   local scene_args=()
   [[ -n "$scene" ]] && scene_args=(--scene "$scene")
-  as_owner "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose" "${scene_args[@]}"
+  as_owner "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose" ${scene_args[@]+"${scene_args[@]}"}
   rm -f "$out_dir/live-view.log"
   # Open the log as the user. A root shell would otherwise leave a file
   # the battery viewer cannot replace.
@@ -139,7 +139,7 @@ start_live_view() {
     --report "${viewer_report:-$out_dir/report.json}" \
     --port "$view_port" \
     --pose "$pose" \
-    "${scene_args[@]}" &
+    ${scene_args[@]+"${scene_args[@]}"} &
   live_pid=$!
   echo "Open http://127.0.0.1:$view_port"
   echo "Press Start to run the policy. The camera stays put so the path is visible."
@@ -331,6 +331,15 @@ if [[ -n "$scene" ]]; then
     exit 2
   fi
   scene="$(cd -- "$(dirname -- "$scene")" && pwd -P)/$(basename -- "$scene")"
+fi
+
+if [[ -n "${G1_JOINT_PROFILE:-}" && "$G1_JOINT_PROFILE" != /workspace/* ]]; then
+  if [[ ! -f "$G1_JOINT_PROFILE" || ! -r "$G1_JOINT_PROFILE" ]]; then
+    echo "G1_JOINT_PROFILE is not a readable file: $G1_JOINT_PROFILE" >&2
+    exit 2
+  fi
+  G1_JOINT_PROFILE="$(cd -- "$(dirname -- "$G1_JOINT_PROFILE")" && pwd -P)/$(basename -- "$G1_JOINT_PROFILE")"
+  export G1_JOINT_PROFILE
 fi
 
 # Signal handlers exit so cleanup cannot resume a stopped simulation.

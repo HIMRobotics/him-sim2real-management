@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
@@ -16,13 +15,6 @@ sys.path.insert(0, str(ROOT))
 
 from robot_safety.balance_policy import LEG_KD, LEG_KP
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES
-
-# Every example starts in GR00T startup balance. This is the crouch it settles
-# into on flat ground on this model, mirrored left to right. Started from the
-# policies' own defaults, the knees sag 3 cm and the robot sways back a step
-# and turns.
-STANCE_LEFT_LEG = [-0.395, 0.014, 0.006, 0.738, -0.362, -0.008]
-STANCE = STANCE_LEFT_LEG + [-0.395, -0.014, -0.006, 0.738, -0.362, 0.008] + [0.0] * 17
 
 EXAMPLES = ("walker", "balance", "holosoma")
 
@@ -114,13 +106,7 @@ def prepare(name, destination=None, *, container=True):
         copy_function=copy_file,
     )
     copy_file(robot / "THIRD_PARTY_NOTICES.md", env / "THIRD_PARTY_NOTICES.md")
-    tree = ET.parse(robot / "g1_robot.xml")
-    key = tree.find("keyframe/key[@name='stand']")
-    # Start above the support. The plant lowers the robot until the feet touch.
-    start = [0, 0, 0.85, 1, 0, 0, 0]
-    key.set("qpos", " ".join(map(str, start + STANCE)))
-    key.set("ctrl", " ".join(map(str, STANCE)))
-    tree.write(env / "g1_robot.xml")
+    copy_file(robot / "g1_robot.xml", env / "g1_robot.xml")
     (env / "scene.xml").write_text("""<mujoco model="example_flat">
   <include file="g1_robot.xml"/>
   <option gravity="0 0 -9.81" timestep="0.002"/>

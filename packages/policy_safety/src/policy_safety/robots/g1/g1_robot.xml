@@ -366,7 +366,12 @@
   </sensor>
 
   <keyframe>
-    <key name="stand" qpos="0 0 0.792 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0"
-      ctrl="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.2 0.2 0 1.28 0 0 0 0.2 -0.2 0 1.28 0 0 0"/>
+    <!-- GR00T startup balance holds every run first. The legs are the crouch
+         it settles into on flat ground, mirrored left to right, so it neither
+         sags nor steps at the start. Waist and arms are at zero: upper arms
+         at the sides, elbows bent 90 degrees, forearms level and forward.
+         Balance drives only the legs and waist and holds the arms here. -->
+    <key name="stand" qpos="0 0 0.7495 1 0 0 0 -0.395 0.014 0.006 0.738 -0.362 -0.008 -0.395 -0.014 -0.006 0.738 -0.362 0.008 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+      ctrl="-0.395 0.014 0.006 0.738 -0.362 -0.008 -0.395 -0.014 -0.006 0.738 -0.362 0.008 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"/>
   </keyframe>
 </mujoco>

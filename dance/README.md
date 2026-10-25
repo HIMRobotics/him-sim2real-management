@@ -85,5 +85,12 @@ at joint friction 0 and 0.3 Nm. The median absolute joint error is about
   during the dance. The motor limit is 50 Nm, but HIM's safety profile caps
   ankles and waist roll/pitch at 35 Nm. Runs with safety checks on will stop,
   so use `--no-safety-checks` until that limit is decided.
+  `dance/tools/torque_peaks.py` prints each joint's peak against its limit.
+  With `--safety-checks` and `HIM_HOLOSOMA_ONNX` set to Holosoma's
+  `fastsac_g1_29dof.onnx`, it runs the hardware adapter on the sim clock. The
+  adapter clips the left ankle target, then stops at 10.3 s (5.3 s into the
+  clip) on `left_ankle_pitch: joint_torque_limit`, and Holosoma recovers.
+  With ankles hard-capped at 35 or 31.5 Nm and no stop, the clip still finishes
+  without a fall.
 - **Physics timestep:** HIM's sim uses a 2 ms timestep. The training brief
   specifies 5 ms, and this has not been changed.
