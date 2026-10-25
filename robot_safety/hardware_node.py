@@ -35,6 +35,7 @@ class HardwareMotorGateNode(MotorGateNode):
     def __init__(self):
         self.adapter = None
         self.session_open = False
+        self._forwarded_gate_fault = None
         super().__init__()
         enabled = self.declare_parameter("enable_hardware_output", False).value
         dry_run = self.declare_parameter("dry_run", False).value
@@ -148,6 +149,7 @@ class HardwareMotorGateNode(MotorGateNode):
         else:
             self.motor_gate.abort_reason = None
             self.motor_gate.policy_session_id = None
+        self._forwarded_gate_fault = None
         self.session_open = True
         return True
 
@@ -245,6 +247,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 self.adapter.damp_settled = False
                 if not self.adapter.abort_reason and not self.adapter.stop_requested.is_set():
                     self.motor_gate = MotorCommandGate(self.host_boot_id, self.config)
+                    self._forwarded_gate_fault = None
                     self.abort_reason = None
                     # Recreate the writer to discard its retained stop for future tests.
                     self.destroy_publisher(self.abort_publisher)
@@ -254,10 +257,11 @@ class HardwareMotorGateNode(MotorGateNode):
             self.motor_gate.abort(self.adapter.abort_reason)
         command = self.motor_gate.cycle(time.monotonic())
         if self.motor_gate.abort_reason:
-            # Forward new faults, not the same latched fault on every timer tick.
+            # Forward each latched gate fault once, until the gate resets.
             # Feedback and recovery workers continue checking current health.
-            if self.adapter.abort_reason != self.motor_gate.abort_reason:
+            if self._forwarded_gate_fault != self.motor_gate.abort_reason:
                 self.adapter.abort(self.motor_gate.abort_reason)
+                self._forwarded_gate_fault = self.motor_gate.abort_reason
             self.latch_abort(self.motor_gate.abort_reason)
         elif command["kind"] == "policy":
             self.adapter.submit(command, self.motor_gate.time_command_expires_secs)
