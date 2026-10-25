@@ -1279,16 +1279,14 @@ class G1HardwareAdapter:
         sys.setswitchinterval(INTERPRETER_SWITCH_SECS)
 
         def output_loop():
-            # Fixed deadlines like Holosoma's rate limiter. Sleeping a full
-            # period after each step stretches 20 ms by the step time.
-            next_tick = time.monotonic()
+            # Start immediately when late, without replaying missed updates.
+            # Schedule from the actual start so a late wake cannot cause a burst.
+            next_tick = time.monotonic() + HARDWARE_PERIOD_SECS
             while True:
-                deadline = next_tick + HARDWARE_PERIOD_SECS
-                delay, next_tick = poll_deadline(
-                    deadline, time.monotonic(), HARDWARE_PERIOD_SECS
-                )
-                if timed_wait(self, self.shutdown_requested, delay, deadline, "output_timer"):
+                delay = max(0.0, next_tick - time.monotonic())
+                if timed_wait(self, self.shutdown_requested, delay, next_tick, "output_timer"):
                     return
+                next_tick = time.monotonic() + HARDWARE_PERIOD_SECS
                 self.step()
 
         def body_repeat_loop():
