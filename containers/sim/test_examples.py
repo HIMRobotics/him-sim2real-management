@@ -24,7 +24,7 @@ sys.path[:0] = [
 from controllers import ExamplePolicy
 from local import run
 from plant import Plant
-from prepare import STANCE, prepare
+from prepare import prepare
 from runner import Runner
 from view import export_replay
 
@@ -143,9 +143,18 @@ class ExampleTests(unittest.TestCase):
         ]
         self.assertLessEqual(min(distances), 1e-6)
         self.assertGreater(min(distances), -0.005)
-        np.testing.assert_allclose(plant.q(), STANCE, atol=1e-6)
         stock = Plant(check_fall=False)
-        self.assertAlmostEqual(float(stock.data.qpos[2]), 0.792, places=3)
+        np.testing.assert_allclose(plant.data.qpos, stock.data.qpos, atol=1e-6)
+
+    def test_image_runs_start_in_the_balance_stance_with_forearms_forward(self):
+        plant = Plant(check_fall=False)
+        self.assertAlmostEqual(float(plant.data.qpos[2]), 0.7495, places=3)
+        np.testing.assert_allclose(plant.q()[15:], 0.0)
+        for side in ("left", "right"):
+            elbow = plant.data.xpos[plant.model.body(f"{side}_elbow_link").id]
+            wrist = plant.data.xpos[plant.model.body(f"{side}_wrist_yaw_link").id]
+            forearm = (wrist - elbow) / np.linalg.norm(wrist - elbow)
+            self.assertGreater(forearm[0], 0.99)
 
     def test_local_preparation_skips_container_sources(self):
         with tempfile.TemporaryDirectory() as tmp:

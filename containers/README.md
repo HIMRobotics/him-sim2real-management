@@ -29,8 +29,11 @@ and starts the run when you press Start.
 ./desktop_sim.sh --example holosoma --view
 ```
 
-For the first five seconds GR00T balance holds the robot, as it does on the
-real robot before the operator presses left + B. The policy takes over after
+Every run starts in the same stance: the crouch GR00T balance settles into,
+with the upper arms at the sides and the elbows bent 90 degrees so the
+forearms point forward. For the first five seconds balance holds the robot, as
+it does on the real robot before the operator presses left + B. It drives the
+legs and waist and holds the arms in that pose. The policy takes over after
 that and runs for `--seconds`. The viewer shows how far into the startup the
 run is and when the policy takes over.
 

@@ -386,12 +386,22 @@ let last = performance.now();
 function tick(now) {
   requestAnimationFrame(tick);
   if (!paused && motion.frames > 1 && mode !== "idle") {
-    const caughtUp = mode === "live" && frame >= motion.frames - 1;
-    const next = caughtUp ? frame : (frame + 1) % motion.frames;
-    const delay = next !== frame && motion.time[next] !== undefined
-      ? Math.max(0, 1000 * (motion.time[next] - motion.time[frame]))
-      : 20;
-    if (!caughtUp && now - last >= delay) { last = now; show(next); }
+    // Frames are 20 ms apart and the display refreshes every 8 or 17 ms, so
+    // several frames can fall due at once. Carrying the remainder keeps
+    // playback in real time. After a stall, skip ahead rather than race.
+    last = Math.max(last, now - 100);
+    let next = frame;
+    while (true) {
+      if (mode === "live" && next >= motion.frames - 1) { last = now; break; }
+      const after = (next + 1) % motion.frames;
+      const gap = 1000 * (motion.time[after] - motion.time[next]);
+      const delay = after === 0 ? 0 : Number.isFinite(gap) ? Math.max(0, gap) : 20;
+      if (now - last < delay) break;
+      last += delay;
+      next = after;
+      if (next === 0) break;
+    }
+    if (next !== frame) show(next);
   }
   controls.update();
   renderer.render(scene, camera);
