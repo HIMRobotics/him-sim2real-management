@@ -12,6 +12,7 @@ from .feedback import (
     FeedbackInbox,
     base_state_from_sdk,
     policy_state,
+    policy_state_due,
 )
 from .hardware_constants import LOW_STATE_TOPIC, NUM_JOINTS
 from .hardware_profile import HardwareProfile
@@ -40,6 +41,7 @@ class RobotFeedbackNode(SafetyNode):
         self.base = None
         self.latest_sample = None
         self.pending = {}
+        self.policy_state_at_secs = None
         self.hardware_status = {}
         self.publish_policy = self.declare_parameter("publish_policy_state", False).value
         self.base_topic = self.declare_parameter("base_state_topic", "").value
@@ -97,7 +99,7 @@ class RobotFeedbackNode(SafetyNode):
         if not self.publish_policy or self.abort_reason:
             return
         sample = self.pending.get(message.received_at_secs)
-        if sample is None:
+        if sample is None or not policy_state_due(self.policy_state_at_secs, sample.received_at_secs):
             return
         try:
             state = policy_state(sample, message.observation_id, self.host_boot_id)
@@ -132,6 +134,7 @@ class RobotFeedbackNode(SafetyNode):
             output = String()
             output.data = json.dumps(state, allow_nan=False)
             self.policy_publisher.publish(output)
+            self.policy_state_at_secs = sample.received_at_secs
         except (TypeError, ValueError) as error:
             self.latch_abort(str(error))
 

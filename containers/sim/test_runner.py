@@ -568,6 +568,16 @@ class RunnerTest(unittest.TestCase):
             [],
         )
 
+    def test_adapter_reads_state_at_the_robot_poll_rate(self):
+        runner = Runner()
+        state = runner.feedback(0.0)
+        self.assertIsNone(runner.command(hold(runner, state, 0), 0.0))
+        runner.step(0.0)
+        with patch.object(runner.hardware, "receive", wraps=runner.hardware.receive) as receive:
+            for tick in range(1, 6):
+                runner.step(0.02 * tick)
+        self.assertEqual(receive.call_count, 5 * 5)
+
     def test_clip_mode_runs_the_adapter_and_warns_on_torque_and_base_spin(self):
         with patch.dict("os.environ", {"G1_SIM_LIMIT_MODE": "clip"}):
             runner = Runner()

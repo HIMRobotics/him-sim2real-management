@@ -9,6 +9,7 @@ from threading import Event
 
 from .controller import decode_start_pressed
 from .hardware_constants import G1_29_JOINT_NAMES
+from .hardware_profile import POLICY_STATE_SECS
 
 SDK_DISCOVERY_TIMEOUT_SECS = 5.0
 
@@ -62,6 +63,12 @@ def policy_state(sample, observation_id, boot_id):
         "observation_id": observation_id, "session_id": "",
         "received_at_secs": sample.received_at_secs, "host_boot_id": boot_id,
     }
+
+
+def policy_state_due(last_published_secs, received_at_secs):
+    """Pass one state per 20 ms network tick. Containers answer each state they get."""
+    return (last_published_secs is None
+            or received_at_secs - last_published_secs >= POLICY_STATE_SECS)
 
 
 def base_state_from_sdk(message, received_at_secs, velocity_frame, quat):

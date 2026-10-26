@@ -26,24 +26,25 @@ _FOOT_POINTS = tuple(
 _FOOT_RADIUS_M = 0.01
 
 
-def _rotation(axis, angle):
+def _unrotate(axis, angle, v):
+    """Express v in a child frame rotated by angle about axis (R^T v)."""
     c, s = math.cos(angle), math.sin(angle)
+    x, y, z = v
     if axis == 0:
-        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+        return x, c * y + s * z, c * z - s * y
     if axis == 1:
-        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
-    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        return c * x - s * z, y, s * x + c * z
+    return c * x + s * y, c * y - s * x, z
 
 
-_FIXED_ROTATIONS = (
-    np.eye(3), _rotation(1, -_HIP_FRAME_PITCH), np.eye(3),
-    _rotation(1, _HIP_FRAME_PITCH), np.eye(3), np.eye(3),
-)
-_LEG_OFFSETS = tuple(np.array([
-    [0, side * 0.064452, -0.1027], [0, side * 0.052, -0.030465],
-    [0.025001, 0, -0.12412], [-0.078273, side * 0.0021489, -0.17734],
-    [0, -side * 9.4445e-05, -0.30001], [0, 0, -0.017558],
-]) for side in (1, -1))
+# Fixed pitch of each joint frame about y. Plain tuples: this runs on every
+# 200 Hz state, where small numpy arrays cost more than the arithmetic.
+_FIXED_PITCH = (0.0, -_HIP_FRAME_PITCH, 0.0, _HIP_FRAME_PITCH, 0.0, 0.0)
+_LEG_OFFSETS = tuple((
+    (0, side * 0.064452, -0.1027), (0, side * 0.052, -0.030465),
+    (0.025001, 0, -0.12412), (-0.078273, side * 0.0021489, -0.17734),
+    (0, -side * 9.4445e-05, -0.30001), (0, 0, -0.017558),
+) for side in (1, -1))
 
 
 def pelvis_to_sole_heights(q, quat):
@@ -56,18 +57,20 @@ def pelvis_to_sole_heights(q, quat):
         raise ValueError("invalid_standing_quaternion")
     w, x, y, z = quat
     # World-up expressed in the pelvis frame, independent of global position.
-    pelvis_up = np.array([
+    pelvis_up = (
         2 * (x * z - w * y) / norm,
         2 * (y * z + w * x) / norm,
         1 - 2 * (x * x + y * y) / norm,
-    ])
+    )
     heights = []
     for leg, offsets in enumerate(_LEG_OFFSETS):
         up = pelvis_up
         height = 0.0
-        for index, (offset, fixed, axis) in enumerate(zip(offsets, _FIXED_ROTATIONS, _JOINT_AXES)):
-            height -= float(up @ offset)
-            up = _rotation(axis, q[leg * 6 + index]).T @ (fixed.T @ up)
+        for index, (offset, pitch, axis) in enumerate(zip(offsets, _FIXED_PITCH, _JOINT_AXES)):
+            height -= up[0] * offset[0] + up[1] * offset[1] + up[2] * offset[2]
+            if pitch:
+                up = _unrotate(1, pitch, up)
+            up = _unrotate(axis, q[leg * 6 + index], up)
         heights.append(height - float(np.min(_FOOT_POINTS[leg] @ up)) + _FOOT_RADIUS_M)
     return tuple(heights)
 

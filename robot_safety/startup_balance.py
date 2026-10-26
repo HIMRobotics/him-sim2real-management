@@ -6,6 +6,11 @@ import numpy as np
 
 from .balance_policy import BalancePolicy, LEG_KD, LEG_KP, MODEL_PATH
 
+# GR00T Balance does not command the arms. They ease to the sim's stand keyframe
+# (all arm joints at zero: upper arms at the sides, elbows bent 90 degrees,
+# forearms forward) so every submission starts from the pose it was simulated from.
+START_ARM_POSE = np.zeros(14)
+
 
 class StartupBalance:
     """Inhibit submissions until stable, then blend targets and gains."""
@@ -19,6 +24,7 @@ class StartupBalance:
     max_joint_speed = 0.6
     entry_seconds = 0.5
     blend_seconds = 1.0
+    arm_speed = 0.5  # Peak arm ramp speed, below max_joint_speed.
 
     def __init__(self, policy=None):
         self.policy = policy
@@ -29,6 +35,7 @@ class StartupBalance:
         self.ready = False
         self.handoff = None
         self.arm_pose = None
+        self.arm_ramp_seconds = 0.0
         self.entry_pose = None
         self.entry_started = None
         self.raw_balance = None
@@ -51,11 +58,18 @@ class StartupBalance:
         return float(seconds), target
 
     def _entry_window(self):
-        """Allow the standing-pose ramp to finish before checking stability."""
+        """Allow the standing-pose or arm ramp to finish before checking stability."""
         spec = self._pose_ramp_spec()
         if spec is None:
-            return self.entry_seconds
+            return max(self.entry_seconds, self.arm_ramp_seconds)
         return spec[0]
+
+    def _arm_targets(self, now):
+        if self.arm_ramp_seconds <= 0.0:
+            return self.arm_pose
+        alpha = min(1.0, max(0.0, (now - self.entry_started) / self.arm_ramp_seconds))
+        alpha = alpha * alpha * (3 - 2 * alpha)
+        return (1 - alpha) * self.arm_pose + alpha * START_ARM_POSE
 
     def _entry_blend_seconds(self):
         """How long to ease from the released pose onto the network output."""
@@ -148,6 +162,10 @@ class StartupBalance:
                 self.entry_pose = np.asarray(state["q"], dtype=float).copy()
                 self.entry_started = now
                 self._capture_entry_goal()
+                if self.entry_goal is None:
+                    # Smoothstep peaks at 1.5x its mean speed.
+                    distance = float(np.max(np.abs(START_ARM_POSE - self.arm_pose)))
+                    self.arm_ramp_seconds = 1.5 * distance / self.arm_speed
             if self.entry_goal is not None:
                 elapsed = now - self.entry_started
                 if elapsed < self.entry_goal_seconds:
@@ -188,7 +206,7 @@ class StartupBalance:
                     }
                 else:
                     self.raw_balance = {
-                        "q": np.concatenate((produced, self.arm_pose)), "dq": np.zeros(29),
+                        "q": np.concatenate((produced, self._arm_targets(now))), "dq": np.zeros(29),
                         "kp": np.concatenate((LEG_KP, np.full(14, 40.0))),
                         "kd": np.concatenate((LEG_KD, np.full(14, 1.0))), "tau": np.zeros(29),
                     }

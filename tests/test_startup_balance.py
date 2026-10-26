@@ -159,7 +159,7 @@ def test_stable_wait_retains_telemetry_deadline():
 def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
     startup = gate()
     sample = state()
-    sample['q'] = [0.2] * 29
+    sample['q'] = [0.2] * 15 + [0.0] * 14
     first = startup.command(10, 10, sample, submitted())
     np.testing.assert_allclose(first['q'], sample['q'])
     assert startup.phase == 'entering_balance'
@@ -167,7 +167,7 @@ def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
     startup.policy.update.return_value = np.full(15, 0.4)
     middle = startup.command(10.25, 10.25, sample, submitted())
     np.testing.assert_allclose(middle['q'][:15], 0.3)
-    np.testing.assert_allclose(middle['q'][15:], 0.2)
+    np.testing.assert_allclose(middle['q'][15:], 0.0)
     np.testing.assert_array_equal(middle['kp'], first['kp'])
     finish = startup.command(10.5, 10.5, sample, submitted())
     np.testing.assert_allclose(finish['q'][:15], 0.4)
@@ -175,27 +175,43 @@ def test_entry_starts_at_measured_pose_and_blends_live_balance_targets():
     assert startup.phase == 'balancing'
 
 
-def test_startup_holds_initial_arms_until_authorized_handoff():
+def test_startup_eases_arms_to_sim_pose_before_handoff():
     startup = gate()
     sample = state()
     initial_arms = np.array([0.28, 0.1, 0, 0.98, 0, 0, 0,
                              0.28, -0.1, 0, 0.98, 0, 0, 0])
     sample['q'][15:] = initial_arms.tolist()
-    for now in np.arange(0.0, 5.001, 0.02):
+    ramp = 1.5 * 0.98 / startup.arm_speed
+    previous = None
+    for now in np.arange(0.0, 6.001, 0.02):
         now = round(float(now), 8)
+        if ramp - 0.1 < now < ramp + 1.0:
+            assert not startup.authorize(now)
         command = startup.command(now, now, sample, submitted())
-        np.testing.assert_allclose(command['q'][15:], initial_arms)
+        arms = command['q'][15:]
+        if previous is not None:
+            assert np.max(np.abs(arms - previous)) / 0.02 <= startup.arm_speed + 1e-9
+        previous = arms
+        if now >= ramp:
+            np.testing.assert_allclose(arms, 0.0, atol=1e-12)
         np.testing.assert_array_equal(command['dq'][15:], 0)
         np.testing.assert_array_equal(command['tau'][15:], 0)
-        # Later feedback must not redefine the held arm targets.
+        # Later feedback must not redefine the ramp.
         sample['q'][15:] = (initial_arms + 0.02).tolist()
     assert startup.ready
     assert startup.handoff is None
-    assert startup.authorize(5.0)
-    command = startup.command(5.0, 5.0, sample, submitted())
-    np.testing.assert_allclose(command['q'][15:], initial_arms)
+    assert startup.authorize(6.0)
     command = startup.command(6.0, 6.0, sample, submitted())
+    np.testing.assert_allclose(command['q'][15:], 0.0, atol=1e-12)
+    command = startup.command(7.0, 7.0, sample, submitted())
     np.testing.assert_allclose(command['q'][15:], submitted()['q'][15:])
+
+
+def test_arms_already_at_sim_pose_add_no_startup_delay():
+    startup = gate()
+    advance(startup)
+    assert startup.arm_ramp_seconds == 0.0
+    assert startup.ready
 
 
 def test_entry_does_not_count_as_a_stable_window():

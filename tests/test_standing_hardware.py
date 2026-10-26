@@ -137,6 +137,40 @@ def test_same_upright_fault_damps_startup_but_recovers_policy(rig, launched):
     assert rig.adapter.soft_reset_policy.update.call_count == int(launched)
 
 
+@pytest.mark.parametrize('trigger', ['automatic', 'double_f3'])
+@pytest.mark.parametrize('later', ['checked_command_expired', 'action_timeout', 'policy_container_exit'])
+def test_later_submission_fault_keeps_running_recovery(rig, trigger, later):
+    start(rig)
+    handoff_policy(rig)
+    if trigger == 'automatic':
+        rig.adapter.abort('observation_timeout')
+    else:
+        rig.press_f3_twice()
+    reason = rig.adapter.abort_reason
+    rig.adapter.stop_once()
+    rig.adapter.abort(later)
+    rig.adapter.stop_once()
+    assert rig.adapter.abort_reason == reason
+    assert rig.adapter.walk_stop
+    assert not rig.adapter.hold_failed
+    assert rig.transport.stop_calls == 0
+    assert rig.adapter.soft_reset_policy.update.call_count == 2
+    rig.adapter.abort('hardware_controller_double_start', request_damping=True)
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+
+
+def test_later_fault_requesting_damping_ends_recovery(rig):
+    start(rig)
+    handoff_policy(rig)
+    rig.adapter.abort('observation_timeout')
+    rig.adapter.stop_once()
+    rig.adapter.abort('joint_velocity_limit', request_damping=True)
+    assert not rig.adapter.walk_stop
+    rig.adapter.stop_once()
+    assert rig.transport.stop_calls == 1
+
+
 @pytest.mark.parametrize('manual', [False, True])
 @pytest.mark.parametrize('during_inference', [False, True])
 def test_recovery_collapse_prevents_next_write(rig, manual, during_inference):

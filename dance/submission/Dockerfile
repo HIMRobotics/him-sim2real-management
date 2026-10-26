@@ -1,5 +1,8 @@
 FROM ros:foxy-ros-base
 SHELL ["/bin/bash", "-c"]
+# OpenBLAS worker threads stall for tens of ms when the cores are shared with
+# the safety stack, which misses the 200 ms command deadline. The MLP is tiny.
+ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake python3-pip python3-colcon-common-extensions \
     ros-foxy-rosidl-default-generators ros-foxy-rmw-fastrtps-cpp ros-foxy-std-srvs \

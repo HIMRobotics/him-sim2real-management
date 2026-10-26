@@ -507,12 +507,15 @@ class G1HardwareAdapter:
                 self.automatic_soft_reset = reason != "hardware_controller_double_f3"
                 self.walk_stop = True
             soft_reason = "hardware_controller_double_f3"
+            # A running recovery outlives later faults from the submission path it
+            # replaced, such as the checker's own deadline firing after ours. Only
+            # damp-only reasons, failed recovery health or explicit damping end it.
             soft_balance = (self.walk_stop and not self.hold_failed
                             and recoverable) and (
                 reason == soft_reason
-                or (self.abort_reason == soft_reason and reason == "policy_container_exit")
-                or (self.automatic_soft_reset and (
-                    first_fault or reason in (self.abort_reason, "policy_container_exit")))
+                or (self.automatic_soft_reset and first_fault)
+                or (not first_fault and (
+                    reason in (self.abort_reason, "policy_container_exit") or not request_damping))
             )
             if soft_balance and self.abort_reason is None:
                 # The recovery writer replaces the submission and its heartbeat.

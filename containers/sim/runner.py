@@ -26,6 +26,7 @@ from policy_safety.joint_rules import JointRules
 
 from robot_safety.config import COMMAND_FIELDS, Config, ThrashConfig
 from robot_safety.core import action_error, watchdog_reason
+from robot_safety.hardware_profile import STATE_POLL_SECS
 from robot_safety.startup_balance import StartupBalance
 from robot_safety.thrash import ThrashDetector
 
@@ -76,6 +77,7 @@ class Runner:
         self.commands = 0
         self.steps = 0
         self.sim_time = 0.0
+        self.state_poll_at = STATE_POLL_SECS
         self.response_error = None
         self.max_response_error = 0.0
         self.position_warnings = {}
@@ -217,7 +219,10 @@ class Runner:
             ):
                 violation = ("nonfinite_simulation", None)
                 break
-            if self.uses_hardware and self.commands:
+            # The robot's adapter polls rt/lowstate every 5 ms, not every physics step.
+            if self.uses_hardware and self.commands and self.sim_time >= self.state_poll_at - 1e-9:
+                while self.state_poll_at <= self.sim_time + 1e-9:
+                    self.state_poll_at += STATE_POLL_SECS
                 self.hardware.receive()
                 self._sync_hardware()
             if self.safety_checks and self.ended_at is None:
@@ -449,6 +454,7 @@ class Runner:
         self.trace_stop = []
         self.trace_startup = []
         self.sim_time = 0.0
+        self.state_poll_at = STATE_POLL_SECS
         self.thrash_detector.reset()
         self._remember()
 

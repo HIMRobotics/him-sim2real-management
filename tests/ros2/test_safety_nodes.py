@@ -415,15 +415,18 @@ class FeedbackBridgeTests(unittest.TestCase):
         self.assertEqual(state["left_b_at_secs"], now)
         self.assertFalse(state["control_ready"])
         bridge.base["base_received_at_secs"] = time.monotonic()
+        bridge.policy_state_at_secs = None
         bridge.on_observation(message)
         state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
         self.assertTrue(state["control_ready"])
         bridge.hardware_status["launch_gate"] = True
         bridge.hardware_status["policy_launched"] = False
+        bridge.policy_state_at_secs = None
         bridge.on_observation(message)
         state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
         self.assertFalse(state["control_ready"])
         bridge.hardware_status["policy_launched"] = True
+        bridge.policy_state_at_secs = None
         bridge.on_observation(message)
         state = json.loads(bridge.policy_publisher.publish.call_args[0][0].data)
         self.assertTrue(state["control_ready"])
@@ -431,9 +434,29 @@ class FeedbackBridgeTests(unittest.TestCase):
         bridge.time_started_secs = now - 6
         bridge.base["base_received_at_secs"] = now - 1
         bridge.policy_publisher.publish.reset_mock()
+        bridge.policy_state_at_secs = None
         bridge.on_observation(message)
         self.assertEqual(bridge.abort_reason, "base_feedback_timeout")
         bridge.policy_publisher.publish.assert_not_called()
+
+    def test_policy_state_goes_out_once_per_network_tick(self):
+        from robot_safety.feedback import FeedbackSample
+
+        bridge = self.bridge
+        bridge.publish_policy = True
+        bridge.policy_publisher = Mock()
+        start = time.monotonic()
+        published = []
+        for index in range(12):
+            received = start + 0.005 * index
+            bridge.pending[received] = FeedbackSample(
+                received, (0.,) * 29, (0.,) * 29, False, quat=(1., 0., 0., 0.), gyro=(0., 0., 0.))
+            message = RobotFeedback()
+            message.received_at_secs, message.observation_id = received, index + 1
+            bridge.on_observation(message)
+            if bridge.policy_publisher.publish.call_count > len(published):
+                published.append(index + 1)
+        self.assertEqual(published, [1, 5, 9])
 
     def test_frozen_base_source_time_latches_even_with_fresh_receipts(self):
         bridge = self.bridge

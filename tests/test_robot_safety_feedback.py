@@ -8,6 +8,7 @@ from robot_safety.feedback import (
     base_state_from_sdk,
     feedback_from_sdk,
     policy_state,
+    policy_state_due,
 )
 
 
@@ -30,6 +31,12 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(state["observation_id"], 42)
         self.assertEqual(state["received_at_secs"], 1.)
         self.assertNotIn("base_velocity", state)
+
+    def test_policy_state_is_due_once_per_network_tick(self):
+        self.assertTrue(policy_state_due(None, 1.0))
+        self.assertFalse(policy_state_due(1.0, 1.015))
+        self.assertTrue(policy_state_due(1.0, 1.0175))
+        self.assertTrue(policy_state_due(1.0, 1.02))
 
     def test_base_frame_conversion_and_missing_source_time(self):
         from math import sqrt
