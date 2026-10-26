@@ -363,7 +363,7 @@ def test_abort_during_post_release_reset_preserves_fault(rig):
     assert rig.adapter.hold_failed
 
 
-@pytest.mark.parametrize('tilt', [-90, -30.01, -30, 0, 30, 30.01, 90, 180])
+@pytest.mark.parametrize('tilt', [-90, -42.01, -42, 0, 42, 42.01, 90, 180])
 @pytest.mark.parametrize('yaw', [0, 90, 180])
 def test_automatic_fault_uses_measured_up_axis(rig, tilt, yaw):
     start(rig)
@@ -377,7 +377,7 @@ def test_automatic_fault_uses_measured_up_axis(rig, tilt, yaw):
     assert rig.adapter.abort_reason == 'thrash_detected'
     assert rig.adapter.command is None
     assert not rig.adapter.startup.status()['control_ready']
-    if abs(tilt) <= 30:
+    if abs(tilt) <= 42:
         assert rig.adapter.automatic_soft_reset
         assert rig.transport.stop_calls == 0
         rig.adapter.soft_reset_policy.update.assert_called_once()

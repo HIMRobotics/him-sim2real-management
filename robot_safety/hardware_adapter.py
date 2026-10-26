@@ -88,9 +88,15 @@ class G1HardwareAdapter:
     """Apply approved motor commands and handle recovery or damping."""
 
     def __init__(self, profile, clock=time.monotonic, *, whole_body=False,
-                 launch_gate=False, stance_blend_secs=5.0):
+                 launch_gate=False, stance_blend_secs=5.0, limit_mode="stop"):
         self.profile = profile
         self.whole_body = whole_body
+        # "clip" keeps the 90% torque-target projection but records torque above
+        # the profile ceiling and base spin above the gyro limit as warnings
+        # instead of stopping. Every other check still stops.
+        if limit_mode not in ("stop", "clip"):
+            raise ValueError("limit_mode must be stop or clip")
+        self.limit_mode = limit_mode
         self.launch_gate = bool(launch_gate or whole_body)
         if not math.isfinite(stance_blend_secs) or stance_blend_secs < 0:
             raise ValueError("stance blend duration must be finite and non-negative")
@@ -326,7 +332,15 @@ class G1HardwareAdapter:
                     note_limit(self.position_warnings, name, "joint_torque_limit", abs(torque),
                                limits.max_torque_nm, "Nm", torque_kind="measured recovery torque")
                 else:
-                    check_torque(name, limits, torque)
+                    self._check_torque(name, limits, torque, "measured torque")
+
+    def _check_torque(self, name, limits, torque, kind):
+        if self.limit_mode == "clip":
+            note_limit(self.position_warnings, name, "joint_torque_limit", abs(torque),
+                       limits.max_torque_nm, "Nm", torque_kind=kind)
+        else:
+            check_torque(name, limits, torque)
+
 
     def feedback_fresh(self, now):
         return (
@@ -861,7 +875,8 @@ class G1HardwareAdapter:
             self.check_health()
             for index, limits in self._monitored_joints():
                 check_measured_velocity(G1_29_JOINT_NAMES[index], limits, self.feedback.dq[index])
-            check_base_motion(self.gyro, self.quat)
+            check_base_motion(self.gyro, self.quat, spin_warnings=(
+                self.position_warnings if self.limit_mode == "clip" else None))
             if self.q_applied is not None:
                 for index, limits in self._monitored_joints():
                     if index not in self.q_applied:
@@ -871,7 +886,7 @@ class G1HardwareAdapter:
                         self.applied_gains[index][1], self.tau_applied[index], self.feedback.q[index],
                         self.feedback.dq[index],
                     )
-                    check_torque(G1_29_JOINT_NAMES[index], limits, tau_demand)
+                    self._check_torque(G1_29_JOINT_NAMES[index], limits, tau_demand, "PD demand")
         except ValueError as error:
             self.abort(str(error), request_damping=True)
 

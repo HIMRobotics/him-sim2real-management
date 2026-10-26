@@ -92,5 +92,13 @@ at joint friction 0 and 0.3 Nm. The median absolute joint error is about
   clip) on `left_ankle_pitch: joint_torque_limit`, and Holosoma recovers.
   With ankles hard-capped at 35 or 31.5 Nm and no stop, the clip still finishes
   without a fall.
+- **Body spin:** at about 17 s (12 s into the clip) the dance yaws at about
+  10 rad/s, over the 6 rad/s body-spin limit. The hardware adapter enforces it.
+  Clip mode (`G1_SIM_LIMIT_MODE=clip` in the sim, `G1_LIMIT_MODE=clip` on the
+  robot) runs the same adapter but turns the torque and spin stops into
+  warnings. In Docker with `--safety-checks --lockstep` the full clip then plays
+  without a fall: left ankle up to 48 Nm PD demand and 44.5 Nm measured, right
+  ankle 39 Nm, yaw up to 9.8 rad/s. On Docker's wall clock, host stalls delay or
+  drop commands and the dance falls at varying times.
 - **Physics timestep:** HIM's sim uses a 2 ms timestep. The training brief
   specifies 5 ms, and this has not been changed.

@@ -104,6 +104,79 @@ class BridgeTests(unittest.TestCase):
                 node.on_control()
         self.assertEqual(node.stalls, [(1.02, 1.30)])
 
+    def test_lockstep_steps_once_per_reply_on_the_simulated_clock(self):
+        bridge = load_bridge()
+        node = bridge.SimBridge.__new__(bridge.SimBridge)
+        node.finished = False
+        node.motor_gate = None
+        node.checker = None
+        node.abort_reason = None
+        node.lockstep = True
+        node.created = node.sim_clock = node.run_started = 100.0
+        node.seconds = 10.0
+        node.accepted = True
+        node.circle = False
+        node.plant = Mock()
+        node.plant.call.side_effect = lambda request: {
+            "ok": True, "observation_id": node.plant.call.call_count}
+        node.publish_state = Mock()
+        node.lowstate = Mock()
+        node.latch = Mock()
+        with patch.object(bridge.time, "monotonic", return_value=500.0):
+            node.on_control()
+            node.on_control()
+        self.assertEqual(node.plant.call.call_count, 1)
+        request = node.plant.call.call_args.args[0]
+        self.assertEqual((request["op"], request["time"]), ("step", request["feedback_time"]))
+        self.assertAlmostEqual(request["time"], 0.02)
+        self.assertEqual(node.awaiting, 1)
+        with patch.object(bridge.time, "monotonic", return_value=900.0):
+            node.replied()
+        self.assertEqual(node.plant.call.call_count, 2)
+        with patch.object(bridge.time, "monotonic", return_value=900.0):
+            node.replied()
+        self.assertEqual(node.plant.call.call_count, 2)
+        node.awaiting = 2
+        self.assertAlmostEqual(node.clock(), 0.04)
+        with patch.object(bridge.time, "monotonic", return_value=900.0 + bridge.LOCKSTEP_REPLY_SECONDS):
+            node.on_control()
+        self.assertEqual((node.plant.call.call_count, node.missed_replies), (3, 1))
+        self.assertAlmostEqual(node.clock(), 0.06)
+        node.latch.assert_not_called()
+
+    def test_clean_end_keeps_simulating_the_handoff_without_the_policy(self):
+        bridge = load_bridge()
+        node = bridge.SimBridge.__new__(bridge.SimBridge)
+        node.finished = False
+        node.motor_gate = Mock(abort_reason=None)
+        node.checker = None
+        node.abort_reason = None
+        node.lockstep = True
+        node.created = node.sim_clock = node.run_started = 100.0
+        node.seconds = 0.01
+        node.accepted = True
+        node.circle = False
+        node.plant = Mock()
+        node.plant.call.side_effect = lambda request: (
+            {"ok": True, "handoff": True} if request["op"] == "end"
+            else {"ok": True, "observation_id": 1})
+        node.publish_state = Mock()
+        node.lowstate = Mock()
+        node.finish = Mock(side_effect=lambda: setattr(node, "finished", True))
+        with patch.object(bridge, "HANDOFF_SECONDS", 0.03):
+            node.on_control()
+            node.on_precheck(Mock())
+            ops = [c.args[0]["op"] for c in node.plant.call.call_args_list]
+            self.assertEqual(ops, ["end", "step"])
+            self.assertIsNotNone(node.ended_at)
+            node.publish_state.assert_not_called()
+            self.assertIsNone(node.awaiting)
+            node.on_control()
+            node.finish.assert_not_called()
+            node.on_control()
+        node.finish.assert_called_once()
+        node.motor_gate.cycle.assert_called_once()
+
     def test_stop_during_a_host_stall_is_flagged_inconclusive(self):
         import tempfile
 

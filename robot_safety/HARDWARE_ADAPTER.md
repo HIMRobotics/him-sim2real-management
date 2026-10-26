@@ -62,11 +62,11 @@ Double Start retains priority and requests damping.
 
 After policy handoff, an automatic fault selects zero-velocity Holosoma
 soft reset only when the measured body-up axis dotted with world-up is at least
-`cos(30 degrees)` and estimated pelvis height is at least **0.4884 m**.
+`cos(42 degrees)` and estimated pelvis height is at least **0.4884 m**.
 `hardware_constants.py` defines the **0.74 m** nominal GR00T base height and
 the **0.66** minimum fraction. Both orientation and joint telemetry must be
 finite and less than 200 ms old. Missing, invalid or stale telemetry selects damping.
-The 30-degree standing threshold is separate from the tighter startup readiness threshold.
+The 42-degree standing threshold is separate from the tighter startup readiness threshold.
 The original fault stays latched and submitted commands remain inhibited.
 `/safety/hardware_status` reports `automatic_soft_reset` while this path is active.
 
@@ -91,7 +91,7 @@ because recovery requires a working output path. Recovery needs a loaded policy
 and never takes ownership solely because a fault occurred before arming/release.
 Automatic and double-F3 recovery recheck height and orientation on feedback,
 before inference and before motor output. Recovery damps if height drops below
-0.4884 m, tilt exceeds 30 degrees, telemetry expires, or inference/output fails.
+0.4884 m, tilt exceeds 42 degrees, telemetry expires, or inference/output fails.
 
 The recovery writer updates its output heartbeat so the stopped submission's
 old timestamp cannot trigger a false stall. Repeated notifications of the

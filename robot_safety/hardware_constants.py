@@ -6,7 +6,7 @@ import math
 G1_STANDING_PELVIS_HEIGHT_M = 0.74
 STANDING_HEIGHT_MIN_FRACTION = 0.66
 STANDING_HEIGHT_MIN_M = G1_STANDING_PELVIS_HEIGHT_M * STANDING_HEIGHT_MIN_FRACTION
-STANDING_UPRIGHT_MIN = math.cos(math.radians(30.0))
+STANDING_UPRIGHT_MIN = math.cos(math.radians(42.0))
 
 # SDK motor indices, including waist slots even when mechanically locked.
 G1_29_JOINT_NAMES = (

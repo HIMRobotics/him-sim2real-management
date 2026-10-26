@@ -859,6 +859,24 @@ class HardwareAdapterTests(unittest.TestCase):
         self._state(motors, gyro=(6.01, 0.0, 0.0))
         self.assertIn("base_angular_speed_limit", self.adapter.abort_reason)
 
+    def test_clip_limit_mode_warns_on_torque_and_body_spin_only(self):
+        with self.assertRaises(ValueError):
+            G1HardwareAdapter(load_profile(profile_data()), limit_mode="ignore")
+        self.run_first()
+        self.adapter.limit_mode = "clip"
+        motors = [SimpleNamespace(q=0.0, dq=0.0, temperature=(25, 25), tau_est=0.0) for _ in range(35)]
+        motors[0].tau_est = 1000.0
+        self._state(motors, gyro=(0.0, 0.0, 9.0))
+        self.assertIsNone(self.adapter.abort_reason)
+        warnings = self.adapter.position_warnings
+        self.assertEqual(warnings["base_gyro_z"]["limits"][0]["value"], 9.0)
+        torque = warnings[G1_29_JOINT_NAMES[0]]["limits"][0]
+        self.assertEqual((torque["reason"], torque["torque_kind"], torque["value"]),
+                         ("joint_torque_limit", "measured torque", 1000.0))
+        motors[3].dq = 0.101
+        self._state(motors)
+        self.assertIn("left_knee: joint_velocity_limit", self.adapter.abort_reason)
+
     def test_temperature_battery_and_missing_health_reject(self):
         for fault, reason in (("winding", "motor_winding_temperature_limit"),
                               ("casing", "motor_casing_temperature_limit"),

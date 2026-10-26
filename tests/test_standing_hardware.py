@@ -18,7 +18,7 @@ def test_standing_is_part_of_health_check(rig, recovery, failure):
     if failure == 'height':
         rig.adapter.feedback = replace(rig.adapter.feedback, q=squat_pose())
     else:
-        angle = math.radians(31) / 2
+        angle = math.radians(43) / 2
         rig.adapter.feedback = replace(
             rig.adapter.feedback, quat=(math.cos(angle), 0, math.sin(angle), 0))
     with pytest.raises(ValueError, match='hardware_not_standing'):
@@ -108,7 +108,7 @@ def test_feedback_posture_violation_damps_without_recovery(rig, launched, failur
     if failure == 'seated':
         q = tuple([-math.pi / 2, 0, 0, math.pi / 2, 0, 0] * 2 + [0] * 17)
     elif failure == 'tilt':
-        angle = math.radians(30.01) / 2
+        angle = math.radians(42.01) / 2
         quat = (math.cos(angle), 0, math.sin(angle), 0)
     rig.transport.write_body.reset_mock()
     rig.adapter.receive_state(SimpleNamespace(

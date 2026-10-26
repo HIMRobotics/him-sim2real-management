@@ -33,8 +33,8 @@ def test_physical_speed_limit_still_rejects_before_ownership(rig, index):
 
 @pytest.mark.parametrize(('tilt', 'recovery_available', 'expect_recovery'), [
     (0, True, True),
-    (30, True, True),
-    (30.01, True, False),
+    (42, True, True),
+    (42.01, True, False),
     (0, False, False),
 ])
 def test_runtime_physical_speed_violation_selects_recovery_or_damping(

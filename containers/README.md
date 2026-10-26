@@ -82,7 +82,7 @@ MUJOCO_GL=egl .venv-policy-safety/bin/python containers/sim/render.py containers
 ```
 
 `recovery_tilt` imposes a zero-velocity pose and injects a policy fault. A 20° tilt
-alone does not cross the 30° stop threshold. The other trials test immediate
+alone does not cross the 42° stop threshold. The other trials test immediate
 damping when orientation or pelvis-to-sole height fails. Scenario commands return
 success only when the expected response occurs. The run still reports the
 injected safety violation. Reports include recovery writes, damping time and

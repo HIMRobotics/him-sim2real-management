@@ -42,6 +42,7 @@ class HardwareMotorGateNode(MotorGateNode):
         whole_body = self.declare_parameter("whole_body_output", False).value
         launch_gate = self.declare_parameter("launch_gate", False).value
         stance_blend_secs = self.declare_parameter("stance_blend_secs", 5.0).value
+        limit_mode = self.declare_parameter("limit_mode", "stop").value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
@@ -69,7 +70,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.adapter = G1HardwareAdapter(
             profile, whole_body=whole_body,
             launch_gate=_as_bool(launch_gate),
-            stance_blend_secs=float(stance_blend_secs),
+            stance_blend_secs=float(stance_blend_secs), limit_mode=limit_mode,
         )
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state, self.adapter.receive_battery,
@@ -81,6 +82,11 @@ class HardwareMotorGateNode(MotorGateNode):
         self.get_logger().warn(
             f"Hardware output enabled: {enabled}. No automatic rearm."
         )
+        if limit_mode == "clip":
+            self.get_logger().warn(
+                "limit_mode=clip: torque above the profile ceiling and base spin above "
+                "the gyro limit are warnings, not stops."
+            )
 
     def notify_startup_ready(self):
         """Report startup readiness only after warmup and fresh released buttons."""
@@ -273,6 +279,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 **(self.adapter.startup.status() if self.adapter.whole_body else {}),
                 "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
+                "limit_mode": self.adapter.limit_mode,
                 "startup_policy": self.adapter.startup_policy_name,
                 "soft_reset_policy": "holosoma",
                 "automatic_soft_reset": self.adapter.automatic_soft_reset,
