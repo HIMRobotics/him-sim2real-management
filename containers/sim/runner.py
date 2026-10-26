@@ -93,7 +93,12 @@ class Runner:
         self.metrics = MotionMetrics(self.plant)
         self._live = None
         self._circle = None
-        self.hardware = (SimHardware(self.plant, self.rules.path)
+        self.ended_at = None
+        # Same modes as the hardware adapter's limit_mode (G1_LIMIT_MODE on the robot).
+        self.limit_mode = os.environ.get("G1_SIM_LIMIT_MODE") or "stop"
+        if self.limit_mode not in ("stop", "clip"):
+            raise ValueError("G1_SIM_LIMIT_MODE must be stop or clip")
+        self.hardware = (SimHardware(self.plant, self.rules.path, self.limit_mode)
                          if self.safety_checks and control_path == "submission" else None)
         self.startup = self.hardware.adapter.startup if self.hardware else StartupBalance()
         if not self.hardware:
@@ -127,6 +132,8 @@ class Runner:
     def command(self, frame, time):
         if self.reason is not None:
             return self.reason
+        if self.ended_at is not None:
+            return "run_ended"
         frame = dict(frame) if isinstance(frame, dict) else frame
         reason, detail = self._validate(frame, float(time))
         if reason:
@@ -213,7 +220,7 @@ class Runner:
             if self.uses_hardware and self.commands:
                 self.hardware.receive()
                 self._sync_hardware()
-            if self.safety_checks:
+            if self.safety_checks and self.ended_at is None:
                 if self.plant.fallen() and not self.uses_hardware:
                     violation = ("fall", {"height": self.plant.state()["height"]})
                     break
@@ -221,7 +228,9 @@ class Runner:
                 try:
                     if not self.uses_hardware:
                         check_base_motion(self.plant.data.qvel[
-                            self.plant.base_vadr + 3:self.plant.base_vadr + 6])
+                            self.plant.base_vadr + 3:self.plant.base_vadr + 6],
+                            spin_warnings=(self.position_warnings
+                                           if self.limit_mode == "clip" else None))
                 except JointViolation as exc:
                     violation = (exc.reason, exc.details)
                     break
@@ -233,7 +242,7 @@ class Runner:
                     self.rules.note_torque(
                         self.plant.data.qfrc_actuator[self.plant.vadr],
                         self.position_warnings, kind="applied torque")
-            if self.reason is None and self.commands:
+            if self.reason is None and self.ended_at is None and self.commands:
                 reason = self.thrash_detector.observe(dq, self.sim_time)
                 if reason:
                     violation = (reason, deepcopy(self.thrash_detector.event))
@@ -241,7 +250,8 @@ class Runner:
         self.steps += 1
         if violation is None and self.plant.fallen() and not self.uses_hardware:
             violation = ("fall", {"height": self.plant.state()["height"]})
-        if violation is None and self.reason is None and self.active is not None and self.control_path == "submission":
+        if (violation is None and self.reason is None and self.ended_at is None
+                and self.active is not None and self.control_path == "submission"):
             q_applied = self.active["q"]
             q_measured = self.plant.q()
             self.response_error = (q_measured - q_applied).tolist()
@@ -266,6 +276,8 @@ class Runner:
             "command_protocol": submission,
             "command_limits": submission and self.safety_checks,
             "profile_gains": submission and self.safety_checks,
+            "torque_target_clipping": self.safety_checks,
+            "torque_limit_stop": self.uses_hardware and self.limit_mode == "stop",
             "response_error": False,
             "response_error_diagnostic": submission,
             "motor_temperature": False,
@@ -275,7 +287,7 @@ class Runner:
             "robot_state_timeout": submission and self.safety_checks,
             "loop_timeout": self.safety_checks,
             "joint_speed": self.safety_checks,
-            "base_angular_speed": self.safety_checks,
+            "base_angular_speed": self.safety_checks and self.limit_mode == "stop",
             "fall": self.plant.check_fall and not self.uses_hardware,
             "finite_simulation": True,
             "thrash_monitoring": thrash_mode != "off",
@@ -296,6 +308,7 @@ class Runner:
         return {
             **self.startup.status(),
             "hardware_safety": self.hardware.snapshot() if self.uses_hardware else None,
+            "handoff": self._handoff_snapshot(),
             "version": 1,
             "status": status,
             "reason": self.reason,
@@ -337,10 +350,12 @@ class Runner:
         """Startup balance progress for the viewer. Direct control has none."""
         if self.control_path == "direct":
             return None
-        phase = self.hardware.snapshot()["phase"] if self.uses_hardware and self.reason else self.startup.phase
+        phase = (self.hardware.snapshot()["phase"]
+                 if self.uses_hardware and (self.reason or self.ended_at is not None)
+                 else self.startup.phase)
         return {"phase": phase, "elapsed_secs": round(self.sim_time, 3),
                 "launch_secs": LAUNCH_SECONDS, "handoff_at_secs": self.startup.handoff,
-                "blend_secs": self.startup.blend_seconds}
+                "blend_secs": self.startup.blend_seconds, "run_ended_at_secs": self.ended_at}
 
     def _remember(self):
         telemetry = self._thrash_snapshot() if self.record_trace or self.live_path else None
@@ -464,11 +479,16 @@ class Runner:
             )
             result["detail"] = self.detail
             if request.get("feedback") and result["ok"]:
-                # Both processes share the host monotonic clock.
-                origin = request.get("clock_origin", started - request["time"])
-                issued = time.monotonic() - origin
+                if "feedback_time" in request:
+                    issued = request["feedback_time"]
+                else:
+                    # Both processes share the host monotonic clock.
+                    origin = request.get("clock_origin", started - request["time"])
+                    issued = time.monotonic() - origin
                 result.update(self.feedback(issued))
             return result
+        if op == "end":
+            return self.end()
         if op == "report":
             self.external_thrash = request.get("thrash")
             return self.report(request.get("lowstate", False))
@@ -477,8 +497,26 @@ class Runner:
             return {"ok": True, "reason": self.reason}
         return {"ok": False, "reason": "unknown_op"}
 
+    def end(self):
+        """Hand over as hardware does when the submission exits after a clean run."""
+        if self.reason is not None or self.ended_at is not None or not self.uses_hardware:
+            return {"ok": True, "handoff": False}
+        self.ended_at = self.sim_time
+        self.hardware.abort("policy_container_exit")
+        self.active = self.hardware.transport.active
+        self._remember()
+        return {"ok": True, "handoff": True}
+
+    def _handoff_snapshot(self):
+        if self.ended_at is None:
+            return None
+        safety = self.hardware.snapshot()
+        return {"reason": "policy_container_exit", "at_secs": self.ended_at,
+                "controller": "holosoma" if safety["phase"] == "recovery" else safety["phase"],
+                "standing_height_m": safety["standing_height_m"], "upright": safety["upright"]}
+
     def _check_deadlines(self, time):
-        if not self.safety_checks or self.reason is not None:
+        if not self.safety_checks or self.reason is not None or self.ended_at is not None:
             return
         submission = self.control_path == "submission"
         reason = watchdog_reason(
@@ -495,7 +533,7 @@ class Runner:
         self.startup = self.hardware.adapter.startup
         self.active = self.hardware.transport.active
         self.position_warnings.update(self.hardware.adapter.position_warnings)
-        if self.hardware.adapter.abort_reason and self.reason is None:
+        if self.hardware.adapter.abort_reason and self.reason is None and self.ended_at is None:
             self._latch(self.hardware.adapter.abort_reason, None)
 
     def _latch(self, reason, detail):

@@ -44,9 +44,11 @@ unit's retry limits. An active service alone does not establish physical stop
 performance.
 
 After policy handoff, automatic faults select Holosoma soft reset only when
-fresh IMU orientation is within 30 degrees of vertical and estimated pelvis
+fresh IMU orientation is within 42 degrees of vertical and estimated pelvis
 height is at least **0.4884 m**, or **66% of the 0.74 m reference** in
-`hardware_constants.py`. Height comes from measured leg joints and pelvis IMU
+`hardware_constants.py`. The tilt limit was 30 degrees; it is 42 so dance
+leans (reference torso up to about 41 degrees) do not trip it, and the walker
+pitch sweep in `containers/SIM_RUN.md` did not recover from 30 degrees or more. Height comes from measured leg joints and pelvis IMU
 orientation relative to the lowest sole, assuming level ground. Planted feet
 under the gantry are the operator's responsibility, with no software contact gate.
 The height cutoff is provisional and needs physical recovery qualification.
@@ -60,6 +62,17 @@ Height and tilt are part of the shared health check. A measured torque overload
 stops the submitted policy but does not by itself make the robot unrecoverable.
 During recovery, finite measured overloads are recorded while commands remain
 torque-limited. Recovery continues only while posture and other health checks pass.
+
+`G1_LIMIT_MODE=clip` (the `limit_mode` parameter of `hardware_gate`; default
+`stop`) is opt-in and lets the submitted policy run past two limits. Targets
+are still projected into 90% of each joint's torque ceiling, but measured
+torque or PD demand above the ceiling, and base gyro speed above 6 rad/s, are
+recorded as warnings instead of stopping. Torque can then exceed the profile
+rating, which for the rev-1.0 ankles and waist is Unitree's 35 Nm. Every other
+check, including tilt and standing posture, still stops and recovers. The node
+logs a warning at startup and reports `limit_mode` in hardware status.
+`G1_SIM_LIMIT_MODE=clip` runs the same adapter code in the sim.
+
 Double Start always requests damping. Invalid or stale telemetry, unavailable
 recovery, failed motor output, output-worker stalls and service shutdown use
 damping. Recovery also falls back to damping if inference/output fails.

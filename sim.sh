@@ -64,6 +64,8 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --push NAME        One battery case: none, small, medium, or heavy.
                    With --view, open the page and press Start to watch it.
 --view             Open the live viewer and press Start to run.
+--lockstep         ROS path: step the plant once per policy reply, with every
+                   deadline on the simulated clock. Host stalls pause the run.
                    Uses the first free port from G1_SIM_VIEW_PORT (8765).
                    Ctrl+C closes the viewer.
 HELP
@@ -222,6 +224,7 @@ while [[ $# -gt 0 ]]; do
     --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
     --safety-checks) safety_checks=1; safety_set=1; shift ;;
     --no-safety-checks) safety_checks=0; safety_set=1; shift ;;
+    --lockstep) export G1_SIM_LOCKSTEP=1; shift ;;
     --example) example_arg="${2:?--example needs a name}"; example="$example_arg"; shift 2 ;;
     --local) local_mode=1; shift ;;
     --scenario) scenario="${2:?--scenario needs a name}"; shift 2 ;;
@@ -455,6 +458,14 @@ else
   fi
   status=0
   run_session || status=$?
+  retries="${G1_SIM_STALL_RETRIES:-1}"
+  while [[ "$view" -eq 0 && "$retries" -gt 0 ]] && declare -F stalled_run >/dev/null && stalled_run; do
+    retries=$((retries - 1))
+    echo "The stop came during a host stall, so the result is inconclusive. Rerunning." >&2
+    restart_runtime || echo "Rerunning without a Docker restart." >&2
+    status=0
+    run_session || status=$?
+  done
   stop_sim
   [[ "$view" -eq 0 ]] || keep_viewer
   exit "$status"

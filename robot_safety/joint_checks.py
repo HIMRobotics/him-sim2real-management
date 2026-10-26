@@ -181,13 +181,21 @@ MOTOR_CASING_LIMIT_C = 85.0
 MIN_BATTERY_PERCENT = 10.0
 
 
-def check_base_motion(gyro, quat=None):
-    """Check each gyro axis and, when requested, tilt from upright."""
+def check_base_motion(gyro, quat=None, *, spin_warnings=None):
+    """Check each gyro axis and, when requested, tilt from upright.
+
+    With spin_warnings, gyro speed above the limit is recorded there instead
+    of stopping. Tilt still stops.
+    """
     if len(gyro) != 3:
         raise ValueError("invalid_imu")
     for axis, speed in enumerate(gyro):
-        check_bound("base_angular_speed_limit", str(axis), abs(speed),
-                    BASE_ANGULAR_SPEED_LIMIT_RAD_S, "rad/s")
+        if spin_warnings is None:
+            check_bound("base_angular_speed_limit", str(axis), abs(speed),
+                        BASE_ANGULAR_SPEED_LIMIT_RAD_S, "rad/s")
+        else:
+            note_limit(spin_warnings, "base_gyro_" + "xyz"[axis], "base_angular_speed_limit",
+                       abs(speed), BASE_ANGULAR_SPEED_LIMIT_RAD_S, "rad/s")
     if quat is not None:
         if len(quat) != 4 or not all(math.isfinite(v) for v in quat):
             raise ValueError("invalid_imu")

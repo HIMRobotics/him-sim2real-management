@@ -80,3 +80,38 @@ run_session() {
   fi
   return "$status"
 }
+
+# The bridge records host_stall when Docker paused the sim around the stop,
+# which trips wall-clock deadlines such as loop_progress.
+stalled_run() {
+  [[ -f "$out_dir/report.json" ]] && "$python" -c \
+    'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("host_stall") else 1)' \
+    "$out_dir/report.json"
+}
+
+# Runs a command in the background and gives up after $1 seconds.
+within() {
+  local limit="$1"; shift
+  "$@" >/dev/null 2>&1 &
+  local pid=$! ticks=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( ticks >= limit * 5 )); then
+      kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 0.2; ticks=$((ticks + 1))
+  done
+  wait "$pid"
+}
+
+restart_runtime() {
+  within 10 "$runtime" desktop version || return 1
+  echo "Restarting Docker Desktop." >&2
+  within 180 "$runtime" desktop restart || true
+  for _ in $(seq 1 60); do
+    within 5 "$runtime" info && return 0
+    sleep 2
+  done
+  echo "Docker Desktop did not come back after the restart." >&2
+  return 1
+}

@@ -56,8 +56,8 @@ def test_measured_overload_allows_recovery_output_in_sim(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("case,tilt,phase", [
     ("recovery_tilt", 20, "recovery"),
-    ("policy_tilt", 35, "damping"),
-    ("gantry_tilt", 35, "damping"),
+    ("policy_tilt", 45, "damping"),
+    ("gantry_tilt", 45, "damping"),
     ("policy_crouch", 0, "damping"),
 ])
 def test_real_policy_safety_scenarios(tmp_path, case, tilt, phase):
@@ -99,12 +99,42 @@ def test_recovery_can_be_overridden_and_cannot_resume_submission(tmp_path, monke
     assert runner.hardware.transport.body_writes > writes
     assert runner.hardware.snapshot()["phase"] == "recovery"
     # Fresh posture feedback must stop an already latched recovery immediately.
-    SafetyScenario("policy_tilt", 35).apply(runner)
+    SafetyScenario("policy_tilt", 45).apply(runner)
     assert runner.hardware.snapshot()["phase"] == "damping"
     writes = runner.hardware.transport.body_writes
     runner.step(runner.sim_time)
     assert runner.hardware.transport.body_writes == writes
     assert runner.reason == original_reason
+
+
+def test_clean_end_hands_over_to_holosoma_like_a_container_exit(tmp_path, monkeypatch):
+    import local
+
+    captured = []
+    original = local._finish
+
+    def finish(runner, output, extra):
+        captured.append(runner)
+        return original(runner, output, extra)
+
+    monkeypatch.setattr(local, "_finish", finish)
+    run("holosoma", tmp_path, seconds=3)
+    runner = captured[0]
+    assert runner.reason is None
+    assert runner.handle({"op": "end"}) == {"ok": True, "handoff": True}
+    assert runner.handle({"op": "end"})["handoff"] is False
+    writes = runner.hardware.transport.body_writes
+    state = runner.feedback(runner.sim_time)
+    assert runner.command(hold(runner, state, runner.last_sequence + 1), runner.sim_time) == "run_ended"
+    for _ in range(100):
+        runner.step(runner.sim_time + 0.02)
+    assert runner.reason is None
+    assert runner.hardware.transport.body_writes > writes
+    report = runner.report()
+    assert report["status"] == "within_limits"
+    assert report["handoff"]["controller"] == "holosoma"
+    assert report["handoff"]["reason"] == "policy_container_exit"
+    assert report["handoff"]["upright"] > 0.9
 
 
 def test_missing_recovery_weights_prevent_output(monkeypatch):

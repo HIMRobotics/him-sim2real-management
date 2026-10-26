@@ -18,7 +18,10 @@ from std_srvs.srv import Trigger
 from policy import KD, KP, Policy
 
 JOINTS = 29
-STATE_TIMEOUT = 0.2
+# Only decides when the run is over and the node can exit. The safety checker
+# enforces the 0.2 s deadlines. Shorter than a host stall, this ends a paused
+# lockstep run.
+STATE_TIMEOUT = 2.0
 
 
 class SubmissionNode(Node):
