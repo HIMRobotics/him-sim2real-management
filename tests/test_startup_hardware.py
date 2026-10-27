@@ -36,6 +36,15 @@ def finish_entry(rig):
     assert rig.adapter.abort_reason is None
 
 
+def handoff_policy(rig):
+    finish_entry(rig)
+    rig.adapter.startup.ready = True
+    assert rig.adapter.startup.authorize(rig.now)
+    rig.adapter.submit(rig.command, rig.now + 0.1)
+    rig.adapter.step()
+    assert rig.adapter.policy_launched
+
+
 @pytest.mark.parametrize('name', ['groot', 'holosoma'])
 def test_startup_selection_preserves_soft_reset_policy(rig, name):
     rig.adapter.startup_policy_name = name
@@ -111,7 +120,7 @@ def test_inference_failure_before_ownership_never_releases(rig):
     rig.transport.write_body.assert_not_called()
 
 
-def test_inference_failure_after_ownership_requests_recovery_when_upright(rig):
+def test_startup_inference_failure_after_ownership_damps_when_upright(rig):
     start(rig)
     rig.adapter.balance_policy.update.side_effect = RuntimeError('failed')
     rig.now += 0.02
@@ -119,11 +128,12 @@ def test_inference_failure_after_ownership_requests_recovery_when_upright(rig):
     rig.adapter.submit(rig.command, rig.now + 0.1)
     rig.adapter.step()
     assert rig.adapter.abort_reason
-    assert rig.adapter.automatic_soft_reset
-    assert not rig.adapter.hold_failed
+    assert not rig.adapter.automatic_soft_reset
+    assert rig.adapter.hold_failed
     rig.adapter.step()
-    rig.adapter.soft_reset_policy.update.assert_called_once()
-    assert rig.transport.stop_calls == 0
+    rig.adapter.stop_once()
+    rig.adapter.soft_reset_policy.update.assert_not_called()
+    assert rig.transport.stop_calls == 1
     assert not rig.adapter.startup.status()['control_ready']
 
 
@@ -135,8 +145,8 @@ def test_feedback_torque_check_uses_written_balance_gains(rig):
         replace(limits, max_torque_nm=10) for limits in rig.adapter.profile.legs))
     rig.state()
     assert 'joint_torque_limit' in rig.adapter.abort_reason
-    assert rig.adapter.automatic_soft_reset
-    assert rig.adapter.q_applied is None
+    assert not rig.adapter.automatic_soft_reset
+    assert rig.adapter.hold_failed
 
 
 @pytest.mark.parametrize('handoff', [False, True])
@@ -206,6 +216,7 @@ def test_balance_overshoot_is_limited_and_recorded(rig):
 
 def test_measured_torque_fault_selects_recovery_when_upright(rig):
     start(rig)
+    handoff_policy(rig)
     torques = [0.0] * 29
     torques[4] = rig.adapter.profile.legs[4].max_torque_nm + 0.1
     rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=tuple(torques))
@@ -217,6 +228,7 @@ def test_measured_torque_fault_selects_recovery_when_upright(rig):
 
 def test_motion_after_limited_write_can_still_fault_and_recover(rig):
     test_balance_overshoot_is_limited_and_recorded(rig)
+    handoff_policy(rig)
     q = list(rig.adapter.feedback.q)
     q[4] = -0.2
     rig.adapter.feedback = replace(rig.adapter.feedback, q=tuple(q))
@@ -323,12 +335,9 @@ def test_fault_after_release_never_writes_and_uses_stop_path(rig, failure):
     assert rig.adapter.abort_reason
     assert rig.adapter.startup.phase == 'fault'
     rig.adapter.stop_once()
-    if failure in ('expired', 'inference'):
-        assert rig.adapter.automatic_soft_reset
-        rig.adapter.soft_reset_policy.update.assert_called_once()
-        assert rig.transport.stop_calls == 0
-    else:
-        assert rig.transport.stop_calls == 1
+    assert not rig.adapter.automatic_soft_reset
+    rig.adapter.soft_reset_policy.update.assert_not_called()
+    assert rig.transport.stop_calls == 1
 
 
 def test_failed_release_and_failed_restore_do_not_claim_stock_ownership(rig):
@@ -354,10 +363,11 @@ def test_abort_during_post_release_reset_preserves_fault(rig):
     assert rig.adapter.hold_failed
 
 
-@pytest.mark.parametrize('tilt', [-90, -30.01, -30, 0, 30, 30.01, 90, 180])
+@pytest.mark.parametrize('tilt', [-90, -42.01, -42, 0, 42, 42.01, 90, 180])
 @pytest.mark.parametrize('yaw', [0, 90, 180])
 def test_automatic_fault_uses_measured_up_axis(rig, tilt, yaw):
     start(rig)
+    handoff_policy(rig)
     pitch, heading = np.radians([tilt, yaw]) / 2
     quat = (np.cos(heading) * np.cos(pitch), -np.sin(heading) * np.sin(pitch),
             np.cos(heading) * np.sin(pitch), np.sin(heading) * np.cos(pitch))
@@ -367,7 +377,7 @@ def test_automatic_fault_uses_measured_up_axis(rig, tilt, yaw):
     assert rig.adapter.abort_reason == 'thrash_detected'
     assert rig.adapter.command is None
     assert not rig.adapter.startup.status()['control_ready']
-    if abs(tilt) <= 30:
+    if abs(tilt) <= 42:
         assert rig.adapter.automatic_soft_reset
         assert rig.transport.stop_calls == 0
         rig.adapter.soft_reset_policy.update.assert_called_once()
@@ -388,6 +398,7 @@ def test_automatic_fault_uses_measured_up_axis(rig, tilt, yaw):
 ])
 def test_automatic_recovery_requires_valid_fresh_telemetry(rig, bad):
     start(rig)
+    handoff_policy(rig)
     rig.adapter.feedback = replace(rig.adapter.feedback, **bad)
     rig.adapter.abort('thrash_detected')
     rig.adapter.stop_once()
@@ -397,6 +408,7 @@ def test_automatic_recovery_requires_valid_fresh_telemetry(rig, bad):
 
 def test_automatic_recovery_survives_fault_echoes_and_submission_exit(rig):
     start(rig)
+    handoff_policy(rig)
     rig.adapter.abort('thrash_detected')
     for _ in range(20):
         rig.now += 0.02
@@ -423,6 +435,7 @@ def test_automatic_recovery_survives_fault_echoes_and_submission_exit(rig):
 ])
 def test_failed_automatic_recovery_falls_back_to_damping(rig, failure):
     start(rig)
+    handoff_policy(rig)
     rig.adapter.abort('thrash_detected')
     rig.adapter.step()
     rig.transport.write_body.reset_mock()
@@ -455,6 +468,7 @@ def test_failed_automatic_recovery_falls_back_to_damping(rig, failure):
 ])
 def test_unavailable_output_or_explicit_stop_never_enters_recovery(rig, reason):
     start(rig)
+    handoff_policy(rig)
     rig.adapter.abort(reason)
     rig.adapter.stop_once()
     assert rig.transport.stop_calls == 1
@@ -472,16 +486,18 @@ def test_automatic_fault_before_ownership_does_not_start_recovery(rig):
 
 def test_missing_recovery_policy_falls_back_to_damping(rig):
     start(rig)
+    handoff_policy(rig)
     rig.adapter.soft_reset_policy = None
     rig.adapter.abort('thrash_detected')
     rig.adapter.stop_once()
     assert rig.transport.stop_calls == 1
 
 
-@pytest.mark.parametrize('fault', ['battery', 'battery_stale', 'temperature', 'torque'])
+@pytest.mark.parametrize('fault', ['battery', 'battery_stale', 'temperature', 'nonfinite_torque'])
 @pytest.mark.parametrize('recovering', [False, True])
 def test_health_faults_never_drive_recovery(rig, fault, recovering):
     start(rig)
+    handoff_policy(rig)
     if recovering:
         rig.adapter.abort('thrash_detected')
         rig.adapter.step()
@@ -494,7 +510,7 @@ def test_health_faults_never_drive_recovery(rig, fault, recovering):
     elif fault == 'temperature':
         rig.adapter.feedback = replace(rig.adapter.feedback, temperature=((150, 150),) * 29)
     else:
-        rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=(10000.,) * 29)
+        rig.adapter.feedback = replace(rig.adapter.feedback, tau_est=(float('nan'),) * 29)
     if not recovering:
         rig.adapter.abort('thrash_detected')
     rig.adapter.step()

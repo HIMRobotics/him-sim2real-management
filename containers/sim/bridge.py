@@ -41,6 +41,16 @@ PLANT_STARTUP_SECONDS = 30.0
 HOST_STALL_SECONDS = 0.1
 # Messages delayed by a stall can still trip a deadline after the loop resumes.
 HOST_STALL_REACH_SECONDS = 0.5
+CONTROL_DT = 0.02
+# Lockstep: one 20 ms plant step per policy reply, and every deadline (bridge,
+# checker, motor gate, plant) on the simulated clock, as in training. A host
+# stall pauses the run instead of tripping a deadline. Policy state is best
+# effort, so a reply missing for this long in wall time counts as lost and the
+# plant steps without it, as hardware would.
+LOCKSTEP_REPLY_SECONDS = 0.5
+# After a clean run the bridge stops the policy as hardware does when the
+# submission exits, then keeps simulating the adapter's Holosoma handoff.
+HANDOFF_SECONDS = float(os.environ.get("G1_SIM_HANDOFF_SECONDS") or "5")
 
 
 def error_report(error):
@@ -131,6 +141,13 @@ class PlantClient:
 
 
 class SimBridge(Node):
+    lockstep = False
+    awaiting = None
+    awaiting_since = None
+    tick_missed = False
+    missed_replies = 0
+    ended_at = None
+
     def __init__(self, plant, seconds, report_path, lowstate, checker=None):
         super().__init__("mujoco_sim")
         self.plant = plant
@@ -143,6 +160,10 @@ class SimBridge(Node):
         self.observation_map = {}
         self.auto_arm = bool(os.environ.get("G1_SIM_EXAMPLE"))
         self.created = time.monotonic()
+        self.lockstep = os.environ.get("G1_SIM_LOCKSTEP") == "1"
+        self.sim_clock = self.created
+        self.awaiting = None
+        self.awaiting_since = None
         self.run_started = None
         self.startup = float(os.environ.get("G1_SIM_STARTUP", "10"))
         self.exit_code = 2
@@ -182,10 +203,20 @@ class SimBridge(Node):
         self.circle = os.environ.get("G1_SIM_CIRCLE") == "1"
         if self.circle:
             self.accepted = True
-            self.run_started = time.monotonic()
+            self.run_started = self.now()
+
+    def now(self):
+        """Deadline clock: simulated time in lockstep, host monotonic time otherwise."""
+        return self.sim_clock if self.lockstep else time.monotonic()
 
     def clock(self):
-        return time.monotonic() - self.created
+        return self.now() - self.created
+
+    def replied(self):
+        """The policy answered the last state. Step now if that reply held up a tick."""
+        self.awaiting = None
+        if self.tick_missed:
+            self.on_control()
 
     def on_arm(self, _request, response):
         result = self.plant.call({"op": "arm"})
@@ -194,7 +225,7 @@ class SimBridge(Node):
         return response
 
     def on_precheck(self, message):
-        if self.finished:
+        if self.finished or self.ended_at is not None:
             return
         frame = {
             "session_id": message.session_id,
@@ -212,14 +243,16 @@ class SimBridge(Node):
         if result.get("ok"):
             self.accepted = True
             if self.run_started is None:
-                self.run_started = time.monotonic()
+                self.run_started = self.now()
+            if self.lockstep and self.awaiting == frame["observation_id"]:
+                self.replied()
         else:
             self.latch(result.get("reason") or "invalid_command")
 
     def on_observation(self, message):
         """Attach checker-issued command provenance to the extended sim state."""
         state = self.pending_states.pop(message.received_at_secs, None)
-        if state is None or self.finished or self.abort_reason:
+        if state is None or self.finished or self.abort_reason or self.ended_at is not None:
             return
         supervisor = self.checker.supervisor
         if supervisor.stop_reason:
@@ -249,9 +282,9 @@ class SimBridge(Node):
         """Apply only a fresh checked command accepted by the shared motor gate."""
         from robot_safety.ros_nodes import command_from_ros
 
-        if self.finished or self.abort_reason:
+        if self.finished or self.abort_reason or self.ended_at is not None:
             return
-        now = time.monotonic()
+        now = self.now()
         gate = self.motor_gate
         if gate.policy_session_id is None:
             session = self.checker.supervisor.policy_session_id
@@ -282,38 +315,62 @@ class SimBridge(Node):
             self.accepted = True
             if self.run_started is None:
                 self.run_started = now
+            received = self.checker.supervisor.observation_received_times_secs.get(
+                command.observation_id
+            )
+            if self.lockstep and self.awaiting is not None and received == self.awaiting:
+                self.replied()
         else:
             self.latch(result.get("reason") or "invalid_command")
 
     def on_abort(self, message):
-        if message.source != "mujoco_sim" and not self.finished:
+        if message.source != "mujoco_sim" and not self.finished and self.ended_at is None:
             self.latch(message.reason or "external_abort")
 
     def on_control(self):
         if self.finished:
             return
-        now = time.monotonic()
-        if self.last_tick is not None and now - self.last_tick >= HOST_STALL_SECONDS:
-            self.stalls.append((self.last_tick, now))
-        self.last_tick = now
-        if self.motor_gate is not None:
-            self.motor_gate.cycle(time.monotonic())
+        wall = time.monotonic()
+        if self.lockstep:
+            if self.awaiting is not None:
+                if self.abort_reason is None and wall - self.awaiting_since < LOCKSTEP_REPLY_SECONDS:
+                    self.tick_missed = True
+                    return
+                if self.abort_reason is None:
+                    self.missed_replies += 1
+                self.awaiting = None
+            self.tick_missed = False
+            self.sim_clock += CONTROL_DT
+        else:
+            if self.last_tick is not None and wall - self.last_tick >= HOST_STALL_SECONDS:
+                self.stalls.append((self.last_tick, wall))
+            self.last_tick = wall
+        if self.motor_gate is not None and self.ended_at is None:
+            self.motor_gate.cycle(self.now())
             if self.motor_gate.abort_reason:
                 self.latch(self.motor_gate.abort_reason)
         if self.run_started is None:
-            if time.monotonic() - self.created >= self.startup:
+            if wall - self.created >= self.startup:
                 self.finish()
                 return
-        elif time.monotonic() - self.run_started >= self.seconds:
-            self.finish()
-            return
+        elif self.ended_at is not None:
+            if self.now() - self.ended_at >= HANDOFF_SECONDS:
+                self.finish()
+                return
+        elif self.now() - self.run_started >= self.seconds:
+            if (self.circle or self.abort_reason or HANDOFF_SECONDS <= 0
+                    or not self.plant.call({"op": "end"}).get("handoff")):
+                self.finish()
+                return
+            self.ended_at = self.now()
+            self.awaiting = None
         request = {"op": "feedback", "time": self.clock()}
         if self.circle or self.accepted:
-            request.update(
-                op="circle" if self.circle else "step",
-                feedback=True,
-                clock_origin=self.created,
-            )
+            request.update(op="circle" if self.circle else "step", feedback=True)
+            if self.lockstep:
+                request["feedback_time"] = self.clock()
+            else:
+                request["clock_origin"] = self.created
             if self.checker:
                 request["thrash"] = self.checker.supervisor.thrash_detector.snapshot()
         state = self.plant.call(request)
@@ -323,16 +380,21 @@ class SimBridge(Node):
             self.latch(state.get("reason") or "plant_error")
             self.finish()
             return
-        self.publish_state(state)
+        if self.ended_at is None:
+            self.publish_state(state)
         if not self.circle:
             self.lowstate.publish(state)
+        if (self.lockstep and self.accepted and not self.circle and self.abort_reason is None
+                and self.ended_at is None):
+            self.awaiting = self.now() if self.checker else int(state["observation_id"])
+            self.awaiting_since = wall
 
     def publish_state(self, state):
-        state = dict(state, received_at_secs=time.monotonic(),
+        state = dict(state, received_at_secs=self.now(),
                      control_ready=bool(state.get("control_ready", False)))
         message = RobotFeedback()
         message.host_boot_id = self.checker.host_boot_id if self.checker else "mujoco-sim"
-        message.received_at_secs = time.monotonic() if self.checker else self.clock()
+        message.received_at_secs = self.now() if self.checker else self.clock()
         message.observation_id = 0 if self.checker else int(state["observation_id"])
         message.q = list(state["q"])
         message.dq = list(state["dq"])
@@ -351,6 +413,8 @@ class SimBridge(Node):
         self.policy_state_pub.publish(sim_message)
 
     def latch(self, reason, detail=None):
+        if self.abort_reason is not None and reason != self.abort_reason and not self.plant.failed:
+            self.plant.call({"op": "abort", "reason": reason, "detail": detail})
         if self.abort_reason is None:
             self.abort_reason = reason
             self.abort_at = time.monotonic()
@@ -386,8 +450,11 @@ class SimBridge(Node):
             report = error_report(error)
         self.finished = True
         report.update(
-            execution="docker_ros", policy=os.environ.get("G1_SIM_EXAMPLE") or None
+            execution="docker_ros", policy=os.environ.get("G1_SIM_EXAMPLE") or None,
+            clock="lockstep" if self.lockstep else "wall",
         )
+        if self.lockstep:
+            report["lockstep_missed_replies"] = self.missed_replies
         stall = self.host_stall()
         if stall is not None:
             report["host_stall"] = {"longest_gap_secs": round(stall, 3)}
@@ -464,6 +531,13 @@ def main():
         checker = SafetyCheckerNode() if shared_checker else None
         node = SimBridge(plant, float(armed.get("launch_seconds", 0.0)) + seconds,
                          report, lowstate, checker)
+        if checker and node.lockstep:
+            import types
+
+            import robot_safety.ros_nodes as ros_nodes
+
+            # The checker reads time.monotonic() for every deadline.
+            ros_nodes.time = types.SimpleNamespace(monotonic=node.now)
         executor = SingleThreadedExecutor()
         if checker:
             executor.add_node(checker)

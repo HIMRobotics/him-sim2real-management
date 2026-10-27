@@ -9,6 +9,8 @@ Samples here stay serialized in DDS until ``take_latest`` decodes one.
 import threading
 import time
 
+from .timing_profile import profiled, scope, timed_wait
+
 
 def _new_reader(topic, message_type, depth):
     from cyclonedds.qos import Policy, Qos
@@ -40,6 +42,7 @@ class LatestSdkReader:
         self.depth = depth
         self.reader = reader if reader is not None else _new_reader(topic, message_type, depth)
 
+    @profiled("sdk_latest.take_latest")
     def take_latest(self):
         """Decode the newest waiting sample, or return None."""
         invalid = _invalid_sample_type()
@@ -73,6 +76,8 @@ class LatestSdkPoller:
         self.period = period
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name="lowstate_poll", daemon=True)
+        self.diagnostics_enabled = False
+        self.diagnostics = {}
 
     def start(self):
         self.thread.start()
@@ -85,13 +90,36 @@ class LatestSdkPoller:
     def _run(self):
         next_tick = time.monotonic()
         while not self.stopped.is_set():
+            diagnostic = self.diagnostics_enabled
+            if diagnostic:
+                take_started = time.monotonic()
             try:
                 sample = self.reader.take_latest()
             except Exception as error:  # noqa: BLE001 - feedback timeout handles silence
                 print("{0} read failed: {1}".format(self.reader.topic, error), flush=True)
                 sample = None
+            if diagnostic:
+                take_finished = time.monotonic()
+                info = getattr(sample, "sample_info", None)
+                self.diagnostics = {
+                    "tick": getattr(sample, "tick", None),
+                    "source_timestamp_ns": getattr(info, "source_timestamp", None),
+                    "take_started_s": take_started,
+                    "take_finished_s": take_finished,
+                    "take_duration_s": take_finished - take_started,
+                    "has_sample": sample is not None,
+                }
             if sample is not None:
-                self.handler(sample)
-            delay, next_tick = poll_deadline(next_tick + self.period, time.monotonic(), self.period)
-            if self.stopped.wait(delay):
+                with scope(self, "feedback_handler"):
+                    self.handler(sample)
+                if diagnostic:
+                    finished = time.monotonic()
+                    self.diagnostics = dict(
+                        self.diagnostics,
+                        handler_finished_s=finished,
+                        handler_duration_s=finished - take_finished,
+                    )
+            deadline = next_tick + self.period
+            delay, next_tick = poll_deadline(deadline, time.monotonic(), self.period)
+            if timed_wait(self, self.stopped, delay, deadline, "feedback_timer"):
                 return

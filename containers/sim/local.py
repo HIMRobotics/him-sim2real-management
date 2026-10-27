@@ -20,6 +20,7 @@ from controllers import ExamplePolicy
 from plant import CONTROL_DT, POSES
 from prepare import prepare
 from runner import LAUNCH_SECONDS, Runner
+from scenarios import CASES, SafetyScenario
 
 
 def _prepare_output(output):
@@ -56,10 +57,14 @@ def _rollout(runner, seconds, command):
             break
 
 
-def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standing"):
+def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standing",
+        *, scenario=None, tilt_degrees=20):
     """Run real inference and physics with simulated control timestamps."""
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("seconds must be finite and positive")
+    if scenario and not safety_checks:
+        raise ValueError("safety scenarios require safety checks")
+    scenario = SafetyScenario(scenario, tilt_degrees) if scenario else None
     output = _prepare_output(output)
     project = prepare(name, output / "prepared", container=False)
     scene = scene or project / "environment/scene.xml"
@@ -78,6 +83,8 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
 
         def command(current, time, _step):
             nonlocal command_started
+            if scenario:
+                scenario.apply(current)
             state = current.feedback(time)
             if state["control_ready"] and command_started is None:
                 command_started = state["policy_handoff_at_secs"]
@@ -99,6 +106,7 @@ def run(name, output, seconds=10.0, safety_checks=True, scene=None, pose="standi
         runner,
         output,
         {
+            "scenario": scenario.report(runner) if scenario else None,
             "policy": name,
             "requested_seconds": seconds,
             "policy_calls": policy.sequence,
@@ -145,7 +153,8 @@ def circle(output, seconds=10.0, safety_checks=True, scene=None, pose="standing"
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("seconds must be finite and positive")
     output = _prepare_output(output)
-    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True)
+    runner = Runner(pose, scene=scene, safety_checks=safety_checks, record_trace=True,
+                    control_path="direct")
 
     def command(current, time, _step):
         current.circle(time)
@@ -165,7 +174,7 @@ def circle(output, seconds=10.0, safety_checks=True, scene=None, pose="standing"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--example", choices=("stairs", "walker", "balance"))
+    mode.add_argument("--example", choices=("walker", "balance", "holosoma"))
     mode.add_argument("--self-test", action="store_true")
     mode.add_argument("--circle", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
@@ -173,7 +182,11 @@ def main():
     parser.add_argument("--scene", type=Path)
     parser.add_argument("--pose", choices=POSES, default="standing")
     parser.add_argument("--no-safety-checks", action="store_true")
+    parser.add_argument("--scenario", choices=CASES)
+    parser.add_argument("--tilt-degrees", type=float, default=20)
     args = parser.parse_args()
+    if args.scenario and not args.example:
+        parser.error("--scenario requires --example")
     policy = args.example or ("circle" if args.circle else None)
     try:
         if args.self_test:
@@ -200,6 +213,7 @@ def main():
                 not args.no_safety_checks,
                 args.scene,
                 args.pose,
+                scenario=args.scenario, tilt_degrees=args.tilt_degrees,
             )
     except Exception as exc:  # noqa: BLE001
         report = {
@@ -215,6 +229,8 @@ def main():
         args.output.mkdir(parents=True, exist_ok=True)
         (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
+    if report.get("scenario"):
+        return 0 if report["scenario"]["passed"] else 1
     return {"within_limits": 0, "completed": 0, "violation": 1}.get(report["status"], 2)
 
 

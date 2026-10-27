@@ -36,7 +36,9 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --safety-checks     Enable safety checks (default).
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
---example NAME     Policy package: stairs, walker, balance, or holosoma.
+--scenario NAME    Local safety trial: recovery_tilt, policy_tilt, gantry_tilt, policy_crouch.
+--tilt-degrees DEG  Imposed pitch for --scenario (default 20).
+--example NAME     Policy package: walker, balance, or holosoma.
                    Builds image g1-sim-example-<name>:local.
                    The report policy field is that name. This is not a velocity file.
                    walker/thrash: belly-up walker, only thrash stops enabled.
@@ -62,6 +64,8 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 --push NAME        One battery case: none, small, medium, or heavy.
                    With --view, open the page and press Start to watch it.
 --view             Open the live viewer and press Start to run.
+--lockstep         ROS path: step the plant once per policy reply, with every
+                   deadline on the simulated clock. Host stalls pause the run.
                    Uses the first free port from G1_SIM_VIEW_PORT (8765).
                    Ctrl+C closes the viewer.
 HELP
@@ -124,7 +128,7 @@ start_live_view() {
   rm -f "$out_dir/view/start" "$out_dir/live.jsonl" "${viewer_report:-$out_dir/report.json}"
   local scene_args=()
   [[ -n "$scene" ]] && scene_args=(--scene "$scene")
-  as_owner "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose" "${scene_args[@]}"
+  as_owner "$python" "$repo_dir/containers/sim/view.py" --idle "$out_dir/view" --pose "$pose" ${scene_args[@]+"${scene_args[@]}"}
   rm -f "$out_dir/live-view.log"
   # Open the log as the user. A root shell would otherwise leave a file
   # the battery viewer cannot replace.
@@ -137,7 +141,7 @@ start_live_view() {
     --report "${viewer_report:-$out_dir/report.json}" \
     --port "$view_port" \
     --pose "$pose" \
-    "${scene_args[@]}" &
+    ${scene_args[@]+"${scene_args[@]}"} &
   live_pid=$!
   echo "Open http://127.0.0.1:$view_port"
   echo "Press Start to run the policy. The camera stays put so the path is visible."
@@ -194,6 +198,8 @@ safety_set=0
 example=""
 example_arg=""
 local_mode=0
+scenario=""
+tilt_degrees=20
 stopping=0
 # Keep this list in step with containers/sim/plant.py POSES.
 poses=(standing seated supine prone left_side right_side)
@@ -218,8 +224,11 @@ while [[ $# -gt 0 ]]; do
     --scene) scene="${2:?--scene needs an XML path}"; shift 2 ;;
     --safety-checks) safety_checks=1; safety_set=1; shift ;;
     --no-safety-checks) safety_checks=0; safety_set=1; shift ;;
+    --lockstep) export G1_SIM_LOCKSTEP=1; shift ;;
     --example) example_arg="${2:?--example needs a name}"; example="$example_arg"; shift 2 ;;
     --local) local_mode=1; shift ;;
+    --scenario) scenario="${2:?--scenario needs a name}"; shift 2 ;;
+    --tilt-degrees) tilt_degrees="${2:?--tilt-degrees needs an angle}"; shift 2 ;;
     --output) out_dir="${2:?--output needs a directory}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -233,6 +242,11 @@ if [[ -n "$example" ]]; then
   if [[ "$detector_mode" != default ]]; then
     export G1_SIM_THRASH_MODE="$detector_mode"
   fi
+fi
+
+if [[ -n "$scenario" && ( "$local_mode" != 1 || -z "$example" || "$safety_checks" != 1 || "$counterfactuals" == 1 || "$battery" == 1 ) ]]; then
+  echo "--scenario requires --local --example with safety checks and a single run." >&2
+  exit 2
 fi
 
 if [[ -n "$command_file" && -z "$example" ]]; then
@@ -267,7 +281,7 @@ if [[ "$battery" -eq 1 && "$circle" -eq 1 && "$pose" != "standing" ]]; then
   exit 2
 fi
 if [[ "$local_mode" -eq 1 && -z "$example" ]]; then
-  echo "--local requires --example stairs, walker, balance, or holosoma." >&2
+  echo "--local requires --example walker, balance, or holosoma." >&2
   exit 2
 fi
 mkdir -p "$out_dir"
@@ -322,6 +336,15 @@ if [[ -n "$scene" ]]; then
   scene="$(cd -- "$(dirname -- "$scene")" && pwd -P)/$(basename -- "$scene")"
 fi
 
+if [[ -n "${G1_JOINT_PROFILE:-}" && "$G1_JOINT_PROFILE" != /workspace/* ]]; then
+  if [[ ! -f "$G1_JOINT_PROFILE" || ! -r "$G1_JOINT_PROFILE" ]]; then
+    echo "G1_JOINT_PROFILE is not a readable file: $G1_JOINT_PROFILE" >&2
+    exit 2
+  fi
+  G1_JOINT_PROFILE="$(cd -- "$(dirname -- "$G1_JOINT_PROFILE")" && pwd -P)/$(basename -- "$G1_JOINT_PROFILE")"
+  export G1_JOINT_PROFILE
+fi
+
 # Signal handlers exit so cleanup cannot resume a stopped simulation.
 trap 'stop_view' EXIT
 trap 'exit 130' INT
@@ -357,6 +380,7 @@ fi
 
 if [[ "$local_mode" -eq 1 || ( "$backend" == compose && ( "$self_test" -eq 1 || "$circle" -eq 1 ) ) ]]; then
   local_args=(--seconds "$seconds")
+  [[ -z "$scenario" ]] || local_args+=(--scenario "$scenario" --tilt-degrees "$tilt_degrees")
   [[ -z "$example" ]] || local_args+=(--example "$example")
   [[ "$self_test" -eq 0 ]] || local_args+=(--self-test)
   [[ "$circle" -eq 0 ]] || local_args+=(--circle)
@@ -434,6 +458,14 @@ else
   fi
   status=0
   run_session || status=$?
+  retries="${G1_SIM_STALL_RETRIES:-1}"
+  while [[ "$view" -eq 0 && "$retries" -gt 0 ]] && declare -F stalled_run >/dev/null && stalled_run; do
+    retries=$((retries - 1))
+    echo "The stop came during a host stall, so the result is inconclusive. Rerunning." >&2
+    restart_runtime || echo "Rerunning without a Docker restart." >&2
+    status=0
+    run_session || status=$?
+  done
   stop_sim
   [[ "$view" -eq 0 ]] || keep_viewer
   exit "$status"

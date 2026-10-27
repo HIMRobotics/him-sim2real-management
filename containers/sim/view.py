@@ -31,12 +31,20 @@ PAGE = """<!DOCTYPE html>
     background: #1a1a1a; color: #fff; cursor: pointer;
   }
   #start:disabled { background: #888; cursor: default; }
-  #playback { position: absolute; bottom: 18px; right: 12px; z-index: 2;
-    display: flex; gap: 8px; }
+  :root { --bar: 60px; }
+  #playback { position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 2;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 8px;
+    border-radius: 8px; background: #fffffff5; border: 1px solid #d7dce0; }
   #playback button { padding: 9px 12px; border: 1px solid #ccd1d5; border-radius: 6px;
-    background: #fff; color: #263238; font: 14px system-ui, sans-serif; cursor: pointer; }
-  #playback button:disabled { opacity: 0.5; cursor: default; }
+    background: #fff; color: #263238; font: 14px system-ui, sans-serif; cursor: pointer;
+    white-space: nowrap; }
+  #playback button:disabled, #timeline:disabled { opacity: 0.5; cursor: default; }
+  #play-pause { min-width: 108px; }
+  #timeline { flex: 1 1 240px; cursor: pointer; accent-color: #263238; }
+  #time-label { font: 14px system-ui, sans-serif; color: #263238; white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
   #thrash { position: absolute; right: 12px; top: 12px; width: min(450px, 46vw);
+    max-height: calc(100vh - var(--bar) - 70px); overflow: auto;
     background: #fffffff0; border: 1px solid #d7dce0; border-radius: 10px;
     padding: 14px; font: 13px system-ui, sans-serif; color: #263238; }
   #thrash h2 { margin: 0 0 8px; font-size: 17px; }
@@ -51,9 +59,9 @@ PAGE = """<!DOCTYPE html>
   #thrash tr.flagged { background: #fff0da; }
   #stop, #warn { position: absolute; left: 12px; max-width: min(670px, 75vw);
     border-radius: 6px; padding: 12px 16px; font: 14px system-ui, sans-serif; white-space: pre-line; }
-  #stop { bottom: 18px; background: #fff4eeed; border-left: 5px solid #b54a22; color: #682811; }
-  #warn { bottom: 18px; background: #fff8e8; border-left: 5px solid #c48a12; color: #6a4b08; }
-  #warn.raised { bottom: 108px; }
+  #stop { bottom: calc(var(--bar) + 24px); background: #fff4eeed; border-left: 5px solid #b54a22; color: #682811; }
+  #warn { bottom: calc(var(--bar) + 24px); background: #fff8e8; border-left: 5px solid #c48a12; color: #6a4b08; }
+  #warn.raised { bottom: calc(var(--bar) + 114px); }
   #startup { margin-top: 10px; background: #eef5fdf0; border-left: 5px solid #1565c0;
     color: #0d3c73; border-radius: 6px; padding: 10px 16px;
     font: 600 15px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
@@ -67,6 +75,9 @@ PAGE = """<!DOCTYPE html>
 <div id="warn" role="status" hidden></div>
 <div id="stop" role="status" hidden></div>
 <div id="playback" aria-label="Replay controls">
+  <button id="play-pause" type="button" title="Play or pause (Space)" aria-keyshortcuts="Space">Pause · Space</button>
+  <input id="timeline" type="range" min="0" max="0" step="1" value="0" aria-label="Replay time"/>
+  <span id="time-label"></span>
   <button id="go-start" type="button" title="Jump to the first frame and pause (Home)" aria-keyshortcuts="Home">Go to start · Home</button>
   <button id="restart-replay" type="button" title="Replay from the beginning (R)" aria-keyshortcuts="R">Restart replay · R</button>
 </div>
@@ -81,7 +92,8 @@ PAGE = """<!DOCTYPE html>
   <small id="thrash-thresholds"></small>
   <small id="thrash-event"></small>
   <small>Whole-body score is the weighted RMS of joint oscillations. Weights express relative motion risk,
-  not measured inertia. Energy share shows each joint's contribution. Space pauses, arrows step frames.
+  not measured inertia. Energy share shows each joint's contribution. Space pauses, arrows step frames,
+  and dragging the timeline seeks.
   Home goes to the first frame. R restarts playback without rerunning the simulation.</small>
 </aside>
 <script type="importmap">
@@ -219,11 +231,17 @@ for (const geom of motion.geoms) {
 
 const goStartButton = document.getElementById("go-start");
 const restartButton = document.getElementById("restart-replay");
+const playButton = document.getElementById("play-pause");
+const timeline = document.getElementById("timeline");
+const timeLabel = document.getElementById("time-label");
 let frame = 0;
 let mode = motion.live ? "idle" : "replay";
 let paused = false;
+let scrubbing = false;
 function show(index) {
-  goStartButton.disabled = restartButton.disabled = mode === "idle" || motion.frames < 2;
+  const inactive = mode === "idle" || motion.frames < 2;
+  goStartButton.disabled = restartButton.disabled = playButton.disabled = timeline.disabled = inactive;
+  playButton.textContent = paused ? "Play · Space" : "Pause · Space";
   if (!motion.frames) return;
   frame = (index + motion.frames) % motion.frames;
   const focus = motion.focus[frame];
@@ -241,6 +259,9 @@ function show(index) {
   const playback = mode === "idle" ? "ready" : paused ? "paused" : mode === "live" ? "live" : "playing";
   hud.textContent = `${motion.summary}\n${playback}  ${motion.time[frame].toFixed(2)} s  frame ${frame + 1} / ${motion.frames}`;
   hud.style.whiteSpace = "pre-line";
+  timeline.max = motion.frames - 1;
+  if (!scrubbing) timeline.value = frame;
+  timeLabel.textContent = `${motion.time[frame].toFixed(2)} / ${motion.time[motion.frames - 1].toFixed(2)} s`;
   showThrash(frame);
   showStop(frame);
   showWarning(frame);
@@ -364,15 +385,34 @@ function goToStart(play = false) {
   last = performance.now();
   show(0);
 }
+function togglePause() {
+  if (mode === "idle" || motion.frames < 2) return;
+  paused = !paused;
+  last = performance.now();
+  show(frame);
+}
 goStartButton.addEventListener("click", () => goToStart());
 restartButton.addEventListener("click", () => goToStart(true));
+playButton.addEventListener("click", togglePause);
+// Playback holds still while the slider is dragged, then resumes from there.
+timeline.addEventListener("input", () => { scrubbing = true; show(Number(timeline.value)); });
+timeline.addEventListener("change", () => { scrubbing = false; last = performance.now(); });
+const playbackBar = document.getElementById("playback");
+// Return keyboard focus to the page so Space and the arrows keep working.
+playbackBar.addEventListener("pointerup", () => {
+  setTimeout(() => document.activeElement?.blur(), 0);
+});
+// The bar wraps on narrow windows; panels above it follow its height.
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--bar", `${playbackBar.offsetHeight}px`);
+}).observe(playbackBar);
 window.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.metaKey || event.altKey || event.target?.isContentEditable
       || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName || "")) return;
   if (event.code === "Home" || event.code === "KeyR") {
     event.preventDefault();
     if (!event.repeat) goToStart(event.code === "KeyR");
-  } else if (event.code === "Space") { paused = !paused; event.preventDefault(); }
+  } else if (event.code === "Space") { togglePause(); event.preventDefault(); }
   else if (event.code === "ArrowLeft") { paused = true; show(frame - 1); event.preventDefault(); }
   else if (event.code === "ArrowRight") { paused = true; show(frame + 1); event.preventDefault(); }
 });
@@ -385,13 +425,23 @@ show(0);
 let last = performance.now();
 function tick(now) {
   requestAnimationFrame(tick);
-  if (!paused && motion.frames > 1 && mode !== "idle") {
-    const caughtUp = mode === "live" && frame >= motion.frames - 1;
-    const next = caughtUp ? frame : (frame + 1) % motion.frames;
-    const delay = next !== frame && motion.time[next] !== undefined
-      ? Math.max(0, 1000 * (motion.time[next] - motion.time[frame]))
-      : 20;
-    if (!caughtUp && now - last >= delay) { last = now; show(next); }
+  if (!paused && !scrubbing && motion.frames > 1 && mode !== "idle") {
+    // Frames are 20 ms apart and the display refreshes every 8 or 17 ms, so
+    // several frames can fall due at once. Carrying the remainder keeps
+    // playback in real time. After a stall, skip ahead rather than race.
+    last = Math.max(last, now - 100);
+    let next = frame;
+    while (true) {
+      if (mode === "live" && next >= motion.frames - 1) { last = now; break; }
+      const after = (next + 1) % motion.frames;
+      const gap = 1000 * (motion.time[after] - motion.time[next]);
+      const delay = after === 0 ? 0 : Number.isFinite(gap) ? Math.max(0, gap) : 20;
+      if (now - last < delay) break;
+      last += delay;
+      next = after;
+      if (next === 0) break;
+    }
+    if (next !== frame) show(next);
   }
   controls.update();
   renderer.render(scene, camera);
@@ -557,6 +607,11 @@ def stop_from_report(report):
 
 def describe_startup(startup):
     """Banner text for startup balance and the hand-off to the policy."""
+    if startup and startup["phase"] in ("recovery", "damping"):
+        ended = startup.get("run_ended_at_secs")
+        if ended is not None and startup["phase"] == "recovery":
+            return f"Run ended at {ended:.1f} s: Holosoma balance in control"
+        return "Holosoma recovery active" if startup["phase"] == "recovery" else "Hardware safety: damping"
     if not startup or startup["phase"] == "fault":
         return ""
     elapsed, handoff = startup["elapsed_secs"], startup["handoff_at_secs"]
@@ -681,12 +736,6 @@ def report_summary(report, safety_checks=True):
     motion = report.get("motion", {})
     if "fell" in motion:
         summary += "\nFall recorded: " + ("yes" if motion["fell"] else "no")
-    if "stairs" in motion:
-        stairs = motion["stairs"]
-        summary += (
-            f" | Stair treads: {stairs['distinct_treads']}/3"
-            f" | Finish upright: {stairs['finished_upright']}"
-        )
     return summary
 
 

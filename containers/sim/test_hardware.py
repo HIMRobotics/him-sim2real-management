@@ -1,0 +1,163 @@
+"""Exercise real adapter transitions through the normal simulation runner."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT), str(ROOT / "containers/sim"), str(ROOT / "robot_safety"),
+               str(ROOT / "packages/policy_safety/src")]
+
+from local import run
+from runner import Runner
+from scenarios import SafetyScenario
+from test_runner import hold
+
+
+def test_measured_overload_allows_recovery_output_in_sim(tmp_path, monkeypatch):
+    from hardware import SimHardware
+
+    receive = SimHardware.receive
+    injected_at = []
+    overload_writes = []
+
+    def overloaded_receive(hardware, launch=False):
+        adapter = hardware.adapter
+        handoff = adapter.startup.handoff
+        now = adapter.clock()
+        if handoff is not None and now >= handoff + 1.5 and not injected_at:
+            injected_at.append(now)
+        if injected_at and now - injected_at[0] < 0.2:
+            # Inject telemetry only. Keep the MuJoCo dynamics unchanged.
+            actuator = hardware.plant.actuators[4]
+            original = hardware.plant.data.actuator_force[actuator]
+            hardware.plant.data.actuator_force[actuator] = adapter.profile.legs[4].max_torque_nm + 1
+            try:
+                receive(hardware, launch)
+                overload_writes.append(hardware.recovery_writes)
+            finally:
+                hardware.plant.data.actuator_force[actuator] = original
+        else:
+            receive(hardware, launch)
+
+    monkeypatch.setattr(SimHardware, 'receive', overloaded_receive)
+    report = run('holosoma', tmp_path, seconds=3)
+    assert injected_at
+    assert max(overload_writes) > 0
+    assert 'joint_torque_limit' in report['reason']
+    assert report['hardware_safety']['phase'] == 'recovery'
+    assert report['hardware_safety']['damping_at_secs'] is None
+
+
+@pytest.mark.parametrize("case,tilt,phase", [
+    ("recovery_tilt", 20, "recovery"),
+    ("policy_tilt", 45, "damping"),
+    ("gantry_tilt", 45, "damping"),
+    ("policy_crouch", 0, "damping"),
+])
+def test_real_policy_safety_scenarios(tmp_path, case, tilt, phase):
+    report = run("holosoma", tmp_path, seconds=8, scenario=case, tilt_degrees=tilt)
+    assert report["scenario"]["passed"], report
+    safety = report["hardware_safety"]
+    assert safety["phase"] == phase
+    assert report["checks"]["hardware_adapter"]
+    assert not report["hardware_authorization"]
+    if phase == "damping":
+        assert safety["recovery_writes"] == 0
+        assert safety["damping_at_secs"] == pytest.approx(report["scenario"]["event"]["time_secs"])
+    with np.load(report["trace"], allow_pickle=False) as trace:
+        phases = json.loads(str(trace["startup"]))
+        assert phases[-1]["phase"] == phase
+        assert len(phases) == len(trace["qpos"])
+
+
+def test_recovery_can_be_overridden_and_cannot_resume_submission(tmp_path, monkeypatch):
+    import local
+
+    captured = []
+    original = local._finish
+
+    def finish(runner, output, extra):
+        captured.append(runner)
+        return original(runner, output, extra)
+
+    monkeypatch.setattr(local, "_finish", finish)
+    run("holosoma", tmp_path, seconds=3, scenario="recovery_tilt")
+    runner = captured[0]
+    assert runner.hardware.snapshot()["phase"] == "recovery"
+    original_reason = runner.reason
+    writes = runner.hardware.transport.body_writes
+    state = runner.feedback(runner.sim_time)
+    assert runner.command(hold(runner, state, runner.last_sequence + 1), runner.sim_time) == original_reason
+    runner.handle({"op": "abort", "reason": "policy_container_exit"})
+    runner.step(runner.sim_time)
+    assert runner.hardware.transport.body_writes > writes
+    assert runner.hardware.snapshot()["phase"] == "recovery"
+    # Fresh posture feedback must stop an already latched recovery immediately.
+    SafetyScenario("policy_tilt", 45).apply(runner)
+    assert runner.hardware.snapshot()["phase"] == "damping"
+    writes = runner.hardware.transport.body_writes
+    runner.step(runner.sim_time)
+    assert runner.hardware.transport.body_writes == writes
+    assert runner.reason == original_reason
+
+
+def test_clean_end_hands_over_to_holosoma_like_a_container_exit(tmp_path, monkeypatch):
+    import local
+
+    captured = []
+    original = local._finish
+
+    def finish(runner, output, extra):
+        captured.append(runner)
+        return original(runner, output, extra)
+
+    monkeypatch.setattr(local, "_finish", finish)
+    run("holosoma", tmp_path, seconds=3)
+    runner = captured[0]
+    assert runner.reason is None
+    assert runner.handle({"op": "end"}) == {"ok": True, "handoff": True}
+    assert runner.handle({"op": "end"})["handoff"] is False
+    writes = runner.hardware.transport.body_writes
+    state = runner.feedback(runner.sim_time)
+    assert runner.command(hold(runner, state, runner.last_sequence + 1), runner.sim_time) == "run_ended"
+    for _ in range(100):
+        runner.step(runner.sim_time + 0.02)
+    assert runner.reason is None
+    assert runner.hardware.transport.body_writes > writes
+    report = runner.report()
+    assert report["status"] == "within_limits"
+    assert report["handoff"]["controller"] == "holosoma"
+    assert report["handoff"]["reason"] == "policy_container_exit"
+    assert report["handoff"]["upright"] > 0.9
+
+
+def test_missing_recovery_weights_prevent_output(monkeypatch):
+    monkeypatch.setenv("HIM_HOLOSOMA_ONNX", "/missing/recovery.onnx")
+    runner = Runner()
+    state = runner.feedback(0)
+    runner.command(hold(runner, state, 0), 0)
+    runner.step(0)
+    assert runner.reason == "hardware_arm_rejected"
+    assert runner.hardware.adapter.arm_rejection_reason == "soft_reset_model_unavailable"
+    assert runner.hardware.transport.body_writes == 0
+    assert runner.hardware.snapshot()["phase"] == "damping"
+    assert not runner.handle({"op": "arm"})["ok"]
+
+
+def test_adapter_diagnostics_do_not_corrupt_plant_protocol():
+    env = dict(os.environ, G1_STARTUP_POLICY="invalid-test-value",
+               PYTHONPATH=os.pathsep.join(sys.path))
+    result = subprocess.run([sys.executable, str(ROOT / "containers/sim/plant_server.py")],
+                            input='{"op":"arm"}\n{"op":"report"}\n',
+                            text=True, capture_output=True, env=env, check=True)
+    responses = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(responses) == 2
+    assert responses[0]["ok"]
+    assert responses[1]["checks"]["hardware_adapter"]
+    assert "Unknown G1_STARTUP_POLICY" in result.stderr

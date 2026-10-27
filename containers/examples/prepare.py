@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import yaml
@@ -17,12 +16,7 @@ sys.path.insert(0, str(ROOT))
 from robot_safety.balance_policy import LEG_KD, LEG_KP
 from robot_safety.hardware_constants import G1_29_JOINT_NAMES
 
-# Every example starts in GR00T startup balance. This is the crouch it settles
-# into on flat ground on this model, mirrored left to right. Started from the
-# policies' own defaults, the knees sag 3 cm and the robot sways back a step
-# and turns.
-STANCE_LEFT_LEG = [-0.412, 0.044, 0.015, 0.741, -0.325, -0.007]
-STANCE = STANCE_LEFT_LEG + [-0.412, -0.044, -0.015, 0.741, -0.325, 0.007] + [0.0] * 17
+EXAMPLES = ("walker", "balance", "holosoma")
 
 # Simulation presets reuse the existing controller and model bundle.
 SCENARIOS = {
@@ -35,7 +29,7 @@ def run_settings(name):
     """Resolve an example into controller, pose, checks and detector mode."""
     if name in SCENARIOS:
         return SCENARIOS[name]
-    if name in ("stairs", "walker", "balance", "holosoma"):
+    if name in EXAMPLES:
         return name, "standing", 1, "default"
     raise ValueError("unknown example: " + name)
 
@@ -50,7 +44,7 @@ def copy_file(source, target):
 
 def prepare(name, destination=None, *, container=True):
     """Copy only the files needed by this example, without running Docker."""
-    if name not in ("stairs", "walker", "balance", "holosoma"):
+    if name not in EXAMPLES:
         raise ValueError("unknown example")
     root = Path(destination or ROOT / ".cache/sim_examples" / name).resolve()
     project = root / "container/project"
@@ -74,11 +68,8 @@ def prepare(name, destination=None, *, container=True):
         copy_file(model, project / "balance.onnx")
         gains = list(zip(list(LEG_KP) + [40.] * 14, list(LEG_KD) + [1.] * 14))
     else:
-        bundle = ROOT / "containers/examples/policies" / ("stairs" if name == "stairs" else "walker")
-        model_names = (
-            ("walker.onnx", "walker.onnx.data") if name == "stairs"
-            else ("walker.onnx", "balance.onnx", "LICENSE", "provenance.json")
-        )
+        bundle = ROOT / "containers/examples/policies/walker"
+        model_names = ("walker.onnx", "balance.onnx", "LICENSE", "provenance.json")
         missing = [
             filename
             for filename in (*model_names, "walker.yaml")
@@ -89,9 +80,7 @@ def prepare(name, destination=None, *, container=True):
                 f"Policy bundle missing in {bundle}: "
                 + ", ".join(missing)
             )
-        for filename in ("walker.onnx.data", "balance.onnx"):
-            if filename not in model_names:
-                (project / filename).unlink(missing_ok=True)
+        (project / "walker.onnx.data").unlink(missing_ok=True)
         for filename in model_names:
             copy_file(bundle / filename, project / filename)
         copy_file(bundle / "walker.yaml", project / "policy.yaml")
@@ -117,21 +106,8 @@ def prepare(name, destination=None, *, container=True):
         copy_function=copy_file,
     )
     copy_file(robot / "THIRD_PARTY_NOTICES.md", env / "THIRD_PARTY_NOTICES.md")
-    tree = ET.parse(robot / "g1_robot.xml")
-    key = tree.find("keyframe/key[@name='stand']")
-    # Start above the support. The plant lowers the robot until the feet touch.
-    # The stair phases are scripted from the policy's own default pose.
-    if name == "stairs":
-        start, pose = [0.002739233746429086, -0.004604265724722594, 0.85, 1, 0, 0, 0], defaults
-    else:
-        start, pose = [0, 0, 0.85, 1, 0, 0, 0], STANCE
-    key.set("qpos", " ".join(map(str, start + pose)))
-    key.set("ctrl", " ".join(map(str, pose)))
-    tree.write(env / "g1_robot.xml")
-    if name == "stairs":
-        copy_file(ROOT / "containers/examples/stairs.xml", env / "scene.xml")
-    else:
-        (env / "scene.xml").write_text("""<mujoco model="example_flat">
+    copy_file(robot / "g1_robot.xml", env / "g1_robot.xml")
+    (env / "scene.xml").write_text("""<mujoco model="example_flat">
   <include file="g1_robot.xml"/>
   <option gravity="0 0 -9.81" timestep="0.002"/>
   <worldbody><geom name="safety_floor" type="plane" size="0 0 0.05" friction="1.15"/></worldbody>
@@ -141,7 +117,8 @@ def prepare(name, destination=None, *, container=True):
     context = root / "container"
     for filename in ("controllers.py", "client.py", "trial.py", "command.py", "Dockerfile", "entrypoint.sh"):
         copy_file(ROOT / "containers/examples" / filename, context / filename)
-    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py", "holosoma_policy.py"):
+    for filename in ("__init__.py", "balance_policy.py", "hardware_constants.py",
+                     "holosoma_policy.py", "timing_profile.py"):
         copy_file(ROOT / "robot_safety" / filename, context / "robot_safety" / filename)
     for filename in ("__init__.py", "adapter.py", "config.py"):
         copy_file(
@@ -158,7 +135,7 @@ def prepare(name, destination=None, *, container=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("example", choices=("stairs", "walker", "balance", "holosoma", *SCENARIOS))
+    parser.add_argument("example", choices=(*EXAMPLES, *SCENARIOS))
     parser.add_argument("--assets-only", action="store_true")
     parser.add_argument("--settings", action="store_true", help="Print simulation preset settings.")
     args = parser.parse_args()

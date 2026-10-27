@@ -116,6 +116,41 @@ turn detection off with `--no-safety-checks`. For custom simulation setups,
 scenarios select their own mode. Hardware uses the `thrash.mode` checker ROS
 parameter. There is no detector-specific launcher flag.
 
+`G1_SIM_LIMIT_MODE=clip` runs checked submissions through the hardware adapter
+with `limit_mode=clip`, the same mode the robot gets from `G1_LIMIT_MODE=clip`
+(see `robot_safety/README.md`). Targets are still projected into the 90% torque
+budget. Measured torque or PD demand above the profile ceiling and base gyro
+speed above 6 rad/s become warnings (`base_gyro_x/y/z` in the report) instead of
+stops. Everything else the adapter checks still stops and hands over to
+recovery: command, timing and joint-speed limits, tilt and standing posture,
+arming. The default `stop` enforces both limits.
+
+On Docker Compose, a single run without `--view` whose stop the bridge flags as
+inconclusive (`host_stall` in the report) restarts Docker Desktop and reruns.
+`G1_SIM_STALL_RETRIES` sets the number of reruns (default 1, 0 disables).
+
+`--lockstep` (`G1_SIM_LOCKSTEP=1`) runs the ROS path like training: after each
+step the bridge waits for the policy's command to that state before the next
+20 ms step, and the bridge, checker, motor gate and plant all read the
+simulated clock. Playback stays at or below real time, a host stall pauses the
+run instead of tripping a deadline or dropping commands, and the report says
+`"clock": "lockstep"`. Policy state is best effort, so a reply missing for
+0.5 s of wall time counts as lost: the plant steps without it and the report
+counts it in `lockstep_missed_replies`, and the usual deadlines decide on the
+simulated clock. Lockstep hides a policy that is too slow for 50 Hz, so use
+the default wall clock to check timing. A policy that exits when its state
+pauses must allow longer than a host stall.
+
+A checked ROS run that reaches `--seconds` without a stop ends the way a robot
+run does when the submission container exits: the bridge stops forwarding the
+policy, the hardware adapter receives `policy_container_exit` and selects the
+automatic Holosoma zero-velocity balance if the robot is standing, and the sim
+keeps running that for `G1_SIM_HANDOFF_SECONDS` (default 5, 0 ends immediately).
+The status is unchanged; the report's `handoff` field records the time, the
+controller in charge at the end (`holosoma` or `damping`), and the final
+standing height and uprightness. Runs without checks have no adapter and end
+at `--seconds`.
+
 Reports include `thrash.mode`, the first `thrash.event`, current metrics, and
 separate `checks.thrash_monitoring` / `checks.thrash_enforcement` flags. The
 finished-run viewer shows the mode and any detection. Other checks passing
@@ -226,7 +261,7 @@ The policy package, the container, and the velocity file are three different cho
 
 | Choice | How to specify it | What runs | `policy` in the report |
 | --- | --- | --- | --- |
-| Policy package | `--example stairs`, `walker`, or `balance` | `containers/examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `stairs`, `walker`, or `balance` |
+| Policy package | `--example walker`, `balance`, or `holosoma` | `containers/examples/policies/<name>` and the client in `containers/examples`. The image is `g1-sim-example-<name>:local`. | `walker`, `balance`, or `holosoma` |
 | Container | `--image NAME`, or the one archive in `containers/upload` | That image's entrypoint. [The template](template/README.md) builds one. See [build and export](examples/README.md#build-and-export-the-shared-image) for the shared walker image. `G1_TASK_COMMAND` sets the shared client's task velocity. | `null` unless an example was selected |
 | Velocity file on the plant | `--command containers/examples/commands/walker/FILE.yaml` | No policy container. The network stays the cached walker in `containers/examples/policies/walker`. `G1_SIM_WALKER` can point at another copy of those weights. | The file name without `.yaml`, such as `forward_stop` |
 | Same file in the walker container | `--example walker --command containers/examples/commands/walker/FILE.yaml` | The `g1-sim-example-walker:local` container reads that file and publishes joint commands. `--local` uses the same file without Docker. | `walker` |
@@ -240,7 +275,7 @@ Other flags:
 | --- | --- |
 | `--seconds 10` | Length of the run after the five-second startup period. |
 | `--image name` | Use this image instead of the archive in `containers/upload`. |
-| `--example stairs\|walker\|balance` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
+| `--example walker\|balance\|holosoma` | Prepare that policy package, its scene, and its Docker image. Mutually exclusive with `--image` and `--self-test`. |
 | `--local` | Run an `--example` directly against MuJoCo without Docker, ROS, or sudo. |
 | `--output DIR` | Save a run separately so safety-on/off results can both be replayed. |
 | `--scene path/to/scene.xml` | Load a complete MuJoCo G1 scene from the host filesystem. Relative paths use the caller's working directory. |
@@ -346,6 +381,11 @@ Create `containers/upload/environment/scene.xml`:
 ```
 
 Then run `./sim.sh --self-test --scene containers/upload/environment/scene.xml`, or drop `--self-test` to run the submitted image.
+
+The G1's collision geoms have `priority="1"`, so contacts use the robot's
+friction (1.0) and a floor `friction` alone has no effect. Give the floor
+`priority="2"` to set ground friction. `robots/g1/scene_carpet.xml` (next to
+`g1_robot.xml`) is the bundled floor with carpet-like sliding friction 1.2.
 
 The scene can change terrain, friction, gravity, obstacles, and passive objects. It must retain the G1's 29 named hinge joints and matching affine position actuators, `pelvis`, `floating_base_joint`, the two named pelvis IMU sensors, and a `stand` keyframe. Additional passive joints/free bodies are supported. If adding joints changes the model's position layout, update the `stand` keyframe accordingly. Additional actuators and different robots are not supported by the current command interface.
 

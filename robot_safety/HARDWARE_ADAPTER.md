@@ -33,6 +33,11 @@ qualification. Stillness does not establish weight-bearing under a gantry.
 Hardware continues Balance while waiting for a new left + B press after
 `handoff_ready: true`. Early/held presses cannot queue a launch. Instability
 revokes readiness. Failure to establish stability within 30 seconds faults.
+GR00T startup balance controls the lower body and eases the arms from their
+measured pose to the sim stand keyframe (all arm joints at zero: elbows bent
+90 degrees, forearms forward), peaking at 0.5 rad/s. Readiness waits for the
+arms to arrive. Arm targets transition to the submitted policy only after
+the operator authorizes handoff.
 Once stable, Balance continues while waiting for authorization without an
 operator-wait timeout. Losing stability starts a new 30-second recovery deadline.
 Health, command and telemetry deadlines remain active throughout. Targets,
@@ -57,26 +62,55 @@ runs the existing recovery Balance path. Recovery continues until a hard stop,
 a real fault, or service shutdown, with no scheduled transition to damping.
 Double Start retains priority and requests damping.
 
-After whole-body ownership, an automatic fault selects zero-velocity Holosoma
-soft reset when the measured body-up axis dotted with world-up is at least
-`cos(30 degrees)`. This uses the normalized IMU quaternion from feedback less
-than 200 ms old. Missing, invalid or stale telemetry does not qualify. The
-30-degree recovery threshold is separate from the startup readiness threshold.
+After policy handoff, an automatic fault selects zero-velocity Holosoma
+soft reset only when the measured body-up axis dotted with world-up is at least
+`cos(42 degrees)` and estimated pelvis height is at least **0.4884 m**.
+`hardware_constants.py` defines the **0.74 m** nominal GR00T base height and
+the **0.66** minimum fraction. Both orientation and joint telemetry must be
+finite and less than 200 ms old. Missing, invalid or stale telemetry selects damping.
+The 42-degree standing threshold is separate from the tighter startup readiness threshold.
 The original fault stays latched and submitted commands remain inhibited.
 `/safety/hardware_status` reports `automatic_soft_reset` while this path is active.
+
+`standing.py` computes vertical pelvis-to-sole distances using both measured
+six-joint leg chains and the normalized pelvis IMU quaternion. Geometry matches
+the bundled G1 model, including the sole contact shapes. The lowest sole defines
+the level-ground height estimate so a raised swing foot does not lower it.
+On the gantry, planting the feet is the operator's responsibility. Software
+does not add a contact or weight-bearing gate. The 66% cutoff is provisional,
+not a physically qualified recovery limit.
+
+Before handoff, startup balance faults damp after ownership rather than entering
+automatic recovery. During startup balance and submitted policy operation,
+fresh feedback failing either standing check immediately clears body commands
+and requests damping, without a persistence timer. Both checks also run before
+and after startup inference. Explicit double F3 can still request recovery before
+handoff, but must pass the same standing checks before releasing stock control.
 
 Double Start and service shutdown still damp. Failed writes, uncertain motion
 release, output-worker stalls and invalid hardware state also retain damping
 because recovery requires a working output path. Recovery needs a loaded policy
 and never takes ownership solely because a fault occurred before arming/release.
-Automatic recovery rechecks orientation each cycle and damps if tilt exceeds
-30 degrees, telemetry expires, or recovery inference/output fails.
+Automatic and double-F3 recovery recheck height and orientation on feedback,
+before inference and before motor output. Recovery damps if height drops below
+0.4884 m, tilt exceeds 42 degrees, telemetry expires, or inference/output fails.
 
 The recovery writer updates its output heartbeat so the stopped submission's
 old timestamp cannot trigger a false stall. Repeated notifications of the
 latched fault and the policy client's normal exit cannot convert recovery into
 damping. A new fault during recovery still overrides it. The recovery helper
-retains its trained gains, but its targets are clipped to the physical joint and torque envelope. Battery freshness, charge, motor temperatures and measured torque are checked before inference and again before motor output. A health failure enters damping.
+retains its trained gains, but its targets are clipped to the physical joint and
+torque envelope. The shared health check includes standing height, tilt, telemetry
+freshness, battery charge and motor temperatures. It runs on feedback, before
+inference and before motor output. A failure of those checks enters damping.
+
+A finite measured torque overload stops the submitted policy and selects recovery
+when the health and standing checks permit it. Recovery records measured overloads
+as `measured recovery torque` diagnostics instead of rejecting its first command
+or damping solely because the overload persists. There is no torque-only grace
+timer. Nonfinite torque feedback still fails the health check. Recovery command
+targets retain the 90% predicted torque budget and the hard command checks.
+Gantry startup overloads continue to damp without automatic recovery.
 
 ### Initial takeover and readiness
 
@@ -137,8 +171,10 @@ command budget. The hard profile limits are unchanged.
 The limiter applies to startup Balance, handoff and submitted whole-body output.
 Checked simulation applies the same projection. `torque_target_clipping` in
 joint diagnostics records requested effort, the target correction and its count.
-Normal proposals inside the budget are unchanged. Measured torque and effort
-recomputed from the last written command still fault at the original ceiling.
+Normal proposals inside the budget are unchanged. During startup and submitted
+policy control, measured torque and effort recomputed from the last written
+command still fault at the original ceiling. That fault stops the submission,
+with recovery eligibility evaluated separately through the health pipeline.
 Nonfinite inputs, excessive feedforward torque and infeasible combinations of
 position and torque constraints still fault on hardware.
 
@@ -349,8 +385,9 @@ Double Start latches stop and repeatedly requests whole-body damping. See
 A readiness or arming rejection before control is granted latches a software
 abort without sending damping or arm-release commands. The robot remains under
 its stock controller. Restart the test graph after correcting the issue.
-After whole-body ownership, automatic faults select upright recovery or damping
-as described above. Arm-only faults retain the existing hold/damping behavior.
+After whole-body ownership, startup faults damp. After policy handoff, automatic
+faults select standing recovery or damping as described above. Arm-only faults
+retain the existing hold/damping behavior.
 Explicit double Start requests damping even during the readiness check.
 
 The producer first calls `/safety/motor_gate/ready`. This read-only SDK mode query
@@ -481,12 +518,6 @@ Local walker, scheduled walker, direct walker and Balance simulations completed
 stability. The 12-second first-steps command simulation also completed without
 faults or a fall. Reports/traces are in `.cache/startup-validation/`.
 These results do not qualify physical takeover or stopping.
-
-Known regression: the legacy stairs example reaches the three treads but falls
-later in its 20-second unchecked rollout with startup Balance. Its existing
-course-completion test remains failing. Do not use the walker validation as
-qualification for that policy. The universal gate remains enforced for stairs
-and uploaded policies, whose behavior requires separate requalification.
 
 The host Python 3.8 Balance inference warmup passed with the bundled model,
 whose SHA256 matches `containers/examples/policies/walker/provenance.json`. The running

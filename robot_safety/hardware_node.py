@@ -20,6 +20,7 @@ from .hardware_profile import (
 from .motor_gate import MotorCommandGate
 from .ros_nodes import MotorGateNode
 from .unitree_transport import UnitreeArmTransport
+from .timing_profile import profiled
 
 
 def _as_bool(value):
@@ -34,12 +35,14 @@ class HardwareMotorGateNode(MotorGateNode):
     def __init__(self):
         self.adapter = None
         self.session_open = False
+        self._forwarded_gate_fault = None
         super().__init__()
         enabled = self.declare_parameter("enable_hardware_output", False).value
         dry_run = self.declare_parameter("dry_run", False).value
         whole_body = self.declare_parameter("whole_body_output", False).value
         launch_gate = self.declare_parameter("launch_gate", False).value
         stance_blend_secs = self.declare_parameter("stance_blend_secs", 5.0).value
+        limit_mode = self.declare_parameter("limit_mode", "stop").value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
@@ -67,7 +70,7 @@ class HardwareMotorGateNode(MotorGateNode):
         self.adapter = G1HardwareAdapter(
             profile, whole_body=whole_body,
             launch_gate=_as_bool(launch_gate),
-            stance_blend_secs=float(stance_blend_secs),
+            stance_blend_secs=float(stance_blend_secs), limit_mode=limit_mode,
         )
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state, self.adapter.receive_battery,
@@ -75,9 +78,15 @@ class HardwareMotorGateNode(MotorGateNode):
         )
         self.output_enabled = enabled
         self.adapter.start_workers()
+        self.timing_profiler = self.adapter.timing_profiler
         self.get_logger().warn(
             f"Hardware output enabled: {enabled}. No automatic rearm."
         )
+        if limit_mode == "clip":
+            self.get_logger().warn(
+                "limit_mode=clip: torque above the profile ceiling and base spin above "
+                "the gyro limit are warnings, not stops."
+            )
 
     def notify_startup_ready(self):
         """Report startup readiness only after warmup and fresh released buttons."""
@@ -146,6 +155,7 @@ class HardwareMotorGateNode(MotorGateNode):
         else:
             self.motor_gate.abort_reason = None
             self.motor_gate.policy_session_id = None
+        self._forwarded_gate_fault = None
         self.session_open = True
         return True
 
@@ -230,6 +240,7 @@ class HardwareMotorGateNode(MotorGateNode):
             self.adapter.abort(message.reason or "external_abort")
         super().on_abort(message)
 
+    @profiled("ros.publish_output")
     def publish_output(self):
         """Forward only running policy output, retaining the gate's original expiry."""
         if self.adapter is None:
@@ -242,6 +253,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 self.adapter.damp_settled = False
                 if not self.adapter.abort_reason and not self.adapter.stop_requested.is_set():
                     self.motor_gate = MotorCommandGate(self.host_boot_id, self.config)
+                    self._forwarded_gate_fault = None
                     self.abort_reason = None
                     # Recreate the writer to discard its retained stop for future tests.
                     self.destroy_publisher(self.abort_publisher)
@@ -251,7 +263,11 @@ class HardwareMotorGateNode(MotorGateNode):
             self.motor_gate.abort(self.adapter.abort_reason)
         command = self.motor_gate.cycle(time.monotonic())
         if self.motor_gate.abort_reason:
-            self.adapter.abort(self.motor_gate.abort_reason)
+            # Forward each latched gate fault once, until the gate resets.
+            # Feedback and recovery workers continue checking current health.
+            if self._forwarded_gate_fault != self.motor_gate.abort_reason:
+                self.adapter.abort(self.motor_gate.abort_reason)
+                self._forwarded_gate_fault = self.motor_gate.abort_reason
             self.latch_abort(self.motor_gate.abort_reason)
         elif command["kind"] == "policy":
             self.adapter.submit(command, self.motor_gate.time_command_expires_secs)
@@ -263,6 +279,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 **(self.adapter.startup.status() if self.adapter.whole_body else {}),
                 "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
+                "limit_mode": self.adapter.limit_mode,
                 "startup_policy": self.adapter.startup_policy_name,
                 "soft_reset_policy": "holosoma",
                 "automatic_soft_reset": self.adapter.automatic_soft_reset,

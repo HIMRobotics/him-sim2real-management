@@ -70,7 +70,6 @@ class PolicyNode(Node):
         )
         self.create_subscription(Abort, "/safety/abort", self.on_abort, abort_qos)
         self.abort_pub = self.create_publisher(Abort, "/safety/abort", abort_qos)
-        self.create_timer(0.02, self.publish_command)
 
     def arm(self):
         """Use the existing readiness and session services."""
@@ -108,9 +107,7 @@ class PolicyNode(Node):
         state = json.loads(message.data)
         if self.mode != "sim" and state.get("host_boot_id") != Path("/proc/sys/kernel/random/boot_id").read_text().strip():
             raise RuntimeError("policy state came from another host clock")
-        if self.policy.name == "stairs" and "base_velocity" not in state:
-            raise RuntimeError("policy requires measured base velocity")
-        if (self.trial or (self.policy.name == "stairs" and self.task_command is None)) and "position" not in state:
+        if self.trial and "position" not in state:
             raise RuntimeError("task requires measured base position")
         if self.session_id is None and self.mode == "sim":
             self.session_id = state["session_id"]
@@ -118,6 +115,9 @@ class PolicyNode(Node):
             raise RuntimeError("policy session changed")
         self.state = state
         self.last_received = time.monotonic()
+        # Answer each state as it arrives so the command lands on the next
+        # control tick; a separate timer drifts against the robot's and skips ticks.
+        self.publish_command()
 
     def publish_command(self):
         if self.done or not self.session_id or self.state is None:

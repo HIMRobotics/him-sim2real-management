@@ -24,7 +24,7 @@ sys.path[:0] = [
 from controllers import ExamplePolicy
 from local import run
 from plant import Plant
-from prepare import STANCE, prepare
+from prepare import prepare
 from runner import Runner
 from view import export_replay
 
@@ -43,7 +43,9 @@ class ExampleTests(unittest.TestCase):
 
     def test_walker_makes_forward_progress_with_checks_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report = run("walker", tmp, 10, safety_checks=False)
+            report = run("walker", Path(tmp) / "off", 10, safety_checks=False)
+            view = export_replay(Path(tmp) / "off/trace.npz", Path(tmp) / "view")
+            summary = json.loads((view / "motion.json").read_text())["summary"]
         self.assertEqual(report["status"], "completed")
         motion = report["motion"]
         self.assertGreater(
@@ -51,31 +53,7 @@ class ExampleTests(unittest.TestCase):
         )
         self.assertFalse(motion["fell"])
         self.assertTrue(motion["upright_at_end"])
-
-    def test_stairs_policy_climbs_unchecked_and_keeps_hip_torque_in_limit(
-        self,
-    ):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            off = run("stairs", root / "off", 20, safety_checks=False)
-            self.assertEqual(off["status"], "completed")
-            self.assertEqual(off["commands"], 1250)
-            self.assertFalse(off["motion"]["fell"])
-            self.assertEqual(off["motion"]["stairs"]["distinct_treads"], 3)
-            self.assertTrue(off["motion"]["stairs"]["climbed_stairs"])
-            self.assertTrue(off["motion"]["stairs"]["finished_upright"])
-            on = run("stairs", root / "on", 0.5, safety_checks=True)
-            self.assertIsNone(on["reason"])
-            self.assertGreater(on["commands"], 0)
-            hip = on["warnings"].get("right_hip_pitch", {})
-            demands = [
-                item for item in hip.get("limits", []) if item["torque_kind"] == "PD demand"
-            ]
-            self.assertEqual(demands, [])
-            view = export_replay(root / "off/trace.npz", root / "view")
-            motion = json.loads((view / "motion.json").read_text())
-            self.assertIn("Safety checks: OFF", motion["summary"])
-            self.assertTrue(any(g["name"] == "stair_3" for g in motion["geoms"]))
+        self.assertIn("Safety checks: OFF", summary)
 
     def test_balance_real_policy_and_safety_rejection(self):
         model = Path(
@@ -120,16 +98,16 @@ class ExampleTests(unittest.TestCase):
 
     def test_prepared_environment_and_image_context_are_portable(self):
         with tempfile.TemporaryDirectory() as tmp:
-            project = prepare("stairs", Path(tmp) / "submitted")
+            project = prepare("walker", Path(tmp) / "submitted")
             plant = Plant(scene=project / "environment/scene.xml")
-            self.assertGreaterEqual(plant.model.geom("stair_3").id, 0)
+            self.assertGreaterEqual(plant.model.geom("safety_floor").id, 0)
             context = project / "container"
             self.assertTrue(
                 (
                     context / "interfaces/him_safety_interfaces/msg/JointCommand.msg"
                 ).is_file()
             )
-            self.assertTrue((context / "project/walker.onnx.data").is_file())
+            self.assertTrue((context / "project/balance.onnx").is_file())
             import onnx
 
             prepared_model = onnx.load(
@@ -141,7 +119,7 @@ class ExampleTests(unittest.TestCase):
                 [
                     sys.executable,
                     "-c",
-                    "from controllers import ExamplePolicy; p=ExamplePolicy('stairs', 'project'); print(p.kp.shape)",
+                    "from controllers import ExamplePolicy; p=ExamplePolicy('walker', 'project'); print(p.kp.shape)",
                 ],
                 cwd=context,
                 env=env,
@@ -165,9 +143,18 @@ class ExampleTests(unittest.TestCase):
         ]
         self.assertLessEqual(min(distances), 1e-6)
         self.assertGreater(min(distances), -0.005)
-        np.testing.assert_allclose(plant.q(), STANCE, atol=1e-6)
         stock = Plant(check_fall=False)
-        self.assertAlmostEqual(float(stock.data.qpos[2]), 0.792, places=3)
+        np.testing.assert_allclose(plant.data.qpos, stock.data.qpos, atol=1e-6)
+
+    def test_image_runs_start_in_the_balance_stance_with_forearms_forward(self):
+        plant = Plant(check_fall=False)
+        self.assertAlmostEqual(float(plant.data.qpos[2]), 0.7495, places=3)
+        np.testing.assert_allclose(plant.q()[15:], 0.0)
+        for side in ("left", "right"):
+            elbow = plant.data.xpos[plant.model.body(f"{side}_elbow_link").id]
+            wrist = plant.data.xpos[plant.model.body(f"{side}_wrist_yaw_link").id]
+            forearm = (wrist - elbow) / np.linalg.norm(wrist - elbow)
+            self.assertGreater(forearm[0], 0.99)
 
     def test_local_preparation_skips_container_sources(self):
         with tempfile.TemporaryDirectory() as tmp:

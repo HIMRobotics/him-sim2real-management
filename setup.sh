@@ -89,7 +89,7 @@ if [[ -n "$command_file" && ! -f "$command_file" ]]; then
   exit 2
 fi
 if [[ -n "$example" ]]; then
-  case "$example" in walker|stairs|balance|holosoma) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
+  case "$example" in walker|balance|holosoma) ;; *) echo "Unknown hardware example: $example" >&2; exit 2 ;; esac
 fi
 if [[ -z "$runtime" ]]; then
   if command -v docker >/dev/null 2>&1; then runtime=docker
@@ -98,7 +98,7 @@ if [[ -z "$runtime" ]]; then
   fi
 fi
 if [[ "$runtime" == docker && "${EUID}" -ne 0 && ! -w /var/run/docker.sock ]]; then
-  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_LIMIT_MODE,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
 fi
 if [[ "$stopping" -eq 1 ]]; then
   stop_container
@@ -320,7 +320,7 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
   # Restart a latched watchdog before any session node subscribes. A checker
   # that hears the old abort republishes it, and the fresh gate latches it too.
   wanted_profile="$(realpath "$profile")"
-  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}" "G1_STARTUP_POLICY=$startup_policy" "HIM_HOLOSOMA_DIR=${HIM_HOLOSOMA_DIR:-/home/unitree/holosoma}" ${HIM_HOLOSOMA_ONNX:+"HIM_HOLOSOMA_ONNX=$HIM_HOLOSOMA_ONNX"}
+  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}" "G1_LIMIT_MODE=${G1_LIMIT_MODE:-stop}" "G1_STARTUP_POLICY=$startup_policy" "HIM_HOLOSOMA_DIR=${HIM_HOLOSOMA_DIR:-/home/unitree/holosoma}" ${HIM_HOLOSOMA_ONNX:+"HIM_HOLOSOMA_ONNX=$HIM_HOLOSOMA_ONNX"}
   current_gate="$(read_gate_status)"
   needs_reload=0
   latched_reason=""
@@ -338,10 +338,11 @@ same = (
     and gate.get("launch_gate") is True
     and gate.get("hardware_profile_path") == sys.argv[2]
     and gate.get("startup_policy") == sys.argv[3]
+    and gate.get("limit_mode", "stop") == sys.argv[4]
     and not gate.get("abort_reason")
 )
 print("0" if same else "1")
-' "$current_gate" "$wanted_profile" "$startup_policy")"
+' "$current_gate" "$wanted_profile" "$startup_policy" "${G1_LIMIT_MODE:-stop}")"
   else
     latched_reason="$(syslog_abort_reason || true)"
     needs_reload=1
@@ -402,6 +403,7 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" != 1 ]]; then
     -p whole_body_output:=true -p "hardware_profile_path:=$profile" \
     -p "launch_gate:=${G1_LAUNCH_GATE:-false}" \
     -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
+    -p "limit_mode:=${G1_LIMIT_MODE:-stop}" \
     -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
 fi
 stop_container

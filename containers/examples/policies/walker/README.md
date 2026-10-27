@@ -21,6 +21,3 @@ accept `forward_velocity`, `sideways_velocity`, and `yaw_rate`, as well as the
 older `command: [vx, vy, yaw_rate]` form and timed segments. For editable Python
 variables instead, run `python3 containers/examples/commands/walker/run.py
 --seconds 10 --view`.
-
-The former arena stair model is kept separately in [`../stairs/`](../stairs/)
-and is only used by the stairs example and its legacy adapter tests.
