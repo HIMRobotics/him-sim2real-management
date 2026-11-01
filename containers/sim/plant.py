@@ -1,5 +1,6 @@
 """MuJoCo G1 used as the plant behind a container submission."""
 
+import importlib.util
 import math
 import tempfile
 from pathlib import Path
@@ -36,6 +37,35 @@ def load_model(scene=None):
         )
         scene.flush()
         return mujoco.MjModel.from_xml_path(scene.name)
+
+
+def load_extension(plant):
+    """The scene's extension, or None.
+
+    A scene names a Python file, relative to the scene, in
+    <custom><text name="sim_extension" data="..."/></custom>. Its attach(plant)
+    returns None or an object with reset(), step(dt, time) after every physics
+    step, state() whose keys are added to the policy state, and report() for
+    the run report. The file runs in the simulator process.
+    """
+    model = plant.model
+    text = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_TEXT, "sim_extension")
+    if text < 0:
+        return None
+    adr, size = int(model.text_adr[text]), int(model.text_size[text])
+    path = Path(bytes(model.text_data[adr : adr + size - 1]).decode())
+    if not path.is_absolute():
+        if plant.scene is None:
+            raise ValueError("sim_extension path needs the scene's directory")
+        path = plant.scene.parent / path
+    if not path.is_file():
+        raise ValueError(f"sim_extension does not exist: {path}")
+    spec = importlib.util.spec_from_file_location(f"sim_extension_{path.stem}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not callable(getattr(module, "attach", None)):
+        raise ValueError(f"sim_extension {path} has no attach(plant)")
+    return module.attach(plant)
 
 
 CONTROL_DT = 0.02
@@ -125,7 +155,9 @@ class Plant:
         self.fall_enabled = bool(check_fall)
         self.check_fall = self.fall_enabled
         self._push = None
+        self.extension = None
         self.reset(pose)
+        self.extension = load_extension(self)
 
     def reset(self, pose="standing"):
         """Reset to the stand keyframe or a counterfactual on safety_floor."""
@@ -176,6 +208,8 @@ class Plant:
         if self.check_fall and self.fallen():
             raise ValueError("stand keyframe starts fallen")
         self._apply_arrays(*self.damping_command(self.q(), self.dq()))
+        if self.extension is not None:
+            self.extension.reset()
 
     def _support_distances(self, data, floor_only=False):
         distances = []
@@ -257,6 +291,8 @@ class Plant:
         """Advance one physics tick. Returns measured joint velocity."""
         self.apply_push(self._push, float(self.data.time))
         mujoco.mj_step(self.model, self.data)
+        if self.extension is not None:
+            self.extension.step(PHYSICS_DT, float(self.data.time))
         return self.dq()
 
     def fallen(self):
@@ -270,7 +306,7 @@ class Plant:
     def state(self):
         quat = self.data.xquat[self.base]
         sens = self.data.sensordata
-        return {
+        state = {
             "q": self.q().tolist(),
             "dq": self.dq().tolist(),
             "quat": [float(v) for v in quat],
@@ -287,3 +323,10 @@ class Plant:
             "ctrl_high": self.model.actuator_ctrlrange[self.actuators, 1].tolist(),
             "sim_time": float(self.data.time),
         }
+        if self.extension is not None:
+            extra = self.extension.state()
+            clash = sorted(set(extra) & set(state))
+            if clash:
+                raise ValueError(f"sim_extension state would replace {clash}")
+            state.update(extra)
+        return state

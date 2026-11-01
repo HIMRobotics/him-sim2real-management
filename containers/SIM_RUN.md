@@ -391,6 +391,33 @@ The scene can change terrain, friction, gravity, obstacles, and passive objects.
 
 `standing` resets to the submitted `stand` keyframe, including its root position and orientation, then raises or lowers the robot until its feet just meet `safety_floor` or a platform. Start the keyframe slightly above the support. Other poses require a ground geom named `safety_floor` and space to place the robot without substantial penetration. With checks enabled, the existing fall criterion still uses pelvis world height below 0.28 m or uprightness below 0.3, so choose the environment's vertical origin accordingly. Simulation timing remains 20 ms control / 2 ms physics even if the XML specifies another timestep.
 
+### Scene extensions
+
+A scene can bring task logic that MuJoCo alone does not cover, such as a ball
+with fixed restitution, scripted props, or a referee. Name a Python file,
+relative to the scene, in a custom text element:
+
+```xml
+<custom><text name="sim_extension" data="my_task.py"/></custom>
+```
+
+The plant runs that file in the simulator process and calls its
+`attach(plant)`. It returns `None` (nothing to do) or an object with:
+
+- `reset()`: after every plant reset, once the robot is placed.
+- `step(dt, time)`: after every 2 ms physics step. It may write `plant.data`
+  (for example a free body's `qpos` and `qvel`), and traces and replays show
+  the result.
+- `state()`: a dict added to every `/safety/policy_state`. Its keys must not
+  replace the plant's own (`q`, `quat`, `sim_time`, ...).
+- `report()`: a JSON-ready dict stored as the run report's `extension`.
+
+`plant.model`, `plant.data`, `plant.scene` and `plant.robot_geoms` (the G1's
+geoms) are available to it. The file needs only the simulator's Python
+packages (NumPy, MuJoCo). Desktop runs mount only this repository, so keep the
+scene, its extension and its assets under it, for example in
+`containers/upload/`.
+
 ## How to visualize
 
 The first viewer export downloads Three.js r160 and its two addons from the

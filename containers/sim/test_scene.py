@@ -181,6 +181,87 @@ class SceneTest(unittest.TestCase):
         triangle = struct.unpack_from("<12fH", stl, 84)
         np.testing.assert_allclose(triangle[3:12], [-1, -1, 0, 1, -1, 0.5, -1, 1, 1.5])
 
+    def add_extension(self, source, name="mover.py"):
+        """A free prop and a sim_extension that drives it."""
+        if not getattr(self, "prop_in_keyframe", False):
+            robot_path = self.root / "g1_robot.xml"
+            robot = ET.parse(robot_path)
+            key = robot.find("keyframe/key")
+            key.set("qpos", key.get("qpos") + " 3 0 0.5 1 0 0 0")
+            robot.write(robot_path)
+            self.prop_in_keyframe = True
+        self.scene.write_text(f"""<mujoco>
+  <include file="g1_robot.xml"/><include file="obstacles.xml"/>
+  <custom><text name="sim_extension" data="{name}"/></custom>
+  <worldbody><body name="prop" pos="3 0 0.5" gravcomp="1"><freejoint/>
+    <geom name="prop_geom" type="sphere" size="0.05" contype="0" conaffinity="0"/>
+  </body></worldbody>
+</mujoco>""")
+        (self.root / name).write_text(source)
+
+    MOVER = """
+class Mover:
+    def __init__(self, plant):
+        self.plant, self.steps, self.resets = plant, 0, 0
+        self.adr = plant.model.jnt_qposadr[plant.model.body("prop").jntadr[0]]
+
+    def reset(self):
+        self.resets += 1
+        self.steps = 0
+
+    def step(self, dt, time):
+        self.steps += 1
+        self.plant.data.qpos[self.adr] = 3.0 + 0.1 * time
+
+    def state(self):
+        return {"prop": {"x": float(self.plant.data.qpos[self.adr]), "steps": self.steps}}
+
+    def report(self):
+        return {"steps": self.steps, "resets": self.resets}
+
+
+def attach(plant):
+    return Mover(plant)
+"""
+
+    def test_scene_extension_steps_reports_and_adds_policy_state(self):
+        self.add_extension(self.MOVER)
+        runner = Runner(record_trace=True, scene=self.scene, safety_checks=False)
+        plant = runner.plant
+        self.assertEqual(plant.extension.resets, 0)
+        plant.reset()
+        self.assertEqual(plant.extension.resets, 1)
+        for _ in range(plant.substeps):
+            plant.step_physics()
+        state = plant.state()
+        self.assertEqual(state["prop"]["steps"], plant.substeps)
+        self.assertAlmostEqual(state["prop"]["x"], 3.0 + 0.1 * float(plant.data.time))
+        self.assertIn("q", state)
+        runner.step(0.0)
+        trace = self.root / "trace.npz"
+        with patch.dict(os.environ, {"G1_SIM_TRACE": str(trace)}):
+            report = runner.report()
+        self.assertEqual(report["extension"]["resets"], 1)
+        self.assertGreater(report["extension"]["steps"], plant.substeps)
+        motion = json.loads((export_replay(trace, self.root / "view") / "motion.json").read_text())
+        prop = next(g for g in motion["geoms"] if g["name"] == "prop_geom")
+        self.assertGreater(prop["poses"][-1][9], 3.0)
+
+    def test_scene_extension_errors_and_opt_out(self):
+        self.add_extension(self.MOVER.replace('{"prop"', '{"q"'))
+        with self.assertRaisesRegex(ValueError, r"replace \['q'\]"):
+            Plant(scene=self.scene).state()
+        self.add_extension("def attach(plant):\n    return None\n")
+        self.assertIsNone(Plant(scene=self.scene).extension)
+        self.add_extension("x = 1\n")
+        with self.assertRaisesRegex(ValueError, "no attach"):
+            Plant(scene=self.scene)
+        self.add_extension("", name="absent.py")
+        (self.root / "absent.py").unlink()
+        with self.assertRaisesRegex(ValueError, "sim_extension does not exist"):
+            Plant(scene=self.scene)
+        self.assertIsNone(Plant().extension)
+
     def test_plant_process_receives_scene_and_safety_option(self):
         env = {
             **os.environ,

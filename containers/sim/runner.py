@@ -337,6 +337,8 @@ class Runner:
             "trace": trace,
             "motion": self.metrics.report(),
             "thrash": self._thrash_snapshot(),
+            "extension": (self.plant.extension.report()
+                          if self.plant.extension is not None else None),
         }
 
     def _thrash_snapshot(self):
