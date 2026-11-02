@@ -53,6 +53,15 @@ LOCKSTEP_REPLY_SECONDS = 0.5
 HANDOFF_SECONDS = float(os.environ.get("G1_SIM_HANDOFF_SECONDS") or "5")
 
 
+def gate_phase_ms(value):
+    """Where the hardware adapter's 20 ms output tick falls after each state: "random" per run, or ms."""
+    if value == "random":
+        import random
+
+        return random.uniform(0.0, CONTROL_DT * 1000.0)
+    return float(value) if value else 10.0
+
+
 def error_report(error):
     return {
         "version": 1,
@@ -98,10 +107,14 @@ class PlantClient:
         os.set_blocking(self.proc.stdin.fileno(), False)
         os.set_blocking(self.proc.stdout.fileno(), False)
 
+    realtime = False
+
     def call(self, request, timeout=None):
         if self.failed or self.proc.poll() is not None:
             raise RuntimeError("mujoco plant unavailable")
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+        if self.realtime:
+            return self._call_realtime(request, deadline)
         pending = (json.dumps(request) + "\n").encode()
         response = bytearray()
         try:
@@ -122,11 +135,101 @@ class PlantClient:
                     if not chunk:
                         raise RuntimeError("mujoco plant closed its output")
                     response.extend(chunk)
-            return json.loads(response)
+            line, _, self.leftover = bytes(response).partition(b"\n")
+            return json.loads(line)
         except (OSError, ValueError, RuntimeError):
             # Never reuse a stream after a partial or late response.
             self.failed = True
             raise
+
+    def start_realtime(self, request, wake):
+        """Hand the clock to the plant. States and rejections then arrive as events; `wake`
+        (thread-safe) is called whenever one is queued."""
+        import queue
+        import threading
+        from collections import deque
+
+        self.next_id = 1
+        self.replies = queue.Queue()
+        self.events = deque()
+        self.wake = wake
+        response = self.call(dict(request, id=0))
+        if not response.get("ok"):
+            raise RuntimeError(response.get("detail") or "mujoco plant refused real time")
+        self.realtime = True
+        self.reader = threading.Thread(target=self._read, name="plant_reader", daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        buffer = getattr(self, "leftover", b"")
+        while True:
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                if line.strip():
+                    message = json.loads(line)
+                    if "event" in message:
+                        self.events.append(message)
+                        self.wake()
+                    else:
+                        self.replies.put(message)
+            try:
+                select.select([self.proc.stdout], [], [])
+                chunk = os.read(self.proc.stdout.fileno(), 65536)
+            except (OSError, ValueError):
+                chunk = b""
+            if not chunk:
+                self.events.append({"event": "state", "ok": False, "reason": "plant_error",
+                                    "detail": "mujoco plant closed its output"})
+                self.replies.put({"id": None, "ok": False, "reason": "plant_error"})
+                self.wake()
+                return
+            buffer += chunk
+
+    def take_events(self):
+        events = []
+        while self.events:
+            events.append(self.events.popleft())
+        return events
+
+    def send(self, request, deadline=None):
+        """Write one request without waiting for an answer (real-time mode)."""
+        if self.failed or self.proc.poll() is not None:
+            raise RuntimeError("mujoco plant unavailable")
+        deadline = time.monotonic() + self.timeout if deadline is None else deadline
+        pending = (json.dumps(request) + "\n").encode()
+        try:
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("mujoco plant input timed out")
+                _, writable, _ = select.select([], [self.proc.stdin], [], remaining)
+                if writable:
+                    pending = pending[os.write(self.proc.stdin.fileno(), pending):]
+        except (OSError, RuntimeError):
+            self.failed = True
+            raise
+
+    def _call_realtime(self, request, deadline):
+        import queue
+
+        request_id = self.next_id
+        self.next_id += 1
+        self.send(dict(request, id=request_id), deadline)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.failed = True
+                raise TimeoutError("mujoco plant response timed out")
+            try:
+                reply = self.replies.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if reply.get("id") == request_id:
+                reply.pop("id", None)
+                return reply
+            if reply.get("id") is None:
+                self.failed = True
+                raise RuntimeError("mujoco plant closed its output")
 
     def close(self):
         if self.proc.poll() is None:
@@ -147,6 +250,11 @@ class SimBridge(Node):
     tick_missed = False
     missed_replies = 0
     ended_at = None
+    latency_log = None
+    tick = 0
+    tick_started = None
+    realtime = False
+    plant_clock = False
 
     def __init__(self, plant, seconds, report_path, lowstate, checker=None):
         super().__init__("mujoco_sim")
@@ -161,6 +269,12 @@ class SimBridge(Node):
         self.auto_arm = bool(os.environ.get("G1_SIM_EXAMPLE"))
         self.created = time.monotonic()
         self.lockstep = os.environ.get("G1_SIM_LOCKSTEP") == "1"
+        self.circle = os.environ.get("G1_SIM_CIRCLE") == "1"
+        # Wall clock: the plant keeps real time itself and takes commands as they arrive, so the
+        # executor never waits for physics (G1_SIM_REALTIME=0: the bridge steps it every tick).
+        self.realtime = (not self.lockstep and not self.circle
+                         and os.environ.get("G1_SIM_REALTIME", "1") != "0")
+        self.gate_phase_ms = gate_phase_ms(os.environ.get("G1_SIM_GATE_PHASE_MS"))
         self.sim_clock = self.created
         self.awaiting = None
         self.awaiting_since = None
@@ -171,6 +285,12 @@ class SimBridge(Node):
         self.last_tick = None
         self.stalls = []
         self.abort_at = None
+        self.latency_log = os.environ.get("G1_SIM_LATENCY_LOG")
+        self.tick = 0
+        self.tick_started = None
+        self.sent = {}
+        self.latency = []
+        self.plant_secs = []
         feedback_qos = QoSProfile(depth=64, reliability=ReliabilityPolicy.BEST_EFFORT)
         command_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         abort_qos = QoSProfile(
@@ -197,6 +317,8 @@ class SimBridge(Node):
             self.create_subscription(CheckedCommand, POSTCHECK, self.on_postcheck, command_qos)
         self.create_subscription(Abort, ABORT, self.on_abort, abort_qos)
         self.create_timer(0.02, self.on_control)
+        if self.realtime:
+            self.plant_events = self.create_guard_condition(self.on_plant_events)
         self.create_timer(0.1, self.repeat_abort)
         self.abort_reason = None
         self.accepted = False
@@ -237,9 +359,7 @@ class SimBridge(Node):
             "kd": list(message.kd),
             "tau": list(message.tau),
         }
-        result = self.plant.call(
-            {"op": "command", "time": self.clock(), "frame": frame}
-        )
+        result = self.send_command(frame)
         if result.get("ok"):
             self.accepted = True
             if self.run_started is None:
@@ -277,6 +397,11 @@ class SimBridge(Node):
         sim_message.data = json.dumps(state)
         self.sim_state_pub.publish(sim_message)
         self.policy_state_pub.publish(sim_message)
+        if self.latency_log:
+            sent_at = time.monotonic()
+            self.sent[message.observation_id] = (self.tick, sent_at, sent_at - (self.tick_started or sent_at))
+            while len(self.sent) > 512:
+                del self.sent[next(iter(self.sent))]
 
     def on_postcheck(self, message):
         """Apply only a fresh checked command accepted by the shared motor gate."""
@@ -310,7 +435,12 @@ class SimBridge(Node):
         command = message.command
         frame = {key: list(getattr(command, key)) for key in ("q", "dq", "kp", "kd", "tau")}
         frame.update(session_id=source[0], sequence=int(command.sequence), observation_id=source[1])
-        result = self.plant.call({"op": "command", "time": self.clock(), "frame": frame})
+        result = self.send_command(frame)
+        sent = self.sent.pop(command.observation_id, None) if self.latency_log else None
+        if sent is not None and result.get("ok"):
+            arrived = time.monotonic()
+            self.latency.append({"ticks_late": self.tick - sent[0], "round_trip_ms": (arrived - sent[1]) * 1e3,
+                                 "state_sent_into_tick_ms": sent[2] * 1e3})
         if result.get("ok"):
             self.accepted = True
             if self.run_started is None:
@@ -345,6 +475,9 @@ class SimBridge(Node):
             if self.last_tick is not None and wall - self.last_tick >= HOST_STALL_SECONDS:
                 self.stalls.append((self.last_tick, wall))
             self.last_tick = wall
+        if not self.plant_clock:
+            self.tick += 1
+            self.tick_started = wall
         if self.motor_gate is not None and self.ended_at is None:
             self.motor_gate.cycle(self.now())
             if self.motor_gate.abort_reason:
@@ -364,6 +497,16 @@ class SimBridge(Node):
                 return
             self.ended_at = self.now()
             self.awaiting = None
+        if self.realtime and self.accepted:
+            thrash = self.checker.supervisor.thrash_detector.snapshot() if self.checker else None
+            if not self.plant_clock:
+                self.plant.start_realtime({"op": "realtime", "clock_origin": self.created,
+                                           "gate_phase_ms": self.gate_phase_ms, "thrash": thrash},
+                                          self.plant_events.trigger)
+                self.plant_clock = True
+            elif thrash is not None:
+                self.plant.send({"op": "thrash", "thrash": thrash})
+            return
         request = {"op": "feedback", "time": self.clock()}
         if self.circle or self.accepted:
             request.update(op="circle" if self.circle else "step", feedback=True)
@@ -373,7 +516,10 @@ class SimBridge(Node):
                 request["clock_origin"] = self.created
             if self.checker:
                 request["thrash"] = self.checker.supervisor.thrash_detector.snapshot()
+        plant_started = time.monotonic()
         state = self.plant.call(request)
+        if self.latency_log and request["op"] != "feedback":
+            self.plant_secs.append(time.monotonic() - plant_started)
         if state.get("reason"):
             self.latch(state["reason"], state.get("detail"))
         if not state.get("ok"):
@@ -388,6 +534,33 @@ class SimBridge(Node):
                 and self.ended_at is None):
             self.awaiting = self.now() if self.checker else int(state["observation_id"])
             self.awaiting_since = wall
+
+    def on_plant_events(self):
+        """States the real-time plant stepped on its own clock, and commands it rejected."""
+        for event in self.plant.take_events():
+            if self.finished:
+                return
+            if event.get("event") == "command_rejected":
+                self.latch(event.get("reason") or "invalid_command", event.get("detail"))
+                continue
+            self.tick += 1
+            self.tick_started = time.monotonic()
+            if event.get("reason"):
+                self.latch(event["reason"], event.get("detail"))
+            if not event.get("ok"):
+                self.latch(event.get("reason") or "plant_error")
+                self.finish()
+                return
+            if self.ended_at is None:
+                self.publish_state(event)
+            self.lowstate.publish(event)
+
+    def send_command(self, frame):
+        request = {"op": "command", "time": self.clock(), "frame": frame}
+        if self.plant_clock:
+            self.plant.send(request)
+            return {"ok": True}
+        return self.plant.call(request)
 
     def publish_state(self, state):
         state = dict(state, received_at_secs=self.now(),
@@ -434,6 +607,22 @@ class SimBridge(Node):
         message.reason = self.abort_reason
         self.abort_pub.publish(message)
 
+    def latency_summary(self):
+        """Ticks between publishing a state and its command arriving (0 = in time for the next step, as lockstep)."""
+        def pct(values):
+            values = sorted(values)
+            if not values:
+                return None
+            pick = lambda q: round(values[min(len(values) - 1, int(q * len(values)))], 2)
+            return {"p50": pick(0.5), "p90": pick(0.9), "p99": pick(0.99), "max": round(values[-1], 2)}
+
+        late = [c["ticks_late"] for c in self.latency]
+        histogram = {str(k): late.count(k) for k in sorted(set(late))}
+        return {"commands": len(late), "ticks_late": histogram,
+                "round_trip_ms": pct([c["round_trip_ms"] for c in self.latency]),
+                "state_sent_into_tick_ms": pct([c["state_sent_into_tick_ms"] for c in self.latency]),
+                "plant_step_ms": pct([s * 1e3 for s in self.plant_secs])}
+
     def finish(self, error=None):
         if self.finished:
             return
@@ -458,6 +647,11 @@ class SimBridge(Node):
         stall = self.host_stall()
         if stall is not None:
             report["host_stall"] = {"longest_gap_secs": round(stall, 3)}
+        if self.latency_log:
+            report["command_latency"] = self.latency_summary()
+            with open(self.latency_log, "w") as f:
+                json.dump({"summary": report["command_latency"], "commands": self.latency,
+                           "plant_step_ms": [s * 1e3 for s in self.plant_secs]}, f)
         write_report(self.report_path, report)
         status = report.get("status")
         self.exit_code = {"within_limits": 0, "completed": 0, "violation": 1}.get(

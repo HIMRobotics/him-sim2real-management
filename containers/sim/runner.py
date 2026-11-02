@@ -171,10 +171,38 @@ class Runner:
                                          + min(self.config.action_timeout, 0.2 - 1e-9))
         return None
 
-    def step(self, time):
+    def step(self, time, gate_substep=0, before_gate=None):
+        """One 20 ms control step. The control update (the hardware adapter's output tick) runs
+        before physics substep `gate_substep`; `before_gate` runs first, e.g. to take new commands."""
         self._check_deadlines(float(time))
         if self.last_command_time is not None:
             self.last_cycle_time = float(time)
+        if gate_substep <= 0:
+            if before_gate is not None:
+                before_gate()
+            self._control_update()
+        violation = None
+        for substep in range(self.plant.substeps):
+            if substep == gate_substep and substep > 0:
+                if before_gate is not None:
+                    before_gate()
+                self._control_update()
+            dq = self.plant.step_physics()
+            self.sim_time += PHYSICS_DT
+            self.metrics.observe()
+            if (
+                not np.isfinite(self.plant.data.qpos).all()
+                or not np.isfinite(self.plant.data.qvel).all()
+                or not np.isfinite(dq).all()
+            ):
+                violation = ("nonfinite_simulation", None)
+                break
+            violation = self._substep_checks(dq)
+            if violation is not None:
+                break
+        return self._finish_step(violation)
+
+    def _control_update(self):
         if self.uses_hardware and self.commands:
             if not self.hardware.ready:
                 self._latch("hardware_arm_rejected", self.hardware.adapter.arm_rejection_reason)
