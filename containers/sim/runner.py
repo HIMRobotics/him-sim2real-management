@@ -235,51 +235,42 @@ class Runner:
             except Exception as exc:  # noqa: BLE001
                 self._latch("startup_balance_error", {"detail": str(exc)})
                 self.plant._apply_arrays(*self.plant.damping_command(self.plant.q(), self.plant.dq()))
-        violation = None
-        for _ in range(self.plant.substeps):
-            dq = self.plant.step_physics()
-            self.sim_time += PHYSICS_DT
-            self.metrics.observe()
-            if (
-                not np.isfinite(self.plant.data.qpos).all()
-                or not np.isfinite(self.plant.data.qvel).all()
-                or not np.isfinite(dq).all()
-            ):
-                violation = ("nonfinite_simulation", None)
-                break
-            # The robot's adapter polls rt/lowstate every 5 ms, not every physics step.
-            if self.uses_hardware and self.commands and self.sim_time >= self.state_poll_at - 1e-9:
-                while self.state_poll_at <= self.sim_time + 1e-9:
-                    self.state_poll_at += STATE_POLL_SECS
-                self.hardware.receive()
-                self._sync_hardware()
-            if self.safety_checks and self.ended_at is None:
-                if self.plant.fallen() and not self.uses_hardware:
-                    violation = ("fall", {"height": self.plant.state()["height"]})
-                    break
-                self.rules.note_measured_velocity(dq, self.position_warnings)
-                try:
-                    if not self.uses_hardware:
-                        check_base_motion(self.plant.data.qvel[
-                            self.plant.base_vadr + 3:self.plant.base_vadr + 6],
-                            spin_warnings=(self.position_warnings
-                                           if self.limit_mode == "clip" else None))
-                except JointViolation as exc:
-                    violation = (exc.reason, exc.details)
-                    break
-                if self.active is not None:
-                    tau_demand = self.plant.demand(
-                        self.active["q"], self.active["dq"], self.active["kp"],
-                        self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
-                    self.rules.note_torque(tau_demand, self.position_warnings, kind="PD demand")
-                    self.rules.note_torque(
-                        self.plant.data.qfrc_actuator[self.plant.vadr],
-                        self.position_warnings, kind="applied torque")
-            if self.reason is None and self.ended_at is None and self.commands:
-                reason = self.thrash_detector.observe(dq, self.sim_time)
-                if reason:
-                    violation = (reason, deepcopy(self.thrash_detector.event))
-                    break
+
+    def _substep_checks(self, dq):
+        """Checks after one physics substep; returns a (reason, details) violation or None."""
+        # The robot's adapter polls rt/lowstate every 5 ms, not every physics step.
+        if self.uses_hardware and self.commands and self.sim_time >= self.state_poll_at - 1e-9:
+            while self.state_poll_at <= self.sim_time + 1e-9:
+                self.state_poll_at += STATE_POLL_SECS
+            self.hardware.receive()
+            self._sync_hardware()
+        if self.safety_checks and self.ended_at is None:
+            if self.plant.fallen() and not self.uses_hardware:
+                return ("fall", {"height": self.plant.state()["height"]})
+            self.rules.note_measured_velocity(dq, self.position_warnings)
+            try:
+                if not self.uses_hardware:
+                    check_base_motion(self.plant.data.qvel[
+                        self.plant.base_vadr + 3:self.plant.base_vadr + 6],
+                        spin_warnings=(self.position_warnings
+                                       if self.limit_mode == "clip" else None))
+            except JointViolation as exc:
+                return (exc.reason, exc.details)
+            if self.active is not None:
+                tau_demand = self.plant.demand(
+                    self.active["q"], self.active["dq"], self.active["kp"],
+                    self.active["kd"], self.active["tau"], self.plant.q(), self.plant.dq())
+                self.rules.note_torque(tau_demand, self.position_warnings, kind="PD demand")
+                self.rules.note_torque(
+                    self.plant.data.qfrc_actuator[self.plant.vadr],
+                    self.position_warnings, kind="applied torque")
+        if self.reason is None and self.ended_at is None and self.commands:
+            reason = self.thrash_detector.observe(dq, self.sim_time)
+            if reason:
+                return (reason, deepcopy(self.thrash_detector.event))
+        return None
+
+    def _finish_step(self, violation):
         self.steps += 1
         if violation is None and self.plant.fallen() and not self.uses_hardware:
             violation = ("fall", {"height": self.plant.state()["height"]})
