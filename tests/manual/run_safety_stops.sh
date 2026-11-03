@@ -12,6 +12,7 @@ source /opt/ros/foxy/setup.bash
 export CYCLONEDDS_HOME="${CYCLONEDDS_HOME:-/home/unitree/cyclonedds_ws/install/cyclonedds}"
 export LD_LIBRARY_PATH="$CYCLONEDDS_HOME/lib:${LD_LIBRARY_PATH:-}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTRTPS_DEFAULT_PROFILES_FILE="$repo_dir/ros2/fastdds_localhost_udp.xml"
 export ROS_DOMAIN_ID=97
 export ROS_LOCALHOST_ONLY=1
 export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"

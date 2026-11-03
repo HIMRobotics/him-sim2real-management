@@ -98,7 +98,7 @@ if [[ -z "$runtime" ]]; then
   fi
 fi
 if [[ "$runtime" == docker && "${EUID}" -ne 0 && ! -w /var/run/docker.sock ]]; then
-  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_LIMIT_MODE,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_SERVICE_SETTLE_SECS,G1_SESSION_SETTLE_SECS,G1_LIMIT_MODE,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
 fi
 if [[ "$stopping" -eq 1 ]]; then
   stop_container
@@ -225,6 +225,7 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
 fi
 export ROS_DOMAIN_ID="${G1_POLICY_ROS_DOMAIN:-98}" ROS_LOCALHOST_ONLY=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTRTPS_DEFAULT_PROFILES_FILE="$repo_dir/ros2/fastdds_localhost_udp.xml"
 log_dir="${G1_RUN_LOG:-$repo_dir/.cache/hardware_runs/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$log_dir"
 { git -C "$repo_dir" rev-parse HEAD; sha256sum "$profile"; "$runtime" image inspect "$image" --format '{{.Id}}'; } > "$log_dir/configuration.txt"
@@ -241,8 +242,38 @@ stop_session_nodes() {
       *safety_node\ checker*|*safety_node\ controller_stop*|*safety_node\ feedback*)
         kill -KILL "$pid" 2>/dev/null || true
         ;;
+      # A session gate (dry run or no service) runs from this repo; the
+      # service's gate runs from the safety install and is left alone.
+      *"$repo_dir/ros2/him_safety_nodes/scripts/safety_node hardware_gate"*)
+        kill -KILL "$pid" 2>/dev/null || true
+        ;;
     esac
   done < <(ps -ww -u "$node_user" -o pid=,args=)
+}
+# A new session takes over: an older setup.sh would otherwise clean up by user
+# and kill this session's nodes and container when its own container goes.
+stop_previous_sessions() {
+  local pid ancestors=" " older=() _attempt
+  pid=$$
+  while [[ -n "$pid" && "$pid" != 0 && "$pid" != 1 ]]; do
+    ancestors+="$pid "
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  done
+  # Subshells of this script ($(...), <(...)) carry its command line too.
+  while read -r pid ppid args; do
+    [[ "$ancestors" == *" $pid "* || "$ppid" == $$ ]] && continue
+    case "$args" in
+      *"bash $repo_dir/setup.sh"*|*"bash ./setup.sh"*|*"bash setup.sh"*) older+=("$pid") ;;
+    esac
+  done < <(ps -ww -eo pid=,ppid=,args=)
+  [[ ${#older[@]} -gt 0 ]] || return 0
+  echo "Taking over from the previous session (setup.sh pid ${older[*]})." >&2
+  kill -TERM "${older[@]}" 2>/dev/null || true
+  for _attempt in $(seq 1 50); do
+    kill -0 "${older[@]}" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  kill -KILL "${older[@]}" 2>/dev/null || true
 }
 cleanup() {
   trap - EXIT INT TERM
@@ -306,6 +337,7 @@ if value and value != "null":
     print(value)
 '
 }
+stop_previous_sessions
 stop_session_nodes
 for _attempt in 1 2 3 4 5; do
   if ! ps -ww -u "${host_user:-${SUDO_USER:-unitree}}" -o args= | grep -E 'safety_node (checker|controller_stop|feedback)' >/dev/null; then
@@ -360,6 +392,9 @@ print("0" if same else "1")
     echo "Previous stop: $latched_reason" >> "$log_dir/configuration.txt"
     safety_systemctl restart g1-safety-stops.service
     wait_for_safety_service
+    # The fresh gate warms its startup policy and queries the stock mode;
+    # session nodes started inside that window saw rt/lowstate gaps >0.2 s.
+    sleep "${G1_SERVICE_SETTLE_SECS:-3}"
     current_gate=""
     for _attempt in 1 2 3 4 5; do
       current_gate="$(read_gate_status)"
@@ -384,28 +419,53 @@ raise SystemExit(0 if (
     exit 2
   fi
 fi
-launch_node checker -p "thrash.mode:=$thrash"
-launch_node controller_stop -p startup_timeout_secs:=5.0
-feedback_args=(
-  -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
-  -p "hardware_profile_path:=$profile"
-  -p publish_policy_state:=true -p "require_base_state:=${G1_REQUIRE_BASE_STATE:-true}"
-)
-if [[ -n "${G1_BASE_STATE_TOPIC:-}" ]]; then
-  feedback_args+=(
-    -p "base_state_topic:=${G1_BASE_STATE_TOPIC}"
-    -p "base_velocity_frame:=${G1_BASE_VELOCITY_FRAME:?G1_BASE_VELOCITY_FRAME must be world or body}"
-  )
-fi
-launch_node feedback "${feedback_args[@]}"
-if [[ "${G1_USE_SAFETY_SERVICE:-}" != 1 ]]; then
-  launch_node hardware_gate -p "enable_hardware_output:=$enabled" -p "dry_run:=$dry_run" \
-    -p whole_body_output:=true -p "hardware_profile_path:=$profile" \
-    -p "launch_gate:=${G1_LAUNCH_GATE:-false}" \
-    -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
-    -p "limit_mode:=${G1_LIMIT_MODE:-stop}" \
+start_session_nodes() {
+  launch_node checker -p "thrash.mode:=$thrash"
+  launch_node controller_stop -p startup_timeout_secs:=5.0
+  feedback_args=(
     -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
-fi
+    -p "hardware_profile_path:=$profile"
+    -p publish_policy_state:=true -p "require_base_state:=${G1_REQUIRE_BASE_STATE:-true}"
+  )
+  if [[ -n "${G1_BASE_STATE_TOPIC:-}" ]]; then
+    feedback_args+=(
+      -p "base_state_topic:=${G1_BASE_STATE_TOPIC}"
+      -p "base_velocity_frame:=${G1_BASE_VELOCITY_FRAME:?G1_BASE_VELOCITY_FRAME must be world or body}"
+    )
+  fi
+  launch_node feedback "${feedback_args[@]}"
+  if [[ "${G1_USE_SAFETY_SERVICE:-}" != 1 ]]; then
+    launch_node hardware_gate -p "enable_hardware_output:=$enabled" -p "dry_run:=$dry_run" \
+      -p whole_body_output:=true -p "hardware_profile_path:=$profile" \
+      -p "launch_gate:=${G1_LAUNCH_GATE:-false}" \
+      -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
+      -p "limit_mode:=${G1_LIMIT_MODE:-stop}" \
+      -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
+  fi
+}
+# One retry budget for startup races (a stalled rt/lowstate right after a
+# service reload latches a 0.2 s timeout before the session arms).
+for attempt in 1 2 3; do
+  start_session_nodes
+  sleep "${G1_SESSION_SETTLE_SECS:-2}"
+  latched="$(grep -ho 'Abort latched: [a-z_]*' "$log_dir"/checker.log "$log_dir"/controller_stop.log \
+    "$log_dir"/feedback.log "$log_dir"/hardware_gate.log 2>/dev/null | head -1 || true)"
+  [[ -z "$latched" ]] && break
+  for role in checker controller_stop feedback hardware_gate; do
+    if [[ -f "$log_dir/$role.log" ]]; then
+      mv "$log_dir/$role.log" "$log_dir/$role.attempt$attempt.log"
+    fi
+  done
+  stop_session_nodes
+  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  pids=()
+  if [[ "$attempt" -eq 3 ]]; then
+    echo "Session nodes latched at startup three times (${latched}). No policy session started." >&2
+    exit 2
+  fi
+  echo "Session nodes latched at startup (${latched}); restarting them." >&2
+  sleep 1
+done
 stop_container
 if [[ "$mode" != hardware ]]; then
   echo "Starting $image as $container_name. Mode: $mode. Logs: $log_dir."
