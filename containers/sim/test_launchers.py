@@ -16,7 +16,7 @@ from runner import LAUNCH_SECONDS  # noqa: E402
 
 @pytest.mark.parametrize("name", ["G1_SIM_THRASH_MODE", "G1_SIM_LIMIT_MODE",
                                   "G1_SIM_LOCKSTEP", "G1_SIM_HANDOFF_SECONDS",
-                                  "G1_JOINT_PROFILE"])
+                                  "G1_SIM_EXTENSION_CONFIG", "G1_JOINT_PROFILE"])
 def test_both_backends_pass_sim_settings_to_the_bridge(name):
     namespace = (ROOT / "containers/sim/namespace.sh").read_text()
     preserved = namespace.split("--preserve-env=", 1)[1].split()[0].split(",")

@@ -1,7 +1,9 @@
 """MuJoCo G1 used as the plant behind a container submission."""
 
 import importlib.util
+import json
 import math
+import os
 import tempfile
 from pathlib import Path
 
@@ -39,6 +41,18 @@ def load_model(scene=None):
         return mujoco.MjModel.from_xml_path(scene.name)
 
 
+def extension_config():
+    """G1_SIM_EXTENSION_CONFIG as a dict ({} when unset)."""
+    text = os.environ.get("G1_SIM_EXTENSION_CONFIG") or "{}"
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"G1_SIM_EXTENSION_CONFIG is not JSON: {error}") from None
+    if not isinstance(value, dict):
+        raise ValueError("G1_SIM_EXTENSION_CONFIG must be a JSON object")
+    return value
+
+
 def load_extension(plant):
     """The scene's extension, or None.
 
@@ -47,6 +61,7 @@ def load_extension(plant):
     returns None or an object with reset(), step(dt, time) after every physics
     step, state() whose keys are added to the policy state, and report() for
     the run report. The file runs in the simulator process.
+    plant.extension_config holds the run's settings for it.
     """
     model = plant.model
     text = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_TEXT, "sim_extension")
@@ -156,6 +171,7 @@ class Plant:
         self.check_fall = self.fall_enabled
         self._push = None
         self.extension = None
+        self.extension_config = extension_config()
         self.reset(pose)
         self.extension = load_extension(self)
 

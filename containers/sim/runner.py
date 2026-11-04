@@ -358,6 +358,7 @@ class Runner:
             "thrash": self._thrash_snapshot(),
             "extension": (self.plant.extension.report()
                           if self.plant.extension is not None else None),
+            "extension_config": self.plant.extension_config,
         }
 
     def _thrash_snapshot(self):

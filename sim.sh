@@ -18,7 +18,7 @@ fi
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'HELP'
-Usage: ./sim.sh [--image NAME] [--scene PATH] [--seconds N]
+Usage: ./sim.sh [--image NAME] [--scene PATH] [--extension-config JSON] [--seconds N]
                 [--safety-checks | --no-safety-checks]
                 [--pose NAME | --counterfactuals] [--self-test] [--circle]
                 [--command FILE] [--view]
@@ -33,6 +33,9 @@ Desktop --self-test and --circle run locally without ROS or Docker.
 
 --scene PATH        Load a host-side MuJoCo XML scene and its relative assets.
                     Default: the bundled G1 on a flat floor.
+--extension-config JSON
+                    JSON object handed to the scene's sim_extension as
+                    plant.extension_config (G1_SIM_EXTENSION_CONFIG).
 --safety-checks     Enable safety checks (default).
 --no-safety-checks  Disable safety limits, freshness/timeouts, and fall checks.
                     Message format and finite-value validation still apply.
@@ -225,6 +228,7 @@ while [[ $# -gt 0 ]]; do
     --safety-checks) safety_checks=1; safety_set=1; shift ;;
     --no-safety-checks) safety_checks=0; safety_set=1; shift ;;
     --lockstep) export G1_SIM_LOCKSTEP=1; shift ;;
+    --extension-config) export G1_SIM_EXTENSION_CONFIG="${2:?--extension-config needs a JSON object}"; shift 2 ;;
     --example) example_arg="${2:?--example needs a name}"; example="$example_arg"; shift 2 ;;
     --local) local_mode=1; shift ;;
     --scenario) scenario="${2:?--scenario needs a name}"; shift 2 ;;

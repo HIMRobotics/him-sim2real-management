@@ -413,7 +413,10 @@ The plant runs that file in the simulator process and calls its
 - `report()`: a JSON-ready dict stored as the run report's `extension`.
 
 `plant.model`, `plant.data`, `plant.scene` and `plant.robot_geoms` (the G1's
-geoms) are available to it. The file needs only the simulator's Python
+geoms) are available to it, and `plant.extension_config`: the JSON object from
+`--extension-config` (`G1_SIM_EXTENSION_CONFIG`), `{}` without it, for
+per-run settings such as a scene's materials. The run report records it as
+`extension_config`. The file needs only the simulator's Python
 packages (NumPy, MuJoCo). Desktop runs mount only this repository, so keep the
 scene, its extension and its assets under it, for example in
 `containers/upload/`.

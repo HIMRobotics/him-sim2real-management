@@ -247,6 +247,22 @@ def attach(plant):
         prop = next(g for g in motion["geoms"] if g["name"] == "prop_geom")
         self.assertGreater(prop["poses"][-1][9], 3.0)
 
+    def test_scene_extension_receives_run_config(self):
+        self.add_extension(self.MOVER.replace(
+            "self.resets += 1", "self.resets += 1\n        self.speed = self.plant.extension_config['speed']"))
+        with patch.dict(os.environ, {"G1_SIM_EXTENSION_CONFIG": '{"speed": 2.5}'}):
+            runner = Runner(scene=self.scene, safety_checks=False)
+            runner.plant.reset()
+        self.assertEqual(runner.plant.extension.speed, 2.5)
+        with patch.dict(os.environ, {"G1_SIM_TRACE": str(self.root / "trace.npz")}):
+            self.assertEqual(runner.report()["extension_config"], {"speed": 2.5})
+        with patch.dict(os.environ, {"G1_SIM_EXTENSION_CONFIG": ""}):
+            self.assertEqual(Plant(scene=self.scene).extension_config, {})
+        for bad, message in (("{speed", "not JSON"), ("[1]", "JSON object")):
+            with patch.dict(os.environ, {"G1_SIM_EXTENSION_CONFIG": bad}):
+                with self.assertRaisesRegex(ValueError, message):
+                    Plant(scene=self.scene)
+
     def test_scene_extension_errors_and_opt_out(self):
         self.add_extension(self.MOVER.replace('{"prop"', '{"q"'))
         with self.assertRaisesRegex(ValueError, r"replace \['q'\]"):
