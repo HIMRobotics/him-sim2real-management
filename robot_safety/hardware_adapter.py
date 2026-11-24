@@ -63,6 +63,16 @@ from .startup_balance import StartupBalance
 # Python hands the interpreter to a waiting thread only this often. The
 # default 5 ms turns the 2 ms refresh into about 170 Hz.
 INTERPRETER_SWITCH_SECS = 0.001
+# Opt-in output_on_command: a new policy command is checked and written when the
+# gate hands it over instead of at the next 20 ms tick. Policy states are
+# sampled at least 17.5 ms apart, so a 15 ms floor between command-driven steps
+# passes on-time commands (publish and inference jitter can hold one a few ms)
+# and holds a flooding container to about 67 command-driven steps a second.
+COMMAND_STEP_MIN_SECS = 0.75 * HARDWARE_PERIOD_SECS
+# After a command-driven step, the timer rewrites the held command only if no new
+# command arrives within one period plus one state poll of policy jitter. Without
+# a running policy (startup, recovery, stops) the timer keeps the 20 ms period.
+COMMAND_FALLBACK_SLACK_SECS = STATE_POLL_SECS
 # These stops cannot rely on the recovery output worker or explicitly request damping.
 DAMP_ONLY_REASONS = frozenset({
     "controller_double_start", "hardware_controller_double_start", "controller_stop",
@@ -88,9 +98,17 @@ class G1HardwareAdapter:
     """Apply approved motor commands and handle recovery or damping."""
 
     def __init__(self, profile, clock=time.monotonic, *, whole_body=False,
-                 launch_gate=False, stance_blend_secs=5.0, limit_mode="stop"):
+                 launch_gate=False, stance_blend_secs=5.0, limit_mode="stop",
+                 output_on_command=False):
         self.profile = profile
         self.whole_body = whole_body
+        # The default keeps the existing behaviour. output_on_command only
+        # changes when the single output worker runs a step, never what it checks.
+        if not isinstance(output_on_command, bool):
+            raise TypeError("output_on_command must be true or false")
+        self.output_on_command = output_on_command
+        self.output_wake = Event()
+        self._command_wakes = 0
         # "clip" keeps the 90% torque-target projection but records torque above
         # the profile ceiling and base spin above the gyro limit as warnings
         # instead of stopping. Every other check still stops.
@@ -472,6 +490,7 @@ class G1HardwareAdapter:
         self.applied_gains = {}
         self.policy_launched = False if self.whole_body else not self.launch_gate
         self.launch_requested = False
+        self._woken_sequence = None
 
     def reject_arm(self, reason):
         """Record the failed readiness check without changing motor settings."""
@@ -548,6 +567,9 @@ class G1HardwareAdapter:
                         "armed": self.armed, "request_damping": request_damping,
                         "buffer_preserved": bool(soft_balance and self.soft_reset_active),
                     })
+        if first_fault and self.output_on_command:
+            # Let a waiting command-driven worker drop back to the plain 20 ms period.
+            self.output_wake.set()
         if first_fault and self.trace is not None:
             try:
                 self.trace.emit_abort(reason, self.clock())
@@ -576,6 +598,14 @@ class G1HardwareAdapter:
             self.command = deepcopy(command)
             self.command_expires_secs = expires_at_secs
             self.last_submission_secs = now
+            # The gate resubmits the same command every 5 ms. Only a new sequence
+            # from a running policy wakes the output worker.
+            sequence = command.get("seq") if isinstance(command, dict) else None
+            if (self.output_on_command and self.policy_launched
+                    and sequence is not None and sequence != self._woken_sequence):
+                self._woken_sequence = sequence
+                self._command_wakes += 1
+                self.output_wake.set()
 
     @profiled("hardware_adapter.step")
     def step(self):
@@ -1334,6 +1364,38 @@ class G1HardwareAdapter:
                 next_tick = time.monotonic() + HARDWARE_PERIOD_SECS
                 self.step()
 
+        def command_output_loop():
+            # The same single worker and step(), started early by a new policy
+            # command. Without one it is output_loop's 20 ms timer.
+            handled = self._command_wakes
+            last_step = time.monotonic()
+            last_command_step = None
+            while not self.shutdown_requested.is_set():
+                self.output_wake.clear()
+                now = time.monotonic()
+                fresh = self._command_wakes != handled
+                earliest = (now if last_command_step is None
+                            else last_command_step + COMMAND_STEP_MIN_SECS)
+                deadline = last_step + HARDWARE_PERIOD_SECS
+                if (last_command_step is not None and self.policy_launched
+                        and self.abort_reason is None and not self.stop_requested.is_set()):
+                    deadline = max(deadline, last_command_step + HARDWARE_PERIOD_SECS
+                                   + COMMAND_FALLBACK_SLACK_SECS)
+                if fresh and now >= earliest:
+                    handled = self._command_wakes
+                    last_step = last_command_step = now
+                elif now >= deadline:
+                    last_step = now
+                else:
+                    wait = deadline - now
+                    if fresh:
+                        wait = min(wait, earliest - now)
+                    timed_wait(self, self.output_wake, wait, now + wait, "output_timer")
+                    continue
+                if self.shutdown_requested.is_set():
+                    return
+                self.step()
+
         def body_repeat_loop():
             # Every whole-body policy uses this bus: GR00T, Holosoma,
             # and the container policy after left and B. Inference stays in
@@ -1386,7 +1448,8 @@ class G1HardwareAdapter:
                     last_request_secs = self.clock()
 
         self.workers = [
-            Thread(target=output_loop, name="policy_output", daemon=True),
+            Thread(target=command_output_loop if getattr(self, "output_on_command", False)
+                   else output_loop, name="policy_output", daemon=True),
             Thread(target=stop_loop, name="stop_watchdog", daemon=True),
         ]
         self.workers.append(Thread(target=body_repeat_loop, name="command_resend", daemon=True))
@@ -1394,6 +1457,12 @@ class G1HardwareAdapter:
             print(
                 "Whole-body rt/lowcmd refreshes every 2 ms. "
                 "Policy inference stays at 20 ms.",
+                flush=True,
+            )
+        if getattr(self, "output_on_command", False):
+            print(
+                "output_on_command: a new policy command is checked and written on arrival; "
+                "the 20 ms timer still runs every check without one.",
                 flush=True,
             )
         for worker in self.workers:
@@ -1439,6 +1508,7 @@ class G1HardwareAdapter:
             time.sleep(HARDWARE_PERIOD_SECS)
             self._request_stock_damping()
         self.shutdown_requested.set()
+        self.output_wake.set()
         for worker in self.workers:
             worker.join(timeout=SHUTDOWN_WAIT_SECS)
         if self.trace is not None:

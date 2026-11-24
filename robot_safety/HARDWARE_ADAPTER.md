@@ -315,8 +315,11 @@ Required fields:
   `kp` and `kd`, and maximum velocity.
 
 The adapter's feedback deadline is 200 ms. Its output cadence targets 20 ms, matching the operator-tested SDK example.
-The control trace keeps each step as its latest record before the SDK write and prints its line
-after the write and the applied-target bookkeeping, outside the lock the 2 ms resend uses.
+With `output_on_command`, a new command from a launched policy is checked and written on arrival,
+with command-driven steps at least 15 ms apart; without one, the worker rewrites the held command
+25 ms after the last command-driven step and then every 20 ms. The control trace keeps each step
+as its latest record before the SDK write and prints its line after the write and the applied-target
+bookkeeping, outside the lock the 2 ms resend uses.
 The separate stop watchdog polls every 5 ms.
 Stop-worker RPC calls have a 100 ms SDK timeout, with retries no sooner than 100 ms after the
 previous attempt completes. These are software settings, not physical stop-time

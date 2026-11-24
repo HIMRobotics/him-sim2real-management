@@ -18,6 +18,13 @@ export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export HIM_BALANCE_ONNX="${HIM_BALANCE_ONNX:-$repo_dir/containers/examples/policies/walker/balance.onnx}"
 export G1_STARTUP_POLICY="${G1_STARTUP_POLICY:-groot}"
+case "${G1_OUTPUT_ON_COMMAND:-false}" in
+  true|1) output_on_command=true ;;
+  false|0) output_on_command=false ;;
+  *) echo "G1_OUTPUT_ON_COMMAND must be true or false." >&2; exit 2 ;;
+esac
+# Typed value for the ROS parameter: a bool.
+export G1_OUTPUT_ON_COMMAND="$output_on_command"
 
 mkdir -p "$install_base"
 colcon --log-base "$HOME/.him-safety/ros-log" build --base-paths ros2 \
@@ -32,6 +39,7 @@ exec ros2 run him_safety_nodes safety_node hardware_gate --ros-args \
     -p launch_gate:=true \
     -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
     -p "limit_mode:=${G1_LIMIT_MODE:-stop}" \
+    -p "output_on_command:=${G1_OUTPUT_ON_COMMAND:-false}" \
     -p "hardware_profile_path:=$profile" \
     -p sdk_interface:=eth0 \
     -p sdk_domain:=0

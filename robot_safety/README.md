@@ -73,6 +73,20 @@ check, including tilt and standing posture, still stops and recovers. The node
 logs a warning at startup and reports `limit_mode` in hardware status.
 `G1_SIM_LIMIT_MODE=clip` runs the same adapter code in the sim.
 
+`G1_OUTPUT_ON_COMMAND=true` (the `output_on_command` parameter of `hardware_gate`;
+default `false`) is opt-in and cuts command latency without changing any check.
+The gate hands a newly accepted command to the adapter on arrival instead of on
+its next 5 ms cycle, and the adapter's single output worker checks and writes it
+at once instead of at its next 20 ms tick. Only a new command sequence from a
+launched policy does this; startup balance, recovery and stops keep the 20 ms
+period. Command-driven steps are at least 15 ms apart, so a container that floods
+commands gets at most about 67 command-driven steps a second. Without a new
+command the worker rewrites the held one 25 ms after the last command-driven
+step, then every 20 ms, with every check, so a late or silent policy still meets
+the same expiry, stall and health checks. A late command can follow such a
+rewrite directly. The gate's own 5 ms cycle, loop watchdog and status are
+unchanged.
+
 Double Start always requests damping. Invalid or stale telemetry, unavailable
 recovery, failed motor output, output-worker stalls and service shutdown use
 damping. Recovery also falls back to damping if inference/output fails.
