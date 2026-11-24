@@ -37,6 +37,11 @@ class ControlTrace:
         self.path = Path(path)
         self.period = period
         self.lock = Lock()
+        # Printing and the file write happen under io_lock after self.lock is
+        # released, so the 2 ms resend's note_repeat does not wait for the journal
+        # or the disk, except while a second line queues behind one being written.
+        # io_lock is always taken after self.lock, which keeps lines in order.
+        self.io_lock = Lock()
         self.file = None
         self.last_emit = None
         self.last = None
@@ -153,6 +158,11 @@ class ControlTrace:
                 self.gate_gap = now - self.gate_last
             self.gate_last = now
 
+    def remember(self, record):
+        """Hold ``record`` as the latest step for emit_abort, before its SDK write."""
+        with timed_lock(self, self.lock, "control_trace.lock"):
+            self.last = record
+
     def note_step(self, record):
         with timed_lock(self, self.lock, "control_trace.lock"):
             period = record.get("step_period_s")
@@ -161,7 +171,14 @@ class ControlTrace:
                     period if self.step_period_max is None else max(self.step_period_max, period)
                 )
             self.last = record
-            self._emit(record, force=False)
+            encoded = self._emit(record, force=False)
+            if encoded is not None:
+                self.io_lock.acquire()
+        if encoded is not None:
+            try:
+                self._write(encoded)
+            finally:
+                self.io_lock.release()
 
     def emit_abort(self, reason, now):
         with timed_lock(self, self.lock, "control_trace.lock"):
@@ -169,19 +186,25 @@ class ControlTrace:
             record["abort"] = reason
             record["now"] = now
             self.last = record
-            self._emit(record, force=True)
+            encoded = self._emit(record, force=True)
+            self.io_lock.acquire()
+        try:
+            self._write(encoded)
+        finally:
+            self.io_lock.release()
 
     def close(self):
         self._diagnostic_stop.set()
         if self._diagnostic_worker is not None:
             self._diagnostic_worker.join(timeout=2.0)
-        with timed_lock(self, self.lock, "control_trace.lock"):
+        with timed_lock(self, self.lock, "control_trace.lock"), self.io_lock:
             handle = self.file
             self.file = None
         if handle is not None:
             handle.close()
 
     def _emit(self, record, force):
+        """Update the window counters and return the encoded line, or None when not due."""
         now = record.get("now")
         if (
             not force
@@ -189,7 +212,7 @@ class ControlTrace:
             and now is not None
             and now - self.last_emit < self.period
         ):
-            return
+            return None
         window = self.repeat_window
         count = self.repeat_count
         gap = self.repeat_gap_max
@@ -210,7 +233,10 @@ class ControlTrace:
         self.repeat_gap_max = 0.0
         self.repeat_window = self.repeat_last
         self.last_emit = now
-        encoded = json.dumps(line, separators=(",", ":"), allow_nan=False)
+        return json.dumps(line, separators=(",", ":"), allow_nan=False)
+
+    def _write(self, encoded):
+        """Print and append one line. The caller holds io_lock, not self.lock."""
         print(encoded, flush=True)
         if self.file is None:
             return

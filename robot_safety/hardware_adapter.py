@@ -649,8 +649,8 @@ class G1HardwareAdapter:
             except Exception as error:  # noqa: BLE001
                 self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
                 return
-        self._emit_trace()
         if self.whole_body and self.armed and self.command is not None and not self.balance_released:
+            self._emit_trace()
             if self.abort_reason or self.stop_requested.is_set():
                 return
             self.release_pending = True
@@ -690,6 +690,10 @@ class G1HardwareAdapter:
             # Start the entry blend now instead of waiting another output period.
             return self.step()
         # SDK writes must not hold the feedback lock or delay controller monitoring.
+        # The trace keeps this step as its latest record before the write, so an
+        # abort from any thread logs it. Its line is printed and flushed after the
+        # write and the applied-target bookkeeping, so that I/O delays neither.
+        self._remember_trace()
         try:
             if self.stop_requested.is_set():
                 return
@@ -697,6 +701,8 @@ class G1HardwareAdapter:
             written = (self.transport.write_body(targets, self.machine_type)
                        if self.whole_body else self.transport.write_arm(targets, weight))
             self._finish_command_diagnostic(diagnostic_record, write_started, written)
+            if not written:
+                self._emit_trace()
             with timed_lock(self, self.lock, "hardware_adapter.lock"):
                 if not written:
                     self.abort("hardware_write_failed")
@@ -717,7 +723,25 @@ class G1HardwareAdapter:
                     self.first_output_secs = now
                 self.last_output_secs = now
         except Exception as error:  # noqa: BLE001
+            self._emit_trace()
             self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
+        finally:
+            self._emit_trace()
+
+    def _remember_trace(self):
+        """Make this step the trace's latest record without writing a line."""
+        record = self._trace_record
+        remember = getattr(self.trace, "remember", None)
+        if record is None or remember is None:
+            return
+        try:
+            remember(record)
+        except Exception as error:  # noqa: BLE001 - logging must not stop the motors
+            self.trace = None
+            try:
+                print(f"Control trace failed: {error}", flush=True)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def _emit_trace(self):
         record = self._trace_record
@@ -727,8 +751,11 @@ class G1HardwareAdapter:
         try:
             self.trace.note_step(record)
         except Exception as error:  # noqa: BLE001 - logging must not stop the motors
-            print("Control trace failed: {0}".format(error), flush=True)
             self.trace = None
+            try:
+                print("Control trace failed: {0}".format(error), flush=True)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def _diagnostics_enabled(self):
         return (self.trace is not None
