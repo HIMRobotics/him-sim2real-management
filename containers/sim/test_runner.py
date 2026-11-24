@@ -610,6 +610,15 @@ class RunnerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Runner()
 
+    def test_recovery_blend_setting_reaches_the_adapter(self):
+        self.assertEqual(Runner().hardware.adapter.recovery_blend_secs, 0.0)
+        with patch.dict("os.environ", {"G1_SIM_RECOVERY_BLEND_SECS": "1.5"}):
+            runner = Runner()
+        self.assertEqual(runner.hardware.adapter.recovery_blend_secs, 1.5)
+        with patch.dict("os.environ", {"G1_SIM_RECOVERY_BLEND_SECS": "4"}):
+            with self.assertRaises(ValueError):
+                Runner()
+
     def test_measured_joint_speed_and_base_spin_trigger_hardware_damping(self):
         for base_spin in (False, True):
             with self.subTest(base_spin=base_spin):

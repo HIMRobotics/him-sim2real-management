@@ -73,6 +73,31 @@ check, including tilt and standing posture, still stops and recovers. The node
 logs a warning at startup and reports `limit_mode` in hardware status.
 `G1_SIM_LIMIT_MODE=clip` runs the same adapter code in the sim.
 
+`G1_OUTPUT_ON_COMMAND=true` (the `output_on_command` parameter of `hardware_gate`;
+default `false`) is opt-in and cuts command latency without changing any check.
+The gate hands a newly accepted command to the adapter on arrival instead of on
+its next 5 ms cycle, and the adapter's single output worker checks and writes it
+at once instead of at its next 20 ms tick. Only a new command sequence from a
+launched policy does this; startup balance, recovery and stops keep the 20 ms
+period. Command-driven steps are at least 15 ms apart, so a container that floods
+commands gets at most about 67 command-driven steps a second. Without a new
+command the worker rewrites the held one 25 ms after the last command-driven
+step, then every 20 ms, with every check, so a late or silent policy still meets
+the same expiry, stall and health checks. A late command can follow such a
+rewrite directly. The gate's own 5 ms cycle, loop watchdog and status are
+unchanged.
+
+`G1_RECOVERY_BLEND_SECS=1` (the `recovery_blend_secs` parameter; default `0`,
+at most 3) is opt-in and softens recovery after a stop in motion. Recovery then
+eases the arms from their measured pose on its first cycle (within one 20 ms
+period of the stop) onto the Holosoma output over that many seconds
+(smoothstep), instead of commanding Holosoma's pose on that first cycle. Legs
+and waist take the recovery output at once. Gains, the 90% torque budget,
+position clipping and every recovery check are unchanged.
+`G1_SIM_RECOVERY_BLEND_SECS` runs the same adapter code in the sim. Hardware
+status reports both settings, and `setup.sh` reloads the safety service when
+either changes.
+
 Double Start always requests damping. Invalid or stale telemetry, unavailable
 recovery, failed motor output, output-worker stalls and service shutdown use
 damping. Recovery also falls back to damping if inference/output fails.

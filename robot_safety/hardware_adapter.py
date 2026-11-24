@@ -23,6 +23,7 @@ from .controller import (
 from .feedback import feedback_from_sdk
 from .timing_profile import profiled, scope, timed_lock, timed_wait
 from .hardware_constants import (
+    ARM_INDICES,
     DAMPING_FSM_ID,
     G1_29_JOINT_NAMES,
     SDK_RPC_SEND_CODE,
@@ -63,6 +64,22 @@ from .startup_balance import StartupBalance
 # Python hands the interpreter to a waiting thread only this often. The
 # default 5 ms turns the 2 ms refresh into about 170 Hz.
 INTERPRETER_SWITCH_SECS = 0.001
+# Opt-in output_on_command: a new policy command is checked and written when the
+# gate hands it over instead of at the next 20 ms tick. Policy states are
+# sampled at least 17.5 ms apart, so a 15 ms floor between command-driven steps
+# passes on-time commands (publish and inference jitter can hold one a few ms)
+# and holds a flooding container to about 67 command-driven steps a second.
+COMMAND_STEP_MIN_SECS = 0.75 * HARDWARE_PERIOD_SECS
+# After a command-driven step, the timer rewrites the held command only if no new
+# command arrives within one period plus one state poll of policy jitter. Without
+# a running policy (startup, recovery, stops) the timer keeps the 20 ms period.
+COMMAND_FALLBACK_SLACK_SECS = STATE_POLL_SECS
+# Longest accepted recovery_blend_secs. Recovery holds the eased joints near
+# where it found them for this long, so it stays short.
+MAX_RECOVERY_BLEND_SECS = 3.0
+# Joints recovery_blend_secs eases. Legs and waist always take the recovery
+# policy's output at once, since they keep the robot standing.
+RECOVERY_BLEND_INDICES = ARM_INDICES
 # These stops cannot rely on the recovery output worker or explicitly request damping.
 DAMP_ONLY_REASONS = frozenset({
     "controller_double_start", "hardware_controller_double_start", "controller_stop",
@@ -88,9 +105,25 @@ class G1HardwareAdapter:
     """Apply approved motor commands and handle recovery or damping."""
 
     def __init__(self, profile, clock=time.monotonic, *, whole_body=False,
-                 launch_gate=False, stance_blend_secs=5.0, limit_mode="stop"):
+                 launch_gate=False, stance_blend_secs=5.0, limit_mode="stop",
+                 output_on_command=False, recovery_blend_secs=0.0):
         self.profile = profile
         self.whole_body = whole_body
+        # Both options default to the existing behaviour. output_on_command only
+        # changes when the single output worker runs a step, never what it checks.
+        if not isinstance(output_on_command, bool):
+            raise TypeError("output_on_command must be true or false")
+        self.output_on_command = output_on_command
+        self.output_wake = Event()
+        self._command_wakes = 0
+        if (isinstance(recovery_blend_secs, bool)
+                or not isinstance(recovery_blend_secs, (int, float))
+                or not math.isfinite(recovery_blend_secs)
+                or not 0 <= recovery_blend_secs <= MAX_RECOVERY_BLEND_SECS):
+            raise ValueError(
+                f"recovery_blend_secs must be between 0 and {MAX_RECOVERY_BLEND_SECS} seconds")
+        self.recovery_blend_secs = float(recovery_blend_secs)
+        self._recovery_entry = None
         # "clip" keeps the 90% torque-target projection but records torque above
         # the profile ceiling and base spin above the gyro limit as warnings
         # instead of stopping. Every other check still stops.
@@ -472,6 +505,7 @@ class G1HardwareAdapter:
         self.applied_gains = {}
         self.policy_launched = False if self.whole_body else not self.launch_gate
         self.launch_requested = False
+        self._woken_sequence = None
 
     def reject_arm(self, reason):
         """Record the failed readiness check without changing motor settings."""
@@ -548,6 +582,9 @@ class G1HardwareAdapter:
                         "armed": self.armed, "request_damping": request_damping,
                         "buffer_preserved": bool(soft_balance and self.soft_reset_active),
                     })
+        if first_fault and self.output_on_command:
+            # Let a waiting command-driven worker drop back to the plain 20 ms period.
+            self.output_wake.set()
         if first_fault and self.trace is not None:
             try:
                 self.trace.emit_abort(reason, self.clock())
@@ -576,6 +613,14 @@ class G1HardwareAdapter:
             self.command = deepcopy(command)
             self.command_expires_secs = expires_at_secs
             self.last_submission_secs = now
+            # The gate resubmits the same command every 5 ms. Only a new sequence
+            # from a running policy wakes the output worker.
+            sequence = command.get("seq") if isinstance(command, dict) else None
+            if (self.output_on_command and self.policy_launched
+                    and sequence is not None and sequence != self._woken_sequence):
+                self._woken_sequence = sequence
+                self._command_wakes += 1
+                self.output_wake.set()
 
     @profiled("hardware_adapter.step")
     def step(self):
@@ -649,8 +694,8 @@ class G1HardwareAdapter:
             except Exception as error:  # noqa: BLE001
                 self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
                 return
-        self._emit_trace()
         if self.whole_body and self.armed and self.command is not None and not self.balance_released:
+            self._emit_trace()
             if self.abort_reason or self.stop_requested.is_set():
                 return
             self.release_pending = True
@@ -690,6 +735,10 @@ class G1HardwareAdapter:
             # Start the entry blend now instead of waiting another output period.
             return self.step()
         # SDK writes must not hold the feedback lock or delay controller monitoring.
+        # The trace keeps this step as its latest record before the write, so an
+        # abort from any thread logs it. Its line is printed and flushed after the
+        # write and the applied-target bookkeeping, so that I/O delays neither.
+        self._remember_trace()
         try:
             if self.stop_requested.is_set():
                 return
@@ -697,6 +746,8 @@ class G1HardwareAdapter:
             written = (self.transport.write_body(targets, self.machine_type)
                        if self.whole_body else self.transport.write_arm(targets, weight))
             self._finish_command_diagnostic(diagnostic_record, write_started, written)
+            if not written:
+                self._emit_trace()
             with timed_lock(self, self.lock, "hardware_adapter.lock"):
                 if not written:
                     self.abort("hardware_write_failed")
@@ -717,7 +768,25 @@ class G1HardwareAdapter:
                     self.first_output_secs = now
                 self.last_output_secs = now
         except Exception as error:  # noqa: BLE001
+            self._emit_trace()
             self.abort(f"hardware_output_error:{type(error).__name__}: {error}")
+        finally:
+            self._emit_trace()
+
+    def _remember_trace(self):
+        """Make this step the trace's latest record without writing a line."""
+        record = self._trace_record
+        remember = getattr(self.trace, "remember", None)
+        if record is None or remember is None:
+            return
+        try:
+            remember(record)
+        except Exception as error:  # noqa: BLE001 - logging must not stop the motors
+            self.trace = None
+            try:
+                print(f"Control trace failed: {error}", flush=True)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def _emit_trace(self):
         record = self._trace_record
@@ -727,8 +796,11 @@ class G1HardwareAdapter:
         try:
             self.trace.note_step(record)
         except Exception as error:  # noqa: BLE001 - logging must not stop the motors
-            print("Control trace failed: {0}".format(error), flush=True)
             self.trace = None
+            try:
+                print("Control trace failed: {0}".format(error), flush=True)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def _diagnostics_enabled(self):
         return (self.trace is not None
@@ -1025,10 +1097,12 @@ class G1HardwareAdapter:
             if not self.soft_reset_active:
                 policy.reset()
                 self.soft_reset_active = True
+                self._recovery_entry = (self.clock(), tuple(float(value) for value in feedback.q))
                 self._note_diagnostic({
                     "event": "recovery_enter", "mono_s": time.monotonic(),
                     "automatic": self.automatic_soft_reset,
                     "latched_reason": self.abort_reason,
+                    "recovery_blend_secs": self.recovery_blend_secs,
                 })
             quat, gyro = feedback.quat, feedback.gyro
             infer_started = time.monotonic() if self._diagnostics_enabled() else None
@@ -1062,7 +1136,7 @@ class G1HardwareAdapter:
             )
             with scope(self, "recovery_target_checks"):
                 targets = checked_targets(
-                    {"q": q, "dq": [0.0] * 29, "tau": [0.0] * 29},
+                    {"q": self._recovery_blend(q), "dq": [0.0] * 29, "tau": [0.0] * 29},
                     entries, feedback.q, feedback.dq, initial=False,
                     initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
                     warnings=self.position_warnings,
@@ -1107,6 +1181,26 @@ class G1HardwareAdapter:
                 self.automatic_soft_reset = False
             self.transport.clear_body()
             self._request_stock_damping()
+
+    def _recovery_blend(self, q):
+        """Ease the arms from where recovery found them onto its output.
+
+        With recovery_blend_secs 0 this returns the policy output unchanged. Legs
+        and waist always take the recovery policy's output at once, since they
+        keep the robot standing. The blend only moves targets; checked_targets
+        still clips them to the joint and torque envelope.
+        """
+        if self.recovery_blend_secs <= 0.0 or self._recovery_entry is None:
+            return q
+        started, pose = self._recovery_entry
+        alpha = min(1.0, max(0.0, (self.clock() - started) / self.recovery_blend_secs))
+        if alpha >= 1.0:
+            return q
+        alpha = alpha * alpha * (3 - 2 * alpha)
+        blended = [float(value) for value in q]
+        for index in RECOVERY_BLEND_INDICES:
+            blended[index] = (1.0 - alpha) * pose[index] + alpha * blended[index]
+        return blended
 
     def _ensure_soft_reset_policy(self):
         """Prime a dedicated Holosoma recovery policy before motor ownership."""
@@ -1307,6 +1401,38 @@ class G1HardwareAdapter:
                 next_tick = time.monotonic() + HARDWARE_PERIOD_SECS
                 self.step()
 
+        def command_output_loop():
+            # The same single worker and step(), started early by a new policy
+            # command. Without one it is output_loop's 20 ms timer.
+            handled = self._command_wakes
+            last_step = time.monotonic()
+            last_command_step = None
+            while not self.shutdown_requested.is_set():
+                self.output_wake.clear()
+                now = time.monotonic()
+                fresh = self._command_wakes != handled
+                earliest = (now if last_command_step is None
+                            else last_command_step + COMMAND_STEP_MIN_SECS)
+                deadline = last_step + HARDWARE_PERIOD_SECS
+                if (last_command_step is not None and self.policy_launched
+                        and self.abort_reason is None and not self.stop_requested.is_set()):
+                    deadline = max(deadline, last_command_step + HARDWARE_PERIOD_SECS
+                                   + COMMAND_FALLBACK_SLACK_SECS)
+                if fresh and now >= earliest:
+                    handled = self._command_wakes
+                    last_step = last_command_step = now
+                elif now >= deadline:
+                    last_step = now
+                else:
+                    wait = deadline - now
+                    if fresh:
+                        wait = min(wait, earliest - now)
+                    timed_wait(self, self.output_wake, wait, now + wait, "output_timer")
+                    continue
+                if self.shutdown_requested.is_set():
+                    return
+                self.step()
+
         def body_repeat_loop():
             # Every whole-body policy uses this bus: GR00T, Holosoma,
             # and the container policy after left and B. Inference stays in
@@ -1359,7 +1485,8 @@ class G1HardwareAdapter:
                     last_request_secs = self.clock()
 
         self.workers = [
-            Thread(target=output_loop, name="policy_output", daemon=True),
+            Thread(target=command_output_loop if getattr(self, "output_on_command", False)
+                   else output_loop, name="policy_output", daemon=True),
             Thread(target=stop_loop, name="stop_watchdog", daemon=True),
         ]
         self.workers.append(Thread(target=body_repeat_loop, name="command_resend", daemon=True))
@@ -1367,6 +1494,12 @@ class G1HardwareAdapter:
             print(
                 "Whole-body rt/lowcmd refreshes every 2 ms. "
                 "Policy inference stays at 20 ms.",
+                flush=True,
+            )
+        if getattr(self, "output_on_command", False):
+            print(
+                "output_on_command: a new policy command is checked and written on arrival; "
+                "the 20 ms timer still runs every check without one.",
                 flush=True,
             )
         for worker in self.workers:
@@ -1412,6 +1545,7 @@ class G1HardwareAdapter:
             time.sleep(HARDWARE_PERIOD_SECS)
             self._request_stock_damping()
         self.shutdown_requested.set()
+        self.output_wake.set()
         for worker in self.workers:
             worker.join(timeout=SHUTDOWN_WAIT_SECS)
         if self.trace is not None:

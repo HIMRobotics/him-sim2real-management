@@ -125,6 +125,11 @@ stops. Everything else the adapter checks still stops and hands over to
 recovery: command, timing and joint-speed limits, tilt and standing posture,
 arming. The default `stop` enforces both limits.
 
+`G1_SIM_RECOVERY_BLEND_SECS=1` runs recovery with `recovery_blend_secs=1`, the
+setting the robot gets from `G1_RECOVERY_BLEND_SECS` (see `robot_safety/README.md`):
+the arms ease from their pose on recovery's first cycle onto the Holosoma output
+over one second.
+
 On Docker Compose, a single run without `--view` whose stop the bridge flags as
 inconclusive (`host_stall` in the report) restarts Docker Desktop and reruns.
 `G1_SIM_STALL_RETRIES` sets the number of reruns (default 1, 0 disables).

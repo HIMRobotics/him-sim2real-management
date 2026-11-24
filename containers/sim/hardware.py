@@ -58,12 +58,13 @@ class SimTransport:
 class SimHardware:
     """Run adapter callbacks synchronously on the simulation clock."""
 
-    def __init__(self, plant, profile, limit_mode="stop"):
+    def __init__(self, plant, profile, limit_mode="stop", recovery_blend_secs=0.0):
         self.plant = plant
         self.transport = SimTransport(plant)
         self.adapter = G1HardwareAdapter(HardwareProfile.load(profile),
                                          clock=lambda: float(plant.data.time), whole_body=True,
-                                         limit_mode=limit_mode)
+                                         limit_mode=limit_mode,
+                                         recovery_blend_secs=recovery_blend_secs)
         self.adapter.transport = self.transport
         self.recovery_at = None
         self.recovery_writes = 0

@@ -17,6 +17,7 @@ from .hardware_profile import (
     READINESS_RPC_TIMEOUT_SECS,
     HardwareProfile,
 )
+from .core import SupervisorPhase
 from .motor_gate import MotorCommandGate
 from .ros_nodes import MotorGateNode
 from .unitree_transport import UnitreeArmTransport
@@ -43,6 +44,8 @@ class HardwareMotorGateNode(MotorGateNode):
         launch_gate = self.declare_parameter("launch_gate", False).value
         stance_blend_secs = self.declare_parameter("stance_blend_secs", 5.0).value
         limit_mode = self.declare_parameter("limit_mode", "stop").value
+        output_on_command = self.declare_parameter("output_on_command", False).value
+        recovery_blend_secs = self.declare_parameter("recovery_blend_secs", 0.0).value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
@@ -71,6 +74,8 @@ class HardwareMotorGateNode(MotorGateNode):
             profile, whole_body=whole_body,
             launch_gate=_as_bool(launch_gate),
             stance_blend_secs=float(stance_blend_secs), limit_mode=limit_mode,
+            output_on_command=_as_bool(output_on_command),
+            recovery_blend_secs=float(recovery_blend_secs),
         )
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state, self.adapter.receive_battery,
@@ -87,6 +92,37 @@ class HardwareMotorGateNode(MotorGateNode):
                 "limit_mode=clip: torque above the profile ceiling and base spin above "
                 "the gyro limit are warnings, not stops."
             )
+        if self.adapter.output_on_command:
+            self.get_logger().info(
+                "output_on_command: new policy commands are handed to the adapter on arrival."
+            )
+        if self.adapter.recovery_blend_secs > 0:
+            self.get_logger().info(
+                f"recovery_blend_secs={self.adapter.recovery_blend_secs:g}: recovery eases the "
+                "arms from their pose when recovery starts."
+            )
+
+    def on_postcheck(self, message):
+        """With output_on_command, hand a newly accepted command to the adapter now.
+
+        Only the forward: the gate's own cycle(), its loop-progress stamp, abort
+        forwarding and status stay on the 5 ms timer. receive() has just checked
+        the gate's deadlines, and submit() checks the original expiry again.
+        """
+        super().on_postcheck(message)
+        adapter = self.adapter
+        gate = self.motor_gate
+        if (
+            adapter is None
+            or not adapter.output_on_command
+            or gate.abort_reason
+            or gate.supervisor_phase != SupervisorPhase.RUNNING
+            or gate.last_checked_command is None
+            or adapter.abort_reason
+            or adapter.damp_settled
+        ):
+            return
+        adapter.submit(dict(gate.last_checked_command, kind="policy"), gate.time_command_expires_secs)
 
     def notify_startup_ready(self):
         """Report startup readiness only after warmup and fresh released buttons."""
@@ -280,6 +316,8 @@ class HardwareMotorGateNode(MotorGateNode):
                 "hardware_output_enabled": self.output_enabled,
                 "whole_body_output": self.adapter.whole_body,
                 "limit_mode": self.adapter.limit_mode,
+                "output_on_command": self.adapter.output_on_command,
+                "recovery_blend_secs": self.adapter.recovery_blend_secs,
                 "startup_policy": self.adapter.startup_policy_name,
                 "soft_reset_policy": "holosoma",
                 "automatic_soft_reset": self.adapter.automatic_soft_reset,
