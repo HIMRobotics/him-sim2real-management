@@ -100,7 +100,11 @@ class Runner:
         self.limit_mode = os.environ.get("G1_SIM_LIMIT_MODE") or "stop"
         if self.limit_mode not in ("stop", "clip"):
             raise ValueError("G1_SIM_LIMIT_MODE must be stop or clip")
-        self.hardware = (SimHardware(self.plant, self.rules.path, self.limit_mode)
+        # Same setting as the hardware adapter's recovery_blend_secs
+        # (G1_RECOVERY_BLEND_SECS on the robot). Empty or 0 keeps today's recovery.
+        self.recovery_blend_secs = float(os.environ.get("G1_SIM_RECOVERY_BLEND_SECS") or 0.0)
+        self.hardware = (SimHardware(self.plant, self.rules.path, self.limit_mode,
+                                     recovery_blend_secs=self.recovery_blend_secs)
                          if self.safety_checks and control_path == "submission" else None)
         self.startup = self.hardware.adapter.startup if self.hardware else StartupBalance()
         if not self.hardware:

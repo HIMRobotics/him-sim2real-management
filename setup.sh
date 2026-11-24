@@ -76,8 +76,15 @@ case "${G1_OUTPUT_ON_COMMAND:-false}" in
   false|0) output_on_command=false ;;
   *) echo "G1_OUTPUT_ON_COMMAND must be true or false." >&2; exit 2 ;;
 esac
-# Typed value for the ROS parameter: a bool.
+recovery_blend_secs="${G1_RECOVERY_BLEND_SECS:-0}"
+if ! [[ "$recovery_blend_secs" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+    || ! awk -v value="$recovery_blend_secs" 'BEGIN { exit !(value + 0 <= 3) }'; then
+  echo "G1_RECOVERY_BLEND_SECS must be seconds from 0 to 3." >&2; exit 2
+fi
+# Typed values for the ROS parameters: a bool and a double.
 export G1_OUTPUT_ON_COMMAND="$output_on_command"
+G1_RECOVERY_BLEND_SECS="$(LC_ALL=C awk -v value="$recovery_blend_secs" 'BEGIN { printf "%.3f", value + 0 }')"
+export G1_RECOVERY_BLEND_SECS
 if [[ "$mode" == hardware && "$enabled" != true ]]; then
   echo "Hardware requires --enable-hardware-output." >&2; exit 2
 fi
@@ -105,7 +112,7 @@ if [[ -z "$runtime" ]]; then
   fi
 fi
 if [[ "$runtime" == docker && "${EUID}" -ne 0 && ! -w /var/run/docker.sock ]]; then
-  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_LIMIT_MODE,G1_OUTPUT_ON_COMMAND,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
+  exec sudo --preserve-env=HOME,G1_SIM_PYTHON,G1_JOINT_PROFILE,G1_COMMAND_FILE,G1_IMAGE,G1_STANCE_BLEND_SECS,G1_LIMIT_MODE,G1_OUTPUT_ON_COMMAND,G1_RECOVERY_BLEND_SECS,G1_SIM_EXAMPLE,G1_THRASH_MODE,G1_TRIAL_CONFIG,G1_TASK_COMMAND,G1_REQUIRE_BASE_STATE,G1_BASE_STATE_TOPIC,G1_BASE_VELOCITY_FRAME,G1_NVIDIA,G1_RUN_LOG,G1_STARTUP_POLICY,HIM_HOLOSOMA_ONNX,HIM_HOLOSOMA_DIR,HIM_SAFETY_ROS_INSTALL,ROBOT_INTERFACE,ROBOT_DOMAIN,PYTHON,CONTAINER_RUNTIME -- "$0" "${original_args[@]}"
 fi
 if [[ "$stopping" -eq 1 ]]; then
   stop_container
@@ -327,7 +334,7 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" == 1 ]]; then
   # Restart a latched watchdog before any session node subscribes. A checker
   # that hears the old abort republishes it, and the fresh gate latches it too.
   wanted_profile="$(realpath "$profile")"
-  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}" "G1_LIMIT_MODE=${G1_LIMIT_MODE:-stop}" "G1_OUTPUT_ON_COMMAND=${G1_OUTPUT_ON_COMMAND:-false}" "G1_STARTUP_POLICY=$startup_policy" "HIM_HOLOSOMA_DIR=${HIM_HOLOSOMA_DIR:-/home/unitree/holosoma}" ${HIM_HOLOSOMA_ONNX:+"HIM_HOLOSOMA_ONNX=$HIM_HOLOSOMA_ONNX"}
+  safety_systemctl set-environment "HIM_SAFETY_PROFILE=$wanted_profile" "G1_STANCE_BLEND_SECS=${G1_STANCE_BLEND_SECS:-5}" "G1_LIMIT_MODE=${G1_LIMIT_MODE:-stop}" "G1_OUTPUT_ON_COMMAND=${G1_OUTPUT_ON_COMMAND:-false}" "G1_RECOVERY_BLEND_SECS=${G1_RECOVERY_BLEND_SECS:-0}" "G1_STARTUP_POLICY=$startup_policy" "HIM_HOLOSOMA_DIR=${HIM_HOLOSOMA_DIR:-/home/unitree/holosoma}" ${HIM_HOLOSOMA_ONNX:+"HIM_HOLOSOMA_ONNX=$HIM_HOLOSOMA_ONNX"}
   current_gate="$(read_gate_status)"
   needs_reload=0
   latched_reason=""
@@ -347,10 +354,11 @@ same = (
     and gate.get("startup_policy") == sys.argv[3]
     and gate.get("limit_mode", "stop") == sys.argv[4]
     and gate.get("output_on_command", False) == (sys.argv[5].strip().lower() in ("1", "true"))
+    and float(gate.get("recovery_blend_secs", 0.0)) == float(sys.argv[6])
     and not gate.get("abort_reason")
 )
 print("0" if same else "1")
-' "$current_gate" "$wanted_profile" "$startup_policy" "${G1_LIMIT_MODE:-stop}" "${G1_OUTPUT_ON_COMMAND:-false}")"
+' "$current_gate" "$wanted_profile" "$startup_policy" "${G1_LIMIT_MODE:-stop}" "${G1_OUTPUT_ON_COMMAND:-false}" "${G1_RECOVERY_BLEND_SECS:-0}")"
   else
     latched_reason="$(syslog_abort_reason || true)"
     needs_reload=1
@@ -383,8 +391,9 @@ raise SystemExit(0 if (
     and gate.get("launch_gate") is True
     and gate.get("hardware_profile_path") == sys.argv[2]
     and gate.get("output_on_command", False) == (sys.argv[3].strip().lower() in ("1", "true"))
+    and float(gate.get("recovery_blend_secs", 0.0)) == float(sys.argv[4])
 ) else 1)
-' "$current_gate" "$wanted_profile" "${G1_OUTPUT_ON_COMMAND:-false}"; then
+' "$current_gate" "$wanted_profile" "${G1_OUTPUT_ON_COMMAND:-false}" "${G1_RECOVERY_BLEND_SECS:-0}"; then
     echo "Safety service startup gate and profile could not be verified. No policy session started." >&2
     exit 2
   fi
@@ -414,6 +423,7 @@ if [[ "${G1_USE_SAFETY_SERVICE:-}" != 1 ]]; then
     -p "stance_blend_secs:=${G1_STANCE_BLEND_SECS:-5}" \
     -p "limit_mode:=${G1_LIMIT_MODE:-stop}" \
     -p "output_on_command:=${G1_OUTPUT_ON_COMMAND:-false}" \
+    -p "recovery_blend_secs:=${G1_RECOVERY_BLEND_SECS:-0}" \
     -p "sdk_interface:=${ROBOT_INTERFACE:-eth0}" -p "sdk_domain:=${ROBOT_DOMAIN:-0}"
 fi
 stop_container

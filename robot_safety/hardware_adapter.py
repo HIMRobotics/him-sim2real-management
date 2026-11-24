@@ -23,6 +23,7 @@ from .controller import (
 from .feedback import feedback_from_sdk
 from .timing_profile import profiled, scope, timed_lock, timed_wait
 from .hardware_constants import (
+    ARM_INDICES,
     DAMPING_FSM_ID,
     G1_29_JOINT_NAMES,
     SDK_RPC_SEND_CODE,
@@ -73,6 +74,12 @@ COMMAND_STEP_MIN_SECS = 0.75 * HARDWARE_PERIOD_SECS
 # command arrives within one period plus one state poll of policy jitter. Without
 # a running policy (startup, recovery, stops) the timer keeps the 20 ms period.
 COMMAND_FALLBACK_SLACK_SECS = STATE_POLL_SECS
+# Longest accepted recovery_blend_secs. Recovery holds the eased joints near
+# where it found them for this long, so it stays short.
+MAX_RECOVERY_BLEND_SECS = 3.0
+# Joints recovery_blend_secs eases. Legs and waist always take the recovery
+# policy's output at once, since they keep the robot standing.
+RECOVERY_BLEND_INDICES = ARM_INDICES
 # These stops cannot rely on the recovery output worker or explicitly request damping.
 DAMP_ONLY_REASONS = frozenset({
     "controller_double_start", "hardware_controller_double_start", "controller_stop",
@@ -99,16 +106,24 @@ class G1HardwareAdapter:
 
     def __init__(self, profile, clock=time.monotonic, *, whole_body=False,
                  launch_gate=False, stance_blend_secs=5.0, limit_mode="stop",
-                 output_on_command=False):
+                 output_on_command=False, recovery_blend_secs=0.0):
         self.profile = profile
         self.whole_body = whole_body
-        # The default keeps the existing behaviour. output_on_command only
+        # Both options default to the existing behaviour. output_on_command only
         # changes when the single output worker runs a step, never what it checks.
         if not isinstance(output_on_command, bool):
             raise TypeError("output_on_command must be true or false")
         self.output_on_command = output_on_command
         self.output_wake = Event()
         self._command_wakes = 0
+        if (isinstance(recovery_blend_secs, bool)
+                or not isinstance(recovery_blend_secs, (int, float))
+                or not math.isfinite(recovery_blend_secs)
+                or not 0 <= recovery_blend_secs <= MAX_RECOVERY_BLEND_SECS):
+            raise ValueError(
+                f"recovery_blend_secs must be between 0 and {MAX_RECOVERY_BLEND_SECS} seconds")
+        self.recovery_blend_secs = float(recovery_blend_secs)
+        self._recovery_entry = None
         # "clip" keeps the 90% torque-target projection but records torque above
         # the profile ceiling and base spin above the gyro limit as warnings
         # instead of stopping. Every other check still stops.
@@ -1082,10 +1097,12 @@ class G1HardwareAdapter:
             if not self.soft_reset_active:
                 policy.reset()
                 self.soft_reset_active = True
+                self._recovery_entry = (self.clock(), tuple(float(value) for value in feedback.q))
                 self._note_diagnostic({
                     "event": "recovery_enter", "mono_s": time.monotonic(),
                     "automatic": self.automatic_soft_reset,
                     "latched_reason": self.abort_reason,
+                    "recovery_blend_secs": self.recovery_blend_secs,
                 })
             quat, gyro = feedback.quat, feedback.gyro
             infer_started = time.monotonic() if self._diagnostics_enabled() else None
@@ -1119,7 +1136,7 @@ class G1HardwareAdapter:
             )
             with scope(self, "recovery_target_checks"):
                 targets = checked_targets(
-                    {"q": q, "dq": [0.0] * 29, "tau": [0.0] * 29},
+                    {"q": self._recovery_blend(q), "dq": [0.0] * 29, "tau": [0.0] * 29},
                     entries, feedback.q, feedback.dq, initial=False,
                     initial_velocity=self.profile.initial_velocity_tolerance_rad_secs,
                     warnings=self.position_warnings,
@@ -1164,6 +1181,26 @@ class G1HardwareAdapter:
                 self.automatic_soft_reset = False
             self.transport.clear_body()
             self._request_stock_damping()
+
+    def _recovery_blend(self, q):
+        """Ease the arms from where recovery found them onto its output.
+
+        With recovery_blend_secs 0 this returns the policy output unchanged. Legs
+        and waist always take the recovery policy's output at once, since they
+        keep the robot standing. The blend only moves targets; checked_targets
+        still clips them to the joint and torque envelope.
+        """
+        if self.recovery_blend_secs <= 0.0 or self._recovery_entry is None:
+            return q
+        started, pose = self._recovery_entry
+        alpha = min(1.0, max(0.0, (self.clock() - started) / self.recovery_blend_secs))
+        if alpha >= 1.0:
+            return q
+        alpha = alpha * alpha * (3 - 2 * alpha)
+        blended = [float(value) for value in q]
+        for index in RECOVERY_BLEND_INDICES:
+            blended[index] = (1.0 - alpha) * pose[index] + alpha * blended[index]
+        return blended
 
     def _ensure_soft_reset_policy(self):
         """Prime a dedicated Holosoma recovery policy before motor ownership."""

@@ -45,6 +45,7 @@ class HardwareMotorGateNode(MotorGateNode):
         stance_blend_secs = self.declare_parameter("stance_blend_secs", 5.0).value
         limit_mode = self.declare_parameter("limit_mode", "stop").value
         output_on_command = self.declare_parameter("output_on_command", False).value
+        recovery_blend_secs = self.declare_parameter("recovery_blend_secs", 0.0).value
         profile_path = self.declare_parameter("hardware_profile_path", "").value
         interface = self.declare_parameter("sdk_interface", "").value
         domain = self.declare_parameter("sdk_domain", 0).value
@@ -74,6 +75,7 @@ class HardwareMotorGateNode(MotorGateNode):
             launch_gate=_as_bool(launch_gate),
             stance_blend_secs=float(stance_blend_secs), limit_mode=limit_mode,
             output_on_command=_as_bool(output_on_command),
+            recovery_blend_secs=float(recovery_blend_secs),
         )
         self.adapter.transport = UnitreeArmTransport(
             interface, domain, self.adapter.receive_state, self.adapter.receive_battery,
@@ -93,6 +95,11 @@ class HardwareMotorGateNode(MotorGateNode):
         if self.adapter.output_on_command:
             self.get_logger().info(
                 "output_on_command: new policy commands are handed to the adapter on arrival."
+            )
+        if self.adapter.recovery_blend_secs > 0:
+            self.get_logger().info(
+                f"recovery_blend_secs={self.adapter.recovery_blend_secs:g}: recovery eases the "
+                "arms from their pose when recovery starts."
             )
 
     def on_postcheck(self, message):
@@ -310,6 +317,7 @@ class HardwareMotorGateNode(MotorGateNode):
                 "whole_body_output": self.adapter.whole_body,
                 "limit_mode": self.adapter.limit_mode,
                 "output_on_command": self.adapter.output_on_command,
+                "recovery_blend_secs": self.adapter.recovery_blend_secs,
                 "startup_policy": self.adapter.startup_policy_name,
                 "soft_reset_policy": "holosoma",
                 "automatic_soft_reset": self.adapter.automatic_soft_reset,

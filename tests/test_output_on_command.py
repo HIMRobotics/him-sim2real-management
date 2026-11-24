@@ -119,10 +119,13 @@ def test_shutdown_prevents_another_update():
 def test_default_adapter_uses_the_existing_timer_loop():
     adapter = G1HardwareAdapter(hardware.load_profile(hardware.profile_data()))
     assert adapter.output_on_command is False
+    assert adapter.recovery_blend_secs == 0.0
 
 
 @pytest.mark.parametrize('kwargs, error', [
     ({'output_on_command': 'yes'}, TypeError), ({'output_on_command': 1}, TypeError),
+    ({'recovery_blend_secs': -0.1}, ValueError), ({'recovery_blend_secs': 3.5}, ValueError),
+    ({'recovery_blend_secs': float('nan')}, ValueError), ({'recovery_blend_secs': True}, ValueError),
 ])
 def test_invalid_options_are_rejected(kwargs, error):
     with pytest.raises(error):

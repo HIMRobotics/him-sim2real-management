@@ -87,6 +87,17 @@ the same expiry, stall and health checks. A late command can follow such a
 rewrite directly. The gate's own 5 ms cycle, loop watchdog and status are
 unchanged.
 
+`G1_RECOVERY_BLEND_SECS=1` (the `recovery_blend_secs` parameter; default `0`,
+at most 3) is opt-in and softens recovery after a stop in motion. Recovery then
+eases the arms from their measured pose on its first cycle (within one 20 ms
+period of the stop) onto the Holosoma output over that many seconds
+(smoothstep), instead of commanding Holosoma's pose on that first cycle. Legs
+and waist take the recovery output at once. Gains, the 90% torque budget,
+position clipping and every recovery check are unchanged.
+`G1_SIM_RECOVERY_BLEND_SECS` runs the same adapter code in the sim. Hardware
+status reports both settings, and `setup.sh` reloads the safety service when
+either changes.
+
 Double Start always requests damping. Invalid or stale telemetry, unavailable
 recovery, failed motor output, output-worker stalls and service shutdown use
 damping. Recovery also falls back to damping if inference/output fails.

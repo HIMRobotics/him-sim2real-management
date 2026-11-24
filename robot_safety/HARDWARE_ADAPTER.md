@@ -22,7 +22,9 @@ An explicit `--startup holosoma` overrides the startup controller.
 Double F3 uses a separate Holosoma standing policy at zero velocity on all
 29 joints with model gains. It resets inference history from measured state
 and skips the startup crouch ramp. Recovery shares the 20 ms policy clock and
-2 ms command refresh. Double Start still requests stock damping.
+2 ms command refresh. With `recovery_blend_secs` above 0, recovery eases the arms
+from their pose on its first cycle onto its output over that time; legs and waist take
+its output at once. Double Start still requests stock damping.
 
 The startup gate requires at least 2 seconds of Balance and a continuous 1-second window with tilt at most 0.15 rad, gyro norm
 at most 0.25 rad/s, and every joint speed at most 0.6 rad/s. Samples must be finite
